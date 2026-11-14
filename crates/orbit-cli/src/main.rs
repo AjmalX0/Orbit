@@ -33,11 +33,24 @@ struct Remote {
     /// Bearer token for the runtime API.
     #[arg(long, env = "ORBIT_TOKEN", global = true, hide_env_values = true)]
     token: Option<String>,
+    /// Extra PEM CA certificate to trust (for a runtime with a private certificate).
+    #[arg(long, env = "ORBIT_CA_CERT", global = true)]
+    ca_cert: Option<PathBuf>,
 }
 
 impl Remote {
     fn client(&self) -> Client {
-        Client::new(&self.server, self.token.clone().filter(|t| !t.is_empty()))
+        let ca = self.ca_cert.as_ref().map(|p| {
+            std::fs::read(p).unwrap_or_else(|e| {
+                eprintln!("error: cannot read CA certificate {}: {e}", p.display());
+                std::process::exit(2)
+            })
+        });
+        Client::new(
+            &self.server,
+            self.token.clone().filter(|t| !t.is_empty()),
+            ca,
+        )
     }
 }
 
@@ -184,6 +197,16 @@ struct ServerArgs {
     /// Allow binding to a non-loopback address without a token.
     #[arg(long)]
     insecure: bool,
+    /// Second credential that may only use the worker protocol (`/v1/workers/*`, `/v1/tasks/*`).
+    /// Give this to worker hosts instead of the admin token.
+    #[arg(long, env = "ORBIT_WORKER_TOKEN", hide_env_values = true)]
+    worker_token: Option<String>,
+    /// PEM certificate chain; with --tls-key, serve HTTPS.
+    #[arg(long, env = "ORBIT_TLS_CERT", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// PEM private key for --tls-cert.
+    #[arg(long, env = "ORBIT_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
     /// Execute `orbit.http.request` steps inside the runtime.
     #[arg(long)]
     enable_http_adapter: bool,
@@ -589,6 +612,16 @@ fn deploy(client: &Client, wf: &WorkflowIr, tty: bool) -> Result<(), String> {
 fn server(mut args: ServerArgs) -> Res {
     // An empty token (e.g. `ORBIT_TOKEN=`) must not count as authentication.
     args.token = args.token.filter(|t| !t.trim().is_empty());
+    args.worker_token = args.worker_token.filter(|t| !t.trim().is_empty());
+    if args.worker_token.is_some() && args.token.is_none() {
+        return Err(
+            "--worker-token requires --token: without an admin token every endpoint would be open"
+                .into(),
+        );
+    }
+    if args.worker_token.is_some() && args.worker_token == args.token {
+        return Err("--worker-token must differ from --token".into());
+    }
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_env("ORBIT_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     if args.log_format == "json" {
@@ -630,6 +663,11 @@ fn server(mut args: ServerArgs) -> Res {
             orbit_runtime::server::ServerConfig {
                 addr: args.addr,
                 auth_token: args.token,
+                worker_token: args.worker_token,
+                tls: args
+                    .tls_cert
+                    .zip(args.tls_key)
+                    .map(|(cert, key)| orbit_runtime::server::TlsConfig { cert, key }),
                 body_limit: args.max_body,
                 tick_interval: std::time::Duration::from_millis(100),
             },

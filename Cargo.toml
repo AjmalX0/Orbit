@@ -6,6 +6,7 @@ members = [
     "crates/orbit-compiler",
     "crates/orbit-runtime",
     "crates/orbit-cli",
+    "crates/orbit-worker",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 rusqlite = { version = "0.42", features = ["bundled"] }
 axum = "0.8"
+axum-server = { version = "0.9", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
 ureq = { version = "3", features = ["json"] }

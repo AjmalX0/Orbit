@@ -152,6 +152,17 @@ repeated start returns the existing execution instead of creating a duplicate.
 
 * `--token` (or `ORBIT_TOKEN`) requires `Authorization: Bearer <token>` on every
   endpoint except `/v1/health`. The comparison is constant-time.
+* `--worker-token` (or `ORBIT_WORKER_TOKEN`) adds a second, restricted
+  credential for worker hosts. It can only call `/v1/workers/*` and
+  `/v1/tasks/*`; anything else returns `403 FORBIDDEN`. A compromised worker
+  host therefore cannot start, cancel or read executions. It requires
+  `--token` and must differ from it. The SDKs prefer `ORBIT_WORKER_TOKEN` over
+  `ORBIT_TOKEN`.
+* `--tls-cert cert.pem --tls-key key.pem` serves HTTPS directly (rustls, TLS
+  1.2+). Clients trust a private CA with `--ca-cert` / `ORBIT_CA_CERT` (CLI,
+  Python, Go, Rust) or `NODE_EXTRA_CA_CERTS` (Node.js). The CA certificate
+  must be a real CA certificate (`basicConstraints=CA:TRUE`, `keyCertSign`),
+  not the server certificate itself.
 * The server refuses to bind a non-loopback address without a token, unless you
   pass `--insecure`.
 * Request bodies are capped (`--max-body`, 4 MiB by default). Execution input is
@@ -165,8 +176,9 @@ repeated start returns the existing execution instead of creating a duplicate.
   tokens are ignored, and workers cannot touch workflow state except through
   results for tokens issued to them.
 
-Not yet implemented (see the roadmap): TLS termination (put a reverse proxy in
-front for now), per-worker credentials, and capability-based permissions.
+Not yet implemented (see the roadmap): individual per-worker identities (today
+all workers share the restricted worker credential), mutual TLS, and
+capability-based permissions.
 
 ## Observability
 

@@ -2,6 +2,7 @@
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 from typing import Any, Optional, Tuple
@@ -24,10 +25,19 @@ class ApiError(Exception):
 
 
 class Client:
-    def __init__(self, server: Optional[str] = None, token: Optional[str] = None, timeout: float = 70.0):
+    def __init__(
+        self,
+        server: Optional[str] = None,
+        token: Optional[str] = None,
+        timeout: float = 70.0,
+        ca_cert: Optional[str] = None,
+    ):
         self.server = (server or os.environ.get("ORBIT_SERVER") or DEFAULT_SERVER).rstrip("/")
-        self.token = token if token is not None else os.environ.get("ORBIT_TOKEN")
+        # Workers should be given the restricted worker credential when the runtime has one.
+        self.token = token if token is not None else (os.environ.get("ORBIT_WORKER_TOKEN") or os.environ.get("ORBIT_TOKEN"))
         self.timeout = timeout
+        ca = ca_cert or os.environ.get("ORBIT_CA_CERT")
+        self._ssl = ssl.create_default_context(cafile=ca) if ca else None
 
     def request(self, method: str, path: str, body: Any = None) -> Tuple[int, Any]:
         data = None if body is None else json.dumps(body).encode()
@@ -37,7 +47,7 @@ class Client:
         if self.token:
             req.add_header("authorization", f"Bearer {self.token}")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl) as resp:
                 raw = resp.read()
                 return resp.status, (json.loads(raw) if raw else None)
         except urllib.error.HTTPError as e:
