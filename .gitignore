@@ -1,0 +1,10 @@
+/target
+/build
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+node_modules/
+sdks/typescript/dist/
+.orbit/

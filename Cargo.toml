@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/orbit-syntax",
+    "crates/orbit-ir",
+    "crates/orbit-compiler",
+    "crates/orbit-runtime",
+    "crates/orbit-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/AjmalX0/Orbit"
+
+[workspace.dependencies]
+orbit-syntax = { path = "crates/orbit-syntax" }
+orbit-ir = { path = "crates/orbit-ir" }
+orbit-compiler = { path = "crates/orbit-compiler" }
+orbit-runtime = { path = "crates/orbit-runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+rusqlite = { version = "0.42", features = ["bundled"] }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "3", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

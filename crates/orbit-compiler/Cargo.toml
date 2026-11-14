@@ -1,0 +1,11 @@
+[package]
+name = "orbit-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ORBIT compiler: semantic analysis, type checking and IR generation"
+
+[dependencies]
+orbit-syntax.workspace = true
+orbit-ir.workspace = true
+serde_json.workspace = true
