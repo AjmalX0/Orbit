@@ -75,7 +75,9 @@ pub struct StepIr {
 pub enum Action {
     Task(Invocation),
     /// Durable timer handled by the runtime.
-    Sleep { duration_ms: u64 },
+    Sleep {
+        duration_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,7 +120,13 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        RetryPolicy { max_attempts: 1, backoff: Backoff::Fixed, initial_delay_ms: 1000, max_delay_ms: 60_000, non_retryable: vec![] }
+        RetryPolicy {
+            max_attempts: 1,
+            backoff: Backoff::Fixed,
+            initial_delay_ms: 1000,
+            max_delay_ms: 60_000,
+            non_retryable: vec![],
+        }
     }
 }
 
@@ -126,10 +134,14 @@ impl RetryPolicy {
     /// Delay before attempt `next_attempt` (2 = first retry).
     pub fn delay_before(&self, next_attempt: u32) -> u64 {
         match self.backoff {
-            Backoff::Fixed => self.initial_delay_ms.min(self.max_delay_ms.max(self.initial_delay_ms)),
+            Backoff::Fixed => self
+                .initial_delay_ms
+                .min(self.max_delay_ms.max(self.initial_delay_ms)),
             Backoff::Exponential => {
                 let exp = next_attempt.saturating_sub(2).min(40);
-                self.initial_delay_ms.saturating_mul(1u64 << exp).min(self.max_delay_ms)
+                self.initial_delay_ms
+                    .saturating_mul(1u64 << exp)
+                    .min(self.max_delay_ms)
             }
         }
     }
@@ -179,13 +191,19 @@ impl WorkflowIr {
     pub fn from_json(text: &str) -> Result<WorkflowIr, IrError> {
         // Check the version before attempting a full parse so that future IR
         // versions produce a clear error instead of a confusing schema error.
-        let raw: serde_json::Value = serde_json::from_str(text).map_err(|e| IrError(format!("invalid IR JSON: {e}")))?;
+        let raw: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| IrError(format!("invalid IR JSON: {e}")))?;
         match raw.get("ir_version").and_then(|v| v.as_str()) {
             Some(IR_VERSION) => {}
-            Some(other) => return Err(IrError(format!("unsupported IR version `{other}`; this runtime supports `{IR_VERSION}`"))),
+            Some(other) => {
+                return Err(IrError(format!(
+                    "unsupported IR version `{other}`; this runtime supports `{IR_VERSION}`"
+                )))
+            }
             None => return Err(IrError("missing `ir_version`".into())),
         }
-        let ir: WorkflowIr = serde_json::from_value(raw).map_err(|e| IrError(format!("malformed IR: {e}")))?;
+        let ir: WorkflowIr =
+            serde_json::from_value(raw).map_err(|e| IrError(format!("malformed IR: {e}")))?;
         ir.validate()?;
         Ok(ir)
     }
@@ -217,7 +235,10 @@ impl WorkflowIr {
                 }
                 // Steps are in topological order, so dependencies must already be seen.
                 if !seen.contains(d.as_str()) {
-                    return e(format!("dependency graph is cyclic or not topologically ordered at `{}` -> `{d}`", s.id));
+                    return e(format!(
+                        "dependency graph is cyclic or not topologically ordered at `{}` -> `{d}`",
+                        s.id
+                    ));
                 }
             }
             let mut refs = vec![];
@@ -233,25 +254,41 @@ impl WorkflowIr {
             let ancestors = self.ancestors(&s.id);
             for r in &refs {
                 if !ancestors.contains(r.as_str()) {
-                    return e(format!("step `{}` reads `{r}` which is not one of its dependencies", s.id));
+                    return e(format!(
+                        "step `{}` reads `{r}` which is not one of its dependencies",
+                        s.id
+                    ));
                 }
             }
             for inv in s.invocation().into_iter().chain(s.compensation.as_ref()) {
                 match self.contracts.get(&inv.task) {
-                    None => return e(format!("step `{}` uses task `{}` with no contract", s.id, inv.task)),
+                    None => {
+                        return e(format!(
+                            "step `{}` uses task `{}` with no contract",
+                            s.id, inv.task
+                        ))
+                    }
                     Some(c) if c.version != inv.contract_version => {
-                        return e(format!("step `{}` expects {}@{} but contract is {}", s.id, inv.task, inv.contract_version, c.version))
+                        return e(format!(
+                            "step `{}` expects {}@{} but contract is {}",
+                            s.id, inv.task, inv.contract_version, c.version
+                        ))
                     }
                     _ => {}
                 }
                 if inv.retry.max_attempts == 0 {
-                    return e(format!("step `{}`: retry attempts must be at least 1", s.id));
+                    return e(format!(
+                        "step `{}`: retry attempts must be at least 1",
+                        s.id
+                    ));
                 }
             }
             seen.insert(s.id.as_str());
         }
         if !self.definition_hash.is_empty() && self.definition_hash != self.compute_hash() {
-            return e("definition_hash does not match the IR content (was the file modified?)".into());
+            return e(
+                "definition_hash does not match the IR content (was the file modified?)".into(),
+            );
         }
         Ok(())
     }
@@ -260,7 +297,10 @@ impl WorkflowIr {
     pub fn ancestors(&self, id: &str) -> HashSet<&str> {
         let by_id: HashMap<&str, &StepIr> = self.steps.iter().map(|s| (s.id.as_str(), s)).collect();
         let mut out = HashSet::new();
-        let mut stack: Vec<&str> = by_id.get(id).map(|s| s.dependencies.iter().map(String::as_str).collect()).unwrap_or_default();
+        let mut stack: Vec<&str> = by_id
+            .get(id)
+            .map(|s| s.dependencies.iter().map(String::as_str).collect())
+            .unwrap_or_default();
         while let Some(n) = stack.pop() {
             if out.insert(n) {
                 if let Some(s) = by_id.get(n) {

@@ -1,1 +1,642 @@
-fn main(){}
+//! `orbit` — compiler driver, runtime server and runtime client.
+
+mod client;
+mod scaffold;
+mod view;
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use client::Client;
+use orbit_compiler::{compile_files, Compilation};
+use orbit_ir::WorkflowIr;
+use serde_json::{json, Value};
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+#[derive(Parser)]
+#[command(name = "orbit", version, about = "ORBIT — polyglot orchestration language", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Args, Clone)]
+struct Remote {
+    /// Runtime API address.
+    #[arg(
+        long,
+        env = "ORBIT_SERVER",
+        default_value = "http://127.0.0.1:7233",
+        global = true
+    )]
+    server: String,
+    /// Bearer token for the runtime API.
+    #[arg(long, env = "ORBIT_TOKEN", global = true, hide_env_values = true)]
+    token: Option<String>,
+}
+
+impl Remote {
+    fn client(&self) -> Client {
+        Client::new(&self.server, self.token.clone().filter(|t| !t.is_empty()))
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum, PartialEq)]
+enum DiagFormat {
+    Human,
+    Json,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GraphFormat {
+    Mermaid,
+    Dot,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Create a new ORBIT project with an example workflow and workers.
+    Init { name: PathBuf },
+    /// Type-check workflow files without producing output.
+    Check {
+        files: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value = "human")]
+        format: DiagFormat,
+    },
+    /// Check workflow files, and validate compiled IR (.json) files.
+    Validate { files: Vec<PathBuf> },
+    /// Compile workflow files to orbit-ir/1 JSON.
+    Compile {
+        files: Vec<PathBuf>,
+        /// Output directory.
+        #[arg(short, long, default_value = "build")]
+        out_dir: PathBuf,
+        /// Print the IR to stdout instead of writing files.
+        #[arg(long)]
+        stdout: bool,
+    },
+    /// Render a workflow's step graph (Mermaid or Graphviz).
+    Graph {
+        file: PathBuf,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, value_enum, default_value = "mermaid")]
+        format: GraphFormat,
+    },
+    /// Run the ORBIT runtime server.
+    Server(ServerArgs),
+    /// Compile and register workflow definitions with the runtime.
+    Deploy {
+        files: Vec<PathBuf>,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Deploy (if given a file) and start a workflow, then follow it to completion.
+    Run {
+        /// A `.orbit` file, compiled IR `.json`, or the name of a registered workflow.
+        target: String,
+        /// Workflow to run when the file defines several.
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        version: Option<String>,
+        /// Workflow input as JSON.
+        #[arg(short, long)]
+        input: Option<String>,
+        /// Read the workflow input from a JSON file.
+        #[arg(long)]
+        input_file: Option<PathBuf>,
+        /// Client-chosen execution id; starting the same id twice is a no-op.
+        #[arg(long)]
+        id: Option<String>,
+        /// Return immediately after starting.
+        #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Show an execution's status and steps.
+    Status {
+        execution_id: String,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Inspect a compiled IR file, or an execution's full state.
+    Inspect {
+        target: String,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Show an execution's event history as a timeline.
+    Logs {
+        execution_id: String,
+        /// Print raw JSON events (with sensitive fields redacted).
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Request cancellation of an execution (runs compensations).
+    Cancel {
+        execution_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// List recent executions.
+    Ps {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Worker commands.
+    Workers {
+        #[command(subcommand)]
+        command: WorkersCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkersCommand {
+    /// List registered workers.
+    List {
+        #[command(flatten)]
+        remote: Remote,
+    },
+}
+
+#[derive(Args)]
+struct ServerArgs {
+    /// SQLite database file holding definitions and execution history.
+    #[arg(long, env = "ORBIT_DB", default_value = "orbit.db")]
+    db: PathBuf,
+    #[arg(long, env = "ORBIT_ADDR", default_value = "127.0.0.1:7233")]
+    addr: std::net::SocketAddr,
+    /// Require this bearer token on every API call (except /v1/health).
+    #[arg(long, env = "ORBIT_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+    /// Allow binding to a non-loopback address without a token.
+    #[arg(long)]
+    insecure: bool,
+    /// Execute `orbit.http.request` steps inside the runtime.
+    #[arg(long)]
+    enable_http_adapter: bool,
+    /// Seconds without contact after which a worker is considered lost.
+    #[arg(long, default_value_t = 30)]
+    session_timeout: u64,
+    /// Maximum request body size in bytes.
+    #[arg(long, default_value_t = 4 * 1024 * 1024)]
+    max_body: usize,
+    /// Log format.
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    log_format: String,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match run(cli.command) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!(
+                "{} {e}",
+                view::paint("error:", view::RED, std::io::stderr().is_terminal())
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+type Res = Result<ExitCode, String>;
+
+fn color_err() -> bool {
+    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Compile and print diagnostics; `None` when compilation failed.
+fn compile(files: &[PathBuf], format: DiagFormat) -> Result<Compilation, String> {
+    if files.is_empty() {
+        return Err("no input files (expected one or more .orbit files)".into());
+    }
+    let c = compile_files(files);
+    match format {
+        DiagFormat::Json => {
+            let diags: Vec<_> = c
+                .diagnostics
+                .iter()
+                .map(|d| d.to_json(&c.sources))
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "diagnostics": diags })).unwrap()
+            );
+        }
+        DiagFormat::Human => {
+            if !c.diagnostics.is_empty() {
+                eprintln!("{}", c.render_diagnostics(color_err()));
+            }
+        }
+    }
+    Ok(c)
+}
+
+fn summarize_errors(c: &Compilation) -> String {
+    let errors = c.diagnostics.iter().filter(|d| d.is_error()).count();
+    let warnings = c.diagnostics.len() - errors;
+    format!("compilation failed: {errors} error(s), {warnings} warning(s)")
+}
+
+fn load_ir(path: &Path) -> Result<WorkflowIr, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    WorkflowIr::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn workflows_from(target: &Path) -> Result<Vec<WorkflowIr>, String> {
+    if target.extension().is_some_and(|e| e == "json") {
+        return Ok(vec![load_ir(target)?]);
+    }
+    let c = compile(&[target.to_path_buf()], DiagFormat::Human)?;
+    if c.has_errors() {
+        return Err(summarize_errors(&c));
+    }
+    Ok(c.workflows)
+}
+
+fn run(cmd: Command) -> Res {
+    let tty = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    match cmd {
+        Command::Init { name } => scaffold::init(&name).map(|_| ExitCode::SUCCESS),
+        Command::Check { files, format } => {
+            let c = compile(&files, format)?;
+            if c.has_errors() {
+                if format == DiagFormat::Human {
+                    return Err(summarize_errors(&c));
+                }
+                return Ok(ExitCode::from(1));
+            }
+            if format == DiagFormat::Human {
+                for wf in &c.workflows {
+                    println!(
+                        "{} {}@{} ({} steps)",
+                        view::paint("ok", view::GREEN, tty),
+                        wf.name,
+                        wf.version,
+                        wf.steps.len()
+                    );
+                }
+                if c.workflows.is_empty() {
+                    println!(
+                        "{} no workflows (contracts only)",
+                        view::paint("ok", view::GREEN, tty)
+                    );
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Validate { files } => {
+            let (ir_files, sources): (Vec<_>, Vec<_>) = files
+                .into_iter()
+                .partition(|f| f.extension().is_some_and(|e| e == "json"));
+            for f in &ir_files {
+                let ir = load_ir(f)?;
+                println!(
+                    "{} {} is valid {} ({}@{}, {})",
+                    view::paint("ok", view::GREEN, tty),
+                    f.display(),
+                    ir.ir_version,
+                    ir.name,
+                    ir.version,
+                    ir.definition_hash
+                );
+            }
+            if !sources.is_empty() {
+                return run(Command::Check {
+                    files: sources,
+                    format: DiagFormat::Human,
+                });
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Compile {
+            files,
+            out_dir,
+            stdout,
+        } => {
+            let c = compile(&files, DiagFormat::Human)?;
+            if c.has_errors() {
+                return Err(summarize_errors(&c));
+            }
+            if c.workflows.is_empty() {
+                return Err("nothing to compile: no workflow declarations found".into());
+            }
+            for (wf, file) in c.workflows.iter().zip(&c.workflow_files) {
+                let text = serde_json::to_string_pretty(wf).unwrap() + "\n";
+                if stdout {
+                    print!("{text}");
+                    continue;
+                }
+                let stem = Path::new(&c.sources.file(*file).name)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let count = c.workflow_files.iter().filter(|f| *f == file).count();
+                let name = if count > 1 {
+                    format!("{stem}.{}.orbit.json", wf.name)
+                } else {
+                    format!("{stem}.orbit.json")
+                };
+                std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+                let path = out_dir.join(name);
+                std::fs::write(&path, text)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                eprintln!(
+                    "{} {}@{} -> {}",
+                    view::paint("compiled", view::GREEN, color_err()),
+                    wf.name,
+                    wf.version,
+                    path.display()
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Graph {
+            file,
+            workflow,
+            format,
+        } => {
+            let wfs = workflows_from(&file)?;
+            let wf = pick(&wfs, workflow.as_deref())?;
+            print!(
+                "{}",
+                match format {
+                    GraphFormat::Mermaid => view::mermaid(wf),
+                    GraphFormat::Dot => view::dot(wf),
+                }
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Server(args) => server(args),
+        Command::Deploy { files, remote } => {
+            let client = remote.client();
+            for f in files {
+                for wf in workflows_from(&f)? {
+                    deploy(&client, &wf, tty)?;
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Run {
+            target,
+            workflow,
+            version,
+            input,
+            input_file,
+            id,
+            no_wait,
+            remote,
+        } => {
+            let client = remote.client();
+            let (name, version) = if target.ends_with(".orbit") || target.ends_with(".json") {
+                let wfs = workflows_from(Path::new(&target))?;
+                let wf = pick(&wfs, workflow.as_deref())?;
+                deploy(&client, wf, tty)?;
+                (wf.name.clone(), Some(wf.version.clone()))
+            } else {
+                (target, version)
+            };
+            let input: Value = match (input, input_file) {
+                (Some(s), _) => serde_json::from_str(&s)
+                    .map_err(|e| format!("--input is not valid JSON: {e}"))?,
+                (None, Some(p)) => {
+                    let text = std::fs::read_to_string(&p)
+                        .map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+                    serde_json::from_str(&text)
+                        .map_err(|e| format!("{} is not valid JSON: {e}", p.display()))?
+                }
+                (None, None) => json!({}),
+            };
+            let (_, started) = client
+                .post("/v1/executions", &json!({ "workflow": name, "version": version, "input": input, "execution_id": id }))
+                .map_err(|e| e.to_string())?;
+            let exec_id = started["execution_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let verb = if started["created"].as_bool() == Some(false) {
+                "attached to existing"
+            } else {
+                "started"
+            };
+            eprintln!(
+                "{} execution {}",
+                view::paint(verb, view::CYAN, color_err()),
+                exec_id
+            );
+            if no_wait {
+                println!("{exec_id}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            view::follow(&client, &exec_id, tty)
+        }
+        Command::Status {
+            execution_id,
+            remote,
+        } => {
+            let s = remote
+                .client()
+                .get(&format!("/v1/executions/{execution_id}"))
+                .map_err(|e| e.to_string())?;
+            print!("{}", view::status(&s, tty));
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Inspect { target, remote } => {
+            let p = Path::new(&target);
+            if p.exists() {
+                let ir = if target.ends_with(".json") {
+                    load_ir(p)?
+                } else {
+                    pick(&workflows_from(p)?, None)?.clone()
+                };
+                print!("{}", view::ir_summary(&ir, tty));
+            } else {
+                let s = remote
+                    .client()
+                    .get(&format!("/v1/executions/{target}"))
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&view::redact(s)).unwrap()
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Logs {
+            execution_id,
+            json,
+            remote,
+        } => {
+            let h = remote
+                .client()
+                .get(&format!("/v1/executions/{execution_id}/history"))
+                .map_err(|e| e.to_string())?;
+            if json {
+                for e in h["events"].as_array().cloned().unwrap_or_default() {
+                    println!("{}", serde_json::to_string(&view::redact(e)).unwrap());
+                }
+            } else {
+                print!("{}", view::timeline(&h, tty));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Cancel {
+            execution_id,
+            reason,
+            remote,
+        } => {
+            let (_, s) = remote
+                .client()
+                .post(
+                    &format!("/v1/executions/{execution_id}/cancel"),
+                    &json!({ "reason": reason }),
+                )
+                .map_err(|e| e.to_string())?;
+            println!(
+                "cancellation requested; execution is {}",
+                s["status"].as_str().unwrap_or("?")
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Ps {
+            status,
+            workflow,
+            limit,
+            remote,
+        } => {
+            let mut q = format!("/v1/executions?limit={limit}");
+            if let Some(s) = status {
+                q.push_str(&format!("&status={s}"));
+            }
+            if let Some(w) = workflow {
+                q.push_str(&format!("&workflow={w}"));
+            }
+            let r = remote.client().get(&q).map_err(|e| e.to_string())?;
+            print!("{}", view::executions(&r, tty));
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Workers {
+            command: WorkersCommand::List { remote },
+        } => {
+            let r = remote
+                .client()
+                .get("/v1/workers")
+                .map_err(|e| e.to_string())?;
+            print!("{}", view::workers(&r, tty));
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn pick<'a>(wfs: &'a [WorkflowIr], name: Option<&str>) -> Result<&'a WorkflowIr, String> {
+    match name {
+        Some(n) => wfs.iter().find(|w| w.name == n).ok_or_else(|| {
+            format!(
+                "no workflow `{n}`; available: {}",
+                wfs.iter()
+                    .map(|w| w.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }),
+        None => match wfs {
+            [one] => Ok(one),
+            [] => Err("the file defines no workflows".into()),
+            many => Err(format!(
+                "the file defines several workflows; choose one with --workflow ({})",
+                many.iter()
+                    .map(|w| w.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        },
+    }
+}
+
+fn deploy(client: &Client, wf: &WorkflowIr, tty: bool) -> Result<(), String> {
+    let (status, _) = client
+        .post_raw("/v1/workflows", serde_json::to_string(wf).unwrap())
+        .map_err(|e| e.to_string())?;
+    let verb = if status == 201 {
+        "deployed"
+    } else {
+        "up to date"
+    };
+    eprintln!(
+        "{} {}@{} ({})",
+        view::paint(verb, view::GREEN, color_err() && tty),
+        wf.name,
+        wf.version,
+        &wf.definition_hash[..19.min(wf.definition_hash.len())]
+    );
+    Ok(())
+}
+
+fn server(mut args: ServerArgs) -> Res {
+    // An empty token (e.g. `ORBIT_TOKEN=`) must not count as authentication.
+    args.token = args.token.filter(|t| !t.trim().is_empty());
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_env("ORBIT_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    if args.log_format == "json" {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    if !args.addr.ip().is_loopback() && args.token.is_none() && !args.insecure {
+        return Err(format!(
+            "refusing to listen on {} without authentication; pass --token (or ORBIT_TOKEN), or --insecure for trusted networks",
+            args.addr
+        ));
+    }
+    let store = orbit_runtime::Store::open(&args.db)
+        .map_err(|e| format!("cannot open database {}: {e}", args.db.display()))?;
+    let config = orbit_runtime::EngineConfig {
+        session_timeout_ms: args.session_timeout.max(1) * 1000,
+        heartbeat_interval_ms: (args.session_timeout.max(1) * 1000 / 6).max(500),
+        http_adapter: args.enable_http_adapter,
+    };
+    let engine = orbit_runtime::Engine::open(store, config, orbit_runtime::engine::system_clock())
+        .map_err(|e| e.to_string())?;
+    tracing::info!(db = %args.db.display(), http_adapter = args.enable_http_adapter, auth = args.token.is_some(), "starting ORBIT runtime");
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    rt.block_on(async move {
+        let shutdown = async {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutting down");
+        };
+        orbit_runtime::server::serve(
+            engine,
+            orbit_runtime::server::ServerConfig {
+                addr: args.addr,
+                auth_token: args.token,
+                body_limit: args.max_body,
+                tick_interval: std::time::Duration::from_millis(100),
+            },
+            shutdown,
+        )
+        .await
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}

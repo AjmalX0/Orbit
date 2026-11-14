@@ -36,8 +36,13 @@ impl From<EngineError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = StatusCode::from_u16(self.0.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(json!({ "error": { "code": self.0.code, "message": self.0.message } }))).into_response()
+        let status =
+            StatusCode::from_u16(self.0.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (
+            status,
+            Json(json!({ "error": { "code": self.0.code, "message": self.0.message } })),
+        )
+            .into_response()
     }
 }
 
@@ -85,12 +90,18 @@ async fn auth(State(state): State<Shared>, req: Request, next: Next) -> Response
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .is_some_and(|t| constant_time_eq(t.as_bytes(), expected.as_bytes()));
             if !ok {
-                return ApiError(EngineError::new(401, "UNAUTHENTICATED", "missing or invalid bearer token")).into_response();
+                return ApiError(EngineError::new(
+                    401,
+                    "UNAUTHENTICATED",
+                    "missing or invalid bearer token",
+                ))
+                .into_response();
             }
         }
     }
     let mut resp = next.run(req).await;
-    resp.headers_mut().insert("x-orbit-api-version", HeaderValue::from_static(API_VERSION));
+    resp.headers_mut()
+        .insert("x-orbit-api-version", HeaderValue::from_static(API_VERSION));
     resp
 }
 
@@ -114,15 +125,27 @@ async fn metrics(State(state): State<Shared>) -> Response {
     let e = engine(&state);
     let body = e.metrics.render(e.active_count(), e.session_count());
     let mut headers = HeaderMap::new();
-    headers.insert("content-type", HeaderValue::from_static("text/plain; version=0.0.4"));
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
     (headers, body).into_response()
 }
 
 async fn register_workflow(State(state): State<Shared>, body: String) -> ApiResult<Response> {
-    let ir = orbit_ir::WorkflowIr::from_json(&body).map_err(|e| ApiError(EngineError::new(400, "INVALID_IR", e.0)))?;
-    let (name, version, hash) = (ir.name.clone(), ir.version.clone(), ir.definition_hash.clone());
+    let ir = orbit_ir::WorkflowIr::from_json(&body)
+        .map_err(|e| ApiError(EngineError::new(400, "INVALID_IR", e.0)))?;
+    let (name, version, hash) = (
+        ir.name.clone(),
+        ir.version.clone(),
+        ir.definition_hash.clone(),
+    );
     let created = engine(&state).register_definition(ir)?;
-    let status = if created { StatusCode::CREATED } else { StatusCode::OK };
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
     Ok((status, Json(json!({ "name": name, "version": version, "definition_hash": hash, "created": created }))).into_response())
 }
 
@@ -142,13 +165,33 @@ async fn list_workflows(State(state): State<Shared>) -> Json<Value> {
     Json(json!({ "workflows": defs.iter().map(|d| summary(d)).collect::<Vec<_>>() }))
 }
 
-async fn get_workflow(State(state): State<Shared>, Path((name, version)): Path<(String, String)>) -> ApiResult<Json<Value>> {
-    let d = engine(&state).definition(&name, Some(&version)).ok_or_else(|| ApiError(EngineError::new(404, "WORKFLOW_NOT_FOUND", "workflow not found")))?;
+async fn get_workflow(
+    State(state): State<Shared>,
+    Path((name, version)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let d = engine(&state)
+        .definition(&name, Some(&version))
+        .ok_or_else(|| {
+            ApiError(EngineError::new(
+                404,
+                "WORKFLOW_NOT_FOUND",
+                "workflow not found",
+            ))
+        })?;
     Ok(Json(serde_json::to_value(&*d).unwrap_or_default()))
 }
 
-async fn get_workflow_latest(State(state): State<Shared>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
-    let d = engine(&state).definition(&name, None).ok_or_else(|| ApiError(EngineError::new(404, "WORKFLOW_NOT_FOUND", "workflow not found")))?;
+async fn get_workflow_latest(
+    State(state): State<Shared>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let d = engine(&state).definition(&name, None).ok_or_else(|| {
+        ApiError(EngineError::new(
+            404,
+            "WORKFLOW_NOT_FOUND",
+            "workflow not found",
+        ))
+    })?;
     Ok(Json(serde_json::to_value(&*d).unwrap_or_default()))
 }
 
@@ -163,9 +206,21 @@ struct StartRequest {
     execution_id: Option<String>,
 }
 
-async fn start_execution(State(state): State<Shared>, Json(req): Json<StartRequest>) -> ApiResult<Response> {
-    let r = engine(&state).start(&req.workflow, req.version.as_deref(), req.input, req.execution_id)?;
-    let status = if r.created { StatusCode::CREATED } else { StatusCode::OK };
+async fn start_execution(
+    State(state): State<Shared>,
+    Json(req): Json<StartRequest>,
+) -> ApiResult<Response> {
+    let r = engine(&state).start(
+        &req.workflow,
+        req.version.as_deref(),
+        req.input,
+        req.execution_id,
+    )?;
+    let status = if r.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
     Ok((status, Json(serde_json::to_value(r).unwrap_or_default())).into_response())
 }
 
@@ -176,17 +231,30 @@ struct ListQuery {
     limit: Option<u32>,
 }
 
-async fn list_executions(State(state): State<Shared>, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
-    let list = engine(&state).list_executions(q.status.as_deref().map(str::to_uppercase).as_deref(), q.workflow.as_deref(), q.limit.unwrap_or(50))?;
+async fn list_executions(
+    State(state): State<Shared>,
+    Query(q): Query<ListQuery>,
+) -> ApiResult<Json<Value>> {
+    let list = engine(&state).list_executions(
+        q.status.as_deref().map(str::to_uppercase).as_deref(),
+        q.workflow.as_deref(),
+        q.limit.unwrap_or(50),
+    )?;
     Ok(Json(json!({ "executions": list })))
 }
 
-async fn get_execution(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn get_execution(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
     let s = engine(&state).execution(&id)?;
     Ok(Json(serde_json::to_value(s).unwrap_or_default()))
 }
 
-async fn get_history(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn get_history(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
     let h = engine(&state).history(&id)?;
     Ok(Json(json!({ "execution_id": id, "events": h })))
 }
@@ -197,8 +265,14 @@ struct CancelRequest {
     reason: Option<String>,
 }
 
-async fn cancel_execution(State(state): State<Shared>, Path(id): Path<String>, body: Option<Json<CancelRequest>>) -> ApiResult<Json<Value>> {
-    let reason = body.and_then(|b| b.0.reason).unwrap_or_else(|| "requested via API".into());
+async fn cancel_execution(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    body: Option<Json<CancelRequest>>,
+) -> ApiResult<Json<Value>> {
+    let reason = body
+        .and_then(|b| b.0.reason)
+        .unwrap_or_else(|| "requested via API".into());
     let s = engine(&state).cancel(&id, &reason)?;
     Ok(Json(serde_json::to_value(s).unwrap_or_default()))
 }
@@ -209,8 +283,13 @@ struct WaitQuery {
 }
 
 /// Long-poll until the execution reaches a terminal status (or the timeout).
-async fn wait_execution(State(state): State<Shared>, Path(id): Path<String>, Query(q): Query<WaitQuery>) -> ApiResult<Json<Value>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(q.timeout_ms.unwrap_or(30_000).min(300_000));
+async fn wait_execution(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<WaitQuery>,
+) -> ApiResult<Json<Value>> {
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(q.timeout_ms.unwrap_or(30_000).min(300_000));
     loop {
         let notified = state.changed.notified();
         tokio::pin!(notified);
@@ -227,8 +306,13 @@ async fn list_workers(State(state): State<Shared>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "workers": engine(&state).workers()? })))
 }
 
-async fn register_worker(State(state): State<Shared>, Json(req): Json<RegisterWorker>) -> ApiResult<Json<Value>> {
-    Ok(Json(serde_json::to_value(engine(&state).register_worker(req)?).unwrap_or_default()))
+async fn register_worker(
+    State(state): State<Shared>,
+    Json(req): Json<RegisterWorker>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        serde_json::to_value(engine(&state).register_worker(req)?).unwrap_or_default(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -238,11 +322,19 @@ struct SessionRequest {
     wait_ms: Option<u64>,
 }
 
-async fn heartbeat(State(state): State<Shared>, Json(req): Json<SessionRequest>) -> ApiResult<Json<Value>> {
-    Ok(Json(serde_json::to_value(engine(&state).heartbeat(&req.worker_session_id)?).unwrap_or_default()))
+async fn heartbeat(
+    State(state): State<Shared>,
+    Json(req): Json<SessionRequest>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        serde_json::to_value(engine(&state).heartbeat(&req.worker_session_id)?).unwrap_or_default(),
+    ))
 }
 
-async fn unregister(State(state): State<Shared>, Json(req): Json<SessionRequest>) -> ApiResult<Json<Value>> {
+async fn unregister(
+    State(state): State<Shared>,
+    Json(req): Json<SessionRequest>,
+) -> ApiResult<Json<Value>> {
     engine(&state).unregister_worker(&req.worker_session_id)?;
     Ok(Json(json!({ "accepted": true })))
 }
@@ -273,11 +365,16 @@ struct CompleteRequest {
     output: Value,
 }
 
-async fn complete_task(State(state): State<Shared>, Json(req): Json<CompleteRequest>) -> ApiResult<Json<Value>> {
+async fn complete_task(
+    State(state): State<Shared>,
+    Json(req): Json<CompleteRequest>,
+) -> ApiResult<Json<Value>> {
     if req.token.is_empty() {
         return Err(bad_request("token is required"));
     }
-    Ok(Json(serde_json::to_value(engine(&state).complete(&req.token, req.output)?).unwrap_or_default()))
+    Ok(Json(
+        serde_json::to_value(engine(&state).complete(&req.token, req.output)?).unwrap_or_default(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -296,12 +393,22 @@ fn default_true() -> bool {
     true
 }
 
-async fn fail_task(State(state): State<Shared>, Json(req): Json<FailRequest>) -> ApiResult<Json<Value>> {
+async fn fail_task(
+    State(state): State<Shared>,
+    Json(req): Json<FailRequest>,
+) -> ApiResult<Json<Value>> {
     if req.error_code.is_empty() {
         return Err(bad_request("error_code is required"));
     }
-    let error = TaskError { code: req.error_code, message: req.error_message, retryable: req.retryable, details: req.details };
-    Ok(Json(serde_json::to_value(engine(&state).fail(&req.token, error)?).unwrap_or_default()))
+    let error = TaskError {
+        code: req.error_code,
+        message: req.error_message,
+        retryable: req.retryable,
+        details: req.details,
+    };
+    Ok(Json(
+        serde_json::to_value(engine(&state).fail(&req.token, error)?).unwrap_or_default(),
+    ))
 }
 
 /// Background loop: timers, retries, deadlines, liveness and built-in tasks.
@@ -322,9 +429,11 @@ pub async fn run_ticker(state: Shared, interval: Duration) {
             tokio::spawn(async move {
                 let input = job.input.clone();
                 let timeout = job.timeout_ms;
-                let result = tokio::task::spawn_blocking(move || crate::http_adapter::execute(&input, timeout))
-                    .await
-                    .unwrap_or_else(|e| Err(TaskError::new("INTERNAL", e.to_string(), true)));
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::http_adapter::execute(&input, timeout)
+                })
+                .await
+                .unwrap_or_else(|e| Err(TaskError::new("INTERNAL", e.to_string(), true)));
                 let mut e = engine(&st);
                 let r = match result {
                     Ok(out) => e.complete(&job.token, out),
@@ -345,14 +454,24 @@ pub struct ServerConfig {
     pub tick_interval: Duration,
 }
 
-pub async fn serve(engine: Engine, config: ServerConfig, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+pub async fn serve(
+    engine: Engine,
+    config: ServerConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     let changed = engine.changed.clone();
-    let state = Arc::new(AppState { engine: Mutex::new(engine), changed, auth_token: config.auth_token });
+    let state = Arc::new(AppState {
+        engine: Mutex::new(engine),
+        changed,
+        auth_token: config.auth_token,
+    });
     let app = router(state.clone(), config.body_limit);
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "ORBIT runtime listening");
     let ticker = tokio::spawn(run_ticker(state, config.tick_interval));
-    let result = axum::serve(listener, app).with_graceful_shutdown(shutdown).await;
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await;
     ticker.abort();
     result
 }

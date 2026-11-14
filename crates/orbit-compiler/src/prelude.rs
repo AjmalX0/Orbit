@@ -23,6 +23,10 @@ task "orbit.http.request" {
 
 pub fn program(file: FileId) -> Program {
     let r = parse(file, SOURCE);
-    debug_assert!(r.diagnostics.is_empty(), "prelude must parse: {:?}", r.diagnostics);
+    debug_assert!(
+        r.diagnostics.is_empty(),
+        "prelude must parse: {:?}",
+        r.diagnostics
+    );
     r.program
 }

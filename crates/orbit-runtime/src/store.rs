@@ -100,7 +100,10 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
-        if conn.query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get::<_, i64>(0))? == 0 {
+        if conn.query_row("SELECT COUNT(*) FROM schema_version", [], |r| {
+            r.get::<_, i64>(0)
+        })? == 0
+        {
             conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
         }
         Ok(Store { conn })
@@ -132,7 +135,9 @@ impl Store {
     }
 
     pub fn definitions(&self) -> Result<Vec<WorkflowIr>> {
-        let mut stmt = self.conn.prepare("SELECT ir FROM workflow_definitions ORDER BY name, created_at_ms")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ir FROM workflow_definitions ORDER BY name, created_at_ms")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut out = vec![];
         for text in rows {
@@ -149,7 +154,11 @@ impl Store {
     pub fn execution_exists(&self, id: &str) -> Result<bool> {
         Ok(self
             .conn
-            .query_row("SELECT 1 FROM workflow_executions WHERE execution_id = ?1", params![id], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM workflow_executions WHERE execution_id = ?1",
+                params![id],
+                |_| Ok(()),
+            )
             .optional()?
             .is_some())
     }
@@ -163,7 +172,14 @@ impl Store {
             )?;
             for h in events {
                 let payload = serde_json::to_string(&h.event).expect("event serialises");
-                ins.execute(params![state.id, h.seq as i64, h.event.name(), h.event.step(), payload, h.timestamp_ms as i64])?;
+                ins.execute(params![
+                    state.id,
+                    h.seq as i64,
+                    h.event.name(),
+                    h.event.step(),
+                    payload,
+                    h.timestamp_ms as i64
+                ])?;
             }
         }
         tx.execute(
@@ -188,14 +204,28 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT seq, timestamp_ms, payload FROM execution_events WHERE execution_id = ?1 ORDER BY seq",
         )?;
-        let rows = stmt.query_map(params![id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))?;
+        let rows = stmt.query_map(params![id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
         let mut out = vec![];
         for row in rows {
             let (seq, ts, payload) = row?;
             let event: Event = serde_json::from_str(&payload).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })?;
-            out.push(HistoryEvent { seq: seq as u64, timestamp_ms: ts as u64, event });
+            out.push(HistoryEvent {
+                seq: seq as u64,
+                timestamp_ms: ts as u64,
+                event,
+            });
         }
         Ok(out)
     }
@@ -209,7 +239,12 @@ impl Store {
         rows.collect()
     }
 
-    pub fn list_executions(&self, status: Option<&str>, workflow: Option<&str>, limit: u32) -> Result<Vec<ExecutionSummary>> {
+    pub fn list_executions(
+        &self,
+        status: Option<&str>,
+        workflow: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ExecutionSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT execution_id, workflow, version, status, created_at_ms, updated_at_ms FROM workflow_executions
              WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR workflow = ?2)
@@ -229,7 +264,9 @@ impl Store {
     }
 
     pub fn count_by_status(&self) -> Result<Vec<(String, u64)>> {
-        let mut stmt = self.conn.prepare("SELECT status, COUNT(*) FROM workflow_executions GROUP BY status")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT status, COUNT(*) FROM workflow_executions GROUP BY status")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?;
         rows.collect()
     }
@@ -247,7 +284,10 @@ impl Store {
     }
 
     pub fn touch_worker(&self, worker_id: &str, now: u64) -> Result<()> {
-        self.conn.execute("UPDATE worker_registry SET last_seen_ms = ?2 WHERE worker_id = ?1", params![worker_id, now as i64])?;
+        self.conn.execute(
+            "UPDATE worker_registry SET last_seen_ms = ?2 WHERE worker_id = ?1",
+            params![worker_id, now as i64],
+        )?;
         Ok(())
     }
 

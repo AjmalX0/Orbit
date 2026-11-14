@@ -8,10 +8,21 @@ use serde_json::{json, Map, Value};
 use std::time::Duration;
 
 pub fn execute(input: &Value, timeout_ms: Option<u64>) -> Result<Value, TaskError> {
-    let method = input.get("method").and_then(Value::as_str).unwrap_or("GET").to_uppercase();
-    let url = input.get("url").and_then(Value::as_str).ok_or_else(|| TaskError::new(codes::HTTP_ERROR, "missing url", false))?;
+    let method = input
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET")
+        .to_uppercase();
+    let url = input
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| TaskError::new(codes::HTTP_ERROR, "missing url", false))?;
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(TaskError::new(codes::HTTP_ERROR, "only http:// and https:// URLs are allowed", false));
+        return Err(TaskError::new(
+            codes::HTTP_ERROR,
+            "only http:// and https:// URLs are allowed",
+            false,
+        ));
     }
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -21,7 +32,11 @@ pub fn execute(input: &Value, timeout_ms: Option<u64>) -> Result<Value, TaskErro
     let headers: Vec<(String, String)> = input
         .get("headers")
         .and_then(Value::as_object)
-        .map(|h| h.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
+        .map(|h| {
+            h.iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                .collect()
+        })
         .unwrap_or_default();
     let body = input.get("body").cloned().unwrap_or(Value::Null);
 
@@ -53,10 +68,17 @@ pub fn execute(input: &Value, timeout_ms: Option<u64>) -> Result<Value, TaskErro
                 other => req.send_json(other),
             }
         }
-        other => return Err(TaskError::new(codes::HTTP_ERROR, format!("unsupported method {other}"), false)),
+        other => {
+            return Err(TaskError::new(
+                codes::HTTP_ERROR,
+                format!("unsupported method {other}"),
+                false,
+            ))
+        }
     };
 
-    let mut resp = result.map_err(|e| TaskError::new(codes::HTTP_ERROR, format!("request failed: {e}"), true))?;
+    let mut resp = result
+        .map_err(|e| TaskError::new(codes::HTTP_ERROR, format!("request failed: {e}"), true))?;
     let status = resp.status().as_u16();
     let mut out_headers = Map::new();
     for (k, v) in resp.headers() {
@@ -72,7 +94,11 @@ pub fn execute(input: &Value, timeout_ms: Option<u64>) -> Result<Value, TaskErro
         .unwrap_or_default();
     let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
     if status >= 500 || status == 429 {
-        let mut e = TaskError::new(codes::HTTP_ERROR, format!("server responded {status}"), true);
+        let mut e = TaskError::new(
+            codes::HTTP_ERROR,
+            format!("server responded {status}"),
+            true,
+        );
         e.details = Some(json!({ "status": status, "body": body }));
         return Err(e);
     }

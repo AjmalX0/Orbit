@@ -119,18 +119,32 @@ pub struct Lexer<'a> {
 /// Tokenise a whole file. Lexical errors are reported but lexing continues so
 /// that the parser can report as many problems as possible in one run.
 pub fn tokenize(file: FileId, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
-    let mut lx = Lexer { file, src, bytes: src.as_bytes(), pos: 0, diagnostics: vec![] };
+    let mut lx = Lexer {
+        file,
+        src,
+        bytes: src.as_bytes(),
+        pos: 0,
+        diagnostics: vec![],
+    };
     let mut tokens = vec![];
     let mut newline = true;
     loop {
         newline |= lx.skip_trivia();
         let start = lx.pos;
         let Some(kind) = lx.next_kind() else {
-            tokens.push(Token { kind: TokenKind::Eof, span: lx.span(start, start), newline_before: newline });
+            tokens.push(Token {
+                kind: TokenKind::Eof,
+                span: lx.span(start, start),
+                newline_before: newline,
+            });
             break;
         };
         if let Some(kind) = kind {
-            tokens.push(Token { kind, span: lx.span(start, lx.pos), newline_before: newline });
+            tokens.push(Token {
+                kind,
+                span: lx.span(start, lx.pos),
+                newline_before: newline,
+            });
             newline = false;
         }
     }
@@ -176,8 +190,12 @@ impl<'a> Lexer<'a> {
                         match (self.peek(), self.peek2()) {
                             (None, _) => {
                                 self.diagnostics.push(
-                                    Diagnostic::error("E0003", "unterminated block comment", self.span(start, start + 2))
-                                        .with_help("close the comment with `*/`"),
+                                    Diagnostic::error(
+                                        "E0003",
+                                        "unterminated block comment",
+                                        self.span(start, start + 2),
+                                    )
+                                    .with_help("close the comment with `*/`"),
                                 );
                                 return newline;
                             }
@@ -276,8 +294,12 @@ impl<'a> Lexer<'a> {
         loop {
             let Some(c) = self.src[self.pos..].chars().next() else {
                 self.diagnostics.push(
-                    Diagnostic::error("E0002", "unterminated string literal", self.span(start, self.pos))
-                        .with_help("add a closing `\"`"),
+                    Diagnostic::error(
+                        "E0002",
+                        "unterminated string literal",
+                        self.span(start, self.pos),
+                    )
+                    .with_help("add a closing `\"`"),
                 );
                 return Some(TokenKind::Str(out));
             };
@@ -288,8 +310,12 @@ impl<'a> Lexer<'a> {
                 }
                 '\n' => {
                     self.diagnostics.push(
-                        Diagnostic::error("E0002", "unterminated string literal", self.span(start, self.pos))
-                            .with_help("string literals cannot span lines; use `\\n`"),
+                        Diagnostic::error(
+                            "E0002",
+                            "unterminated string literal",
+                            self.span(start, self.pos),
+                        )
+                        .with_help("string literals cannot span lines; use `\\n`"),
                     );
                     return Some(TokenKind::Str(out));
                 }
@@ -307,7 +333,9 @@ impl<'a> Lexer<'a> {
                             let rest = &self.src[self.pos + 2..];
                             if let Some(close) = rest.find('}') {
                                 let hex = &rest[..close];
-                                if let Some(ch) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+                                if let Some(ch) =
+                                    u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+                                {
                                     out.push(ch);
                                     self.pos += 2 + close; // the final `}` is consumed below
                                 } else {
@@ -357,7 +385,10 @@ impl<'a> Lexer<'a> {
             digits(self);
         }
         let num_end = self.pos;
-        let text: String = self.src[start..num_end].chars().filter(|c| *c != '_').collect();
+        let text: String = self.src[start..num_end]
+            .chars()
+            .filter(|c| *c != '_')
+            .collect();
         // Duration suffix?
         let unit_start = self.pos;
         while matches!(self.peek(), Some(c) if c.is_ascii_alphabetic()) {
@@ -418,9 +449,11 @@ mod tests {
     fn all_token_categories() {
         use TokenKind::*;
         assert_eq!(
-            kinds(r#"workflow X { a: "s\n" 1 2.5 10s 500ms 2m 1h true false null } // c
+            kinds(
+                r#"workflow X { a: "s\n" 1 2.5 10s 500ms 2m 1h true false null } // c
             /* multi
-               line */ == != <= >= && || ! < > = , : . ? + - * / % ( ) [ ] ;"#),
+               line */ == != <= >= && || ! < > = , : . ? + - * / % ( ) [ ] ;"#
+            ),
             vec![
                 Ident("workflow".into()),
                 Ident("X".into()),

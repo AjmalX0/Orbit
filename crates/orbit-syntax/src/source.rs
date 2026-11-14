@@ -15,12 +15,20 @@ pub struct Span {
 
 impl Span {
     pub fn new(file: FileId, start: usize, end: usize) -> Self {
-        Span { file, start: start as u32, end: end as u32 }
+        Span {
+            file,
+            start: start as u32,
+            end: end as u32,
+        }
     }
 
     /// Smallest span covering both `self` and `other` (same file assumed).
     pub fn to(self, other: Span) -> Span {
-        Span { file: self.file, start: self.start.min(other.start), end: self.end.max(other.end) }
+        Span {
+            file: self.file,
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
     }
 }
 
@@ -41,7 +49,11 @@ impl SourceFile {
                 line_starts.push(i + 1);
             }
         }
-        SourceFile { name: name.into(), text, line_starts }
+        SourceFile {
+            name: name.into(),
+            text,
+            line_starts,
+        }
     }
 
     /// 1-based (line, column) for a byte offset. Columns count characters.
@@ -59,7 +71,11 @@ impl SourceFile {
     /// Text of a 1-based line, without the trailing newline.
     pub fn line_text(&self, line: usize) -> &str {
         let start = self.line_starts[line - 1];
-        let end = self.line_starts.get(line).copied().unwrap_or(self.text.len());
+        let end = self
+            .line_starts
+            .get(line)
+            .copied()
+            .unwrap_or(self.text.len());
         self.text[start..end].trim_end_matches(['\n', '\r'])
     }
 }
@@ -92,7 +108,11 @@ impl SourceMap {
     pub fn location(&self, span: Span) -> Location {
         let f = self.file(span.file);
         let (line, column) = f.line_col(span.start as usize);
-        Location { file: f.name.clone(), line, column }
+        Location {
+            file: f.name.clone(),
+            line,
+            column,
+        }
     }
 }
 

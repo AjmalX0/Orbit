@@ -17,7 +17,12 @@ use std::sync::Arc;
 pub type Clock = Box<dyn Fn() -> u64 + Send>;
 
 pub fn system_clock() -> Clock {
-    Box::new(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0))
+    Box::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +36,11 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        EngineConfig { session_timeout_ms: 30_000, heartbeat_interval_ms: 5_000, http_adapter: false }
+        EngineConfig {
+            session_timeout_ms: 30_000,
+            heartbeat_interval_ms: 5_000,
+            http_adapter: false,
+        }
     }
 }
 
@@ -45,7 +54,11 @@ pub struct EngineError {
 
 impl EngineError {
     pub fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
-        EngineError { code, message: message.into(), status }
+        EngineError {
+            code,
+            message: message.into(),
+            status,
+        }
     }
     fn not_found(what: &str) -> Self {
         Self::new(404, "NOT_FOUND", format!("{what} not found"))
@@ -166,7 +179,10 @@ pub struct Engine {
 
 fn semver_key(v: &str) -> (Vec<u64>, String) {
     let core = v.split(['-', '+']).next().unwrap_or("");
-    (core.split('.').map(|p| p.parse().unwrap_or(0)).collect(), v.to_string())
+    (
+        core.split('.').map(|p| p.parse().unwrap_or(0)).collect(),
+        v.to_string(),
+    )
 }
 
 impl Engine {
@@ -201,7 +217,8 @@ impl Engine {
 
     fn cache_definition(&mut self, ir: WorkflowIr) -> Arc<WorkflowIr> {
         let ir = Arc::new(ir);
-        self.by_version.insert((ir.name.clone(), ir.version.clone()), ir.clone());
+        self.by_version
+            .insert((ir.name.clone(), ir.version.clone()), ir.clone());
         self.by_hash.insert(ir.definition_hash.clone(), ir.clone());
         ir
     }
@@ -212,7 +229,10 @@ impl Engine {
     /// report back within the session timeout (outcome treated as unknown,
     /// never as failed).
     fn recover(&mut self) -> Result<()> {
-        let ids = self.store.active_execution_ids().map_err(EngineError::storage)?;
+        let ids = self
+            .store
+            .active_execution_ids()
+            .map_err(EngineError::storage)?;
         let mut in_flight = 0;
         for id in &ids {
             let history = self.store.history(id).map_err(EngineError::storage)?;
@@ -228,7 +248,11 @@ impl Engine {
             self.active.insert(id.clone(), state);
         }
         if !ids.is_empty() {
-            tracing::info!(executions = ids.len(), in_flight, "recovered active executions from history");
+            tracing::info!(
+                executions = ids.len(),
+                in_flight,
+                "recovered active executions from history"
+            );
         }
         for id in ids {
             self.advance(&id)?;
@@ -239,9 +263,14 @@ impl Engine {
     // ------------------------------------------------------------ definitions
 
     pub fn register_definition(&mut self, ir: WorkflowIr) -> Result<bool> {
-        ir.validate().map_err(|e| EngineError::new(400, "INVALID_IR", e.0))?;
+        ir.validate()
+            .map_err(|e| EngineError::new(400, "INVALID_IR", e.0))?;
         if ir.definition_hash.is_empty() {
-            return Err(EngineError::new(400, "INVALID_IR", "definition_hash is required"));
+            return Err(EngineError::new(
+                400,
+                "INVALID_IR",
+                "definition_hash is required",
+            ));
         }
         let now = self.now();
         match self.store.put_definition(&ir, now).map_err(EngineError::storage)? {
@@ -268,7 +297,10 @@ impl Engine {
 
     pub fn definition(&self, name: &str, version: Option<&str>) -> Option<Arc<WorkflowIr>> {
         match version {
-            Some(v) => self.by_version.get(&(name.to_string(), v.to_string())).cloned(),
+            Some(v) => self
+                .by_version
+                .get(&(name.to_string(), v.to_string()))
+                .cloned(),
             None => self
                 .by_version
                 .iter()
@@ -280,7 +312,13 @@ impl Engine {
 
     // ------------------------------------------------------------- executions
 
-    pub fn start(&mut self, workflow: &str, version: Option<&str>, mut input: Value, execution_id: Option<String>) -> Result<StartResult> {
+    pub fn start(
+        &mut self,
+        workflow: &str,
+        version: Option<&str>,
+        mut input: Value,
+        execution_id: Option<String>,
+    ) -> Result<StartResult> {
         let def = self.definition(workflow, version).ok_or_else(|| {
             EngineError::new(
                 404,
@@ -295,21 +333,46 @@ impl Engine {
             input = json!({});
         }
         def.input.apply_defaults(&mut input);
-        def.input
-            .validate(&input, true)
-            .map_err(|e| EngineError::new(400, "INVALID_INPUT", format!("workflow input is invalid at {e}")))?;
+        def.input.validate(&input, true).map_err(|e| {
+            EngineError::new(
+                400,
+                "INVALID_INPUT",
+                format!("workflow input is invalid at {e}"),
+            )
+        })?;
         let id = match execution_id {
             Some(id) => {
-                if id.is_empty() || id.len() > 200 || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c)) {
-                    return Err(EngineError::new(400, "INVALID_EXECUTION_ID", "execution ids may contain letters, digits and - _ . :"));
+                if id.is_empty()
+                    || id.len() > 200
+                    || !id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))
+                {
+                    return Err(EngineError::new(
+                        400,
+                        "INVALID_EXECUTION_ID",
+                        "execution ids may contain letters, digits and - _ . :",
+                    ));
                 }
                 // Idempotent start: the same id never starts a second execution.
-                if self.active.contains_key(&id) || self.store.execution_exists(&id).map_err(EngineError::storage)? {
+                if self.active.contains_key(&id)
+                    || self
+                        .store
+                        .execution_exists(&id)
+                        .map_err(EngineError::storage)?
+                {
                     let existing = self.execution(&id)?;
                     if existing.definition_hash != def.definition_hash {
-                        return Err(EngineError::new(409, "EXECUTION_EXISTS", format!("execution `{id}` already exists for a different workflow")));
+                        return Err(EngineError::new(
+                            409,
+                            "EXECUTION_EXISTS",
+                            format!("execution `{id}` already exists for a different workflow"),
+                        ));
                     }
-                    return Ok(StartResult { execution_id: id, created: false });
+                    return Ok(StartResult {
+                        execution_id: id,
+                        created: false,
+                    });
                 }
                 id
             }
@@ -328,16 +391,28 @@ impl Engine {
         }
         tracing::info!(execution_id = %id, workflow = %def.name, version = %def.version, "execution started");
         self.advance(&id)?;
-        Ok(StartResult { execution_id: id, created: true })
+        Ok(StartResult {
+            execution_id: id,
+            created: true,
+        })
     }
 
     pub fn cancel(&mut self, id: &str, reason: &str) -> Result<ExecutionState> {
         let state = self.execution(id)?;
         if state.status.is_terminal() {
-            return Err(EngineError::new(409, "EXECUTION_FINISHED", format!("execution is already {}", state.status.as_str())));
+            return Err(EngineError::new(
+                409,
+                "EXECUTION_FINISHED",
+                format!("execution is already {}", state.status.as_str()),
+            ));
         }
         if state.abort.is_none() {
-            self.commit(id, vec![Event::CancelRequested { reason: reason.to_string() }])?;
+            self.commit(
+                id,
+                vec![Event::CancelRequested {
+                    reason: reason.to_string(),
+                }],
+            )?;
             self.advance(id)?;
         }
         self.execution(id)
@@ -362,8 +437,15 @@ impl Engine {
         Ok(h)
     }
 
-    pub fn list_executions(&self, status: Option<&str>, workflow: Option<&str>, limit: u32) -> Result<Vec<ExecutionSummary>> {
-        self.store.list_executions(status, workflow, limit.clamp(1, 1000)).map_err(EngineError::storage)
+    pub fn list_executions(
+        &self,
+        status: Option<&str>,
+        workflow: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ExecutionSummary>> {
+        self.store
+            .list_executions(status, workflow, limit.clamp(1, 1000))
+            .map_err(EngineError::storage)
     }
 
     pub fn active_count(&self) -> usize {
@@ -378,29 +460,56 @@ impl Engine {
             return Ok(());
         }
         let now = self.now();
-        let mut state = self.active.get(id).cloned().ok_or_else(|| EngineError::not_found("active execution"))?;
+        let mut state = self
+            .active
+            .get(id)
+            .cloned()
+            .ok_or_else(|| EngineError::not_found("active execution"))?;
         let mut history = Vec::with_capacity(events.len());
         for event in events {
-            let h = HistoryEvent { seq: state.last_seq + 1, timestamp_ms: now, event };
+            let h = HistoryEvent {
+                seq: state.last_seq + 1,
+                timestamp_ms: now,
+                event,
+            };
             apply(&mut state, &h);
             history.push(h);
         }
-        self.store.append(&state, &history).map_err(EngineError::storage)?;
+        self.store
+            .append(&state, &history)
+            .map_err(EngineError::storage)?;
         for h in &history {
             self.metrics.observe(&h.event);
             if let Event::StepDispatched { token, step, .. } = &h.event {
-                self.tokens.insert(token.clone(), (id.to_string(), step.clone()));
+                self.tokens
+                    .insert(token.clone(), (id.to_string(), step.clone()));
             }
             tracing::debug!(execution_id = %id, seq = h.seq, event = h.event.name(), step = h.event.step().unwrap_or(""), "event");
             match &h.event {
-                Event::WorkflowCompleted { .. } => tracing::info!(execution_id = %id, "execution completed"),
-                Event::WorkflowFailed { error, compensation } => {
+                Event::WorkflowCompleted { .. } => {
+                    tracing::info!(execution_id = %id, "execution completed")
+                }
+                Event::WorkflowFailed {
+                    error,
+                    compensation,
+                } => {
                     tracing::warn!(execution_id = %id, code = %error.code, error = %error.message, compensation = ?compensation, "execution failed")
                 }
-                Event::WorkflowCancelled { .. } => tracing::info!(execution_id = %id, "execution cancelled"),
-                Event::WorkflowTimedOut { .. } => tracing::warn!(execution_id = %id, "execution timed out"),
-                Event::StepFailed { step, error } => tracing::warn!(execution_id = %id, step = %step, code = %error.code, error = %error.message, "step failed"),
-                Event::RetryScheduled { step, next_attempt, delay_ms, .. } => {
+                Event::WorkflowCancelled { .. } => {
+                    tracing::info!(execution_id = %id, "execution cancelled")
+                }
+                Event::WorkflowTimedOut { .. } => {
+                    tracing::warn!(execution_id = %id, "execution timed out")
+                }
+                Event::StepFailed { step, error } => {
+                    tracing::warn!(execution_id = %id, step = %step, code = %error.code, error = %error.message, "step failed")
+                }
+                Event::RetryScheduled {
+                    step,
+                    next_attempt,
+                    delay_ms,
+                    ..
+                } => {
                     tracing::info!(execution_id = %id, step = %step, attempt = next_attempt, delay_ms, "retry scheduled")
                 }
                 _ => {}
@@ -422,7 +531,9 @@ impl Engine {
 
     /// Run the decider to a fixpoint and commit the resulting events as one batch.
     fn advance(&mut self, id: &str) -> Result<()> {
-        let Some(state) = self.active.get(id) else { return Ok(()) };
+        let Some(state) = self.active.get(id) else {
+            return Ok(());
+        };
         let Some(def) = self.by_hash.get(&state.definition_hash).cloned() else {
             tracing::error!(execution_id = %id, hash = %state.definition_hash, "definition missing for execution");
             return Ok(());
@@ -437,7 +548,14 @@ impl Engine {
             }
             for e in events {
                 let seq = scratch.last_seq + 1;
-                apply(&mut scratch, &HistoryEvent { seq, timestamp_ms: now, event: e.clone() });
+                apply(
+                    &mut scratch,
+                    &HistoryEvent {
+                        seq,
+                        timestamp_ms: now,
+                        event: e.clone(),
+                    },
+                );
                 batch.push(e);
             }
         }
@@ -460,7 +578,8 @@ impl Engine {
     fn check_liveness(&mut self) -> Result<()> {
         let now = self.now();
         let timeout = self.config.session_timeout_ms;
-        self.sessions.retain(|_, s| now < s.last_seen_ms + timeout * 4);
+        self.sessions
+            .retain(|_, s| now < s.last_seen_ms + timeout * 4);
         let mut lost: Vec<(String, String, u32, String)> = vec![];
         for (id, state) in &self.active {
             for (key, u) in &state.units {
@@ -471,14 +590,19 @@ impl Engine {
                 let alive = if let Some(inst) = session.strip_prefix(BUILTIN_SESSION_PREFIX) {
                     inst == self.instance
                 } else {
-                    self.sessions.get(&session).is_some_and(|s| now < s.last_seen_ms + timeout)
+                    self.sessions
+                        .get(&session)
+                        .is_some_and(|s| now < s.last_seen_ms + timeout)
                 };
                 let since = u.dispatched_at_ms.unwrap_or(0).max(self.started_at_ms);
                 if !alive && now >= since + timeout {
                     let reason = if session.starts_with(BUILTIN_SESSION_PREFIX) {
                         "runtime restarted while the built-in task was running".to_string()
                     } else {
-                        format!("worker `{}` stopped responding", u.worker_id.clone().unwrap_or_default())
+                        format!(
+                            "worker `{}` stopped responding",
+                            u.worker_id.clone().unwrap_or_default()
+                        )
                     };
                     lost.push((id.clone(), key.clone(), u.attempt, reason));
                 }
@@ -486,7 +610,14 @@ impl Engine {
         }
         for (id, key, attempt, reason) in lost {
             tracing::warn!(execution_id = %id, step = %key, attempt, reason = %reason, "attempt outcome uncertain; redelivering");
-            self.commit(&id, vec![Event::StepAttemptUncertain { step: key, attempt, reason }])?;
+            self.commit(
+                &id,
+                vec![Event::StepAttemptUncertain {
+                    step: key,
+                    attempt,
+                    reason,
+                }],
+            )?;
             self.advance(&id)?;
         }
         Ok(())
@@ -496,16 +627,28 @@ impl Engine {
 
     pub fn register_worker(&mut self, req: RegisterWorker) -> Result<Registration> {
         if req.worker_id.trim().is_empty() {
-            return Err(EngineError::new(400, "INVALID_REQUEST", "worker_id is required"));
+            return Err(EngineError::new(
+                400,
+                "INVALID_REQUEST",
+                "worker_id is required",
+            ));
         }
         if req.contracts.is_empty() {
-            return Err(EngineError::new(400, "INVALID_REQUEST", "a worker must announce at least one task contract"));
+            return Err(EngineError::new(
+                400,
+                "INVALID_REQUEST",
+                "a worker must announce at least one task contract",
+            ));
         }
         let now = self.now();
         let mut warnings = vec![];
         for c in &req.contracts {
             if c.task_name.starts_with("orbit.") {
-                return Err(EngineError::new(400, "RESERVED_TASK", format!("`{}` is a built-in task", c.task_name)));
+                return Err(EngineError::new(
+                    400,
+                    "RESERVED_TASK",
+                    format!("`{}` is a built-in task", c.task_name),
+                ));
             }
             let mut versions: Vec<&str> = self
                 .by_version
@@ -529,7 +672,11 @@ impl Engine {
             Session {
                 worker_id: req.worker_id.clone(),
                 runtime: req.runtime.to_lowercase(),
-                contracts: req.contracts.iter().map(|c| (c.task_name.clone(), c.contract_version.clone())).collect(),
+                contracts: req
+                    .contracts
+                    .iter()
+                    .map(|c| (c.task_name.clone(), c.contract_version.clone()))
+                    .collect(),
                 last_seen_ms: now,
                 inflight: HashSet::new(),
             },
@@ -556,10 +703,13 @@ impl Engine {
 
     fn touch(&mut self, session_id: &str) -> Result<()> {
         let now = self.now();
-        let s = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| EngineError::new(404, "UNKNOWN_SESSION", "unknown or expired worker session; register again"))?;
+        let s = self.sessions.get_mut(session_id).ok_or_else(|| {
+            EngineError::new(
+                404,
+                "UNKNOWN_SESSION",
+                "unknown or expired worker session; register again",
+            )
+        })?;
         s.last_seen_ms = now;
         let wid = s.worker_id.clone();
         let _ = self.store.touch_worker(&wid, now);
@@ -574,32 +724,55 @@ impl Engine {
             let live = self.tokens.get(&token).and_then(|(id, key)| {
                 let st = self.active.get(id)?;
                 let u = st.units.get(key)?;
-                Some(u.status() == UnitStatus::Dispatched && u.token.as_deref() == Some(token.as_str()) && (st.abort.is_none() || key.starts_with("compensate:")))
+                Some(
+                    u.status() == UnitStatus::Dispatched
+                        && u.token.as_deref() == Some(token.as_str())
+                        && (st.abort.is_none() || key.starts_with("compensate:")),
+                )
             });
             if live != Some(true) {
                 cancel.push(token.clone());
-                self.sessions.get_mut(session_id).unwrap().inflight.remove(&token);
+                self.sessions
+                    .get_mut(session_id)
+                    .unwrap()
+                    .inflight
+                    .remove(&token);
             }
         }
-        Ok(HeartbeatAck { accepted: true, cancel })
+        Ok(HeartbeatAck {
+            accepted: true,
+            cancel,
+        })
     }
 
     pub fn unregister_worker(&mut self, session_id: &str) -> Result<()> {
-        let s = self.sessions.remove(session_id).ok_or_else(|| EngineError::new(404, "UNKNOWN_SESSION", "unknown worker session"))?;
+        let s = self
+            .sessions
+            .remove(session_id)
+            .ok_or_else(|| EngineError::new(404, "UNKNOWN_SESSION", "unknown worker session"))?;
         tracing::info!(worker_id = %s.worker_id, "worker unregistered");
         // In-flight work of a departing worker is redelivered immediately.
         let mut lost = vec![];
         for token in s.inflight {
             if let Some((id, key)) = self.tokens.get(&token) {
                 if let Some(u) = self.active.get(id).and_then(|st| st.units.get(key)) {
-                    if u.status() == UnitStatus::Dispatched && u.token.as_deref() == Some(token.as_str()) {
+                    if u.status() == UnitStatus::Dispatched
+                        && u.token.as_deref() == Some(token.as_str())
+                    {
                         lost.push((id.clone(), key.clone(), u.attempt));
                     }
                 }
             }
         }
         for (id, key, attempt) in lost {
-            self.commit(&id, vec![Event::StepAttemptUncertain { step: key, attempt, reason: "worker unregistered".into() }])?;
+            self.commit(
+                &id,
+                vec![Event::StepAttemptUncertain {
+                    step: key,
+                    attempt,
+                    reason: "worker unregistered".into(),
+                }],
+            )?;
             self.advance(&id)?;
         }
         Ok(())
@@ -614,9 +787,17 @@ impl Engine {
                 let live: Vec<&Session> = self
                     .sessions
                     .values()
-                    .filter(|s| s.worker_id == record.worker_id && now < s.last_seen_ms + self.config.session_timeout_ms)
+                    .filter(|s| {
+                        s.worker_id == record.worker_id
+                            && now < s.last_seen_ms + self.config.session_timeout_ms
+                    })
                     .collect();
-                WorkerInfo { online: !live.is_empty(), sessions: live.len(), inflight: live.iter().map(|s| s.inflight.len()).sum(), record }
+                WorkerInfo {
+                    online: !live.is_empty(),
+                    sessions: live.len(),
+                    inflight: live.iter().map(|s| s.inflight.len()).sum(),
+                    record,
+                }
             })
             .collect())
     }
@@ -627,13 +808,20 @@ impl Engine {
         let session = self.sessions[session_id].clone();
         let mut best: Option<(u64, String, String)> = None;
         for (id, state) in &self.active {
-            let Some(def) = self.by_hash.get(&state.definition_hash) else { continue };
+            let Some(def) = self.by_hash.get(&state.definition_hash) else {
+                continue;
+            };
             for (key, u) in &state.units {
                 if u.status() != UnitStatus::Scheduled {
                     continue;
                 }
-                let Some(inv) = invocation(def, key) else { continue };
-                if !session.contracts.contains(&(inv.task.clone(), inv.contract_version.clone())) {
+                let Some(inv) = invocation(def, key) else {
+                    continue;
+                };
+                if !session
+                    .contracts
+                    .contains(&(inv.task.clone(), inv.contract_version.clone()))
+                {
                     continue;
                 }
                 if let Some(lang) = &inv.language {
@@ -647,7 +835,9 @@ impl Engine {
                 }
             }
         }
-        let Some((_, id, key)) = best else { return Ok(None) };
+        let Some((_, id, key)) = best else {
+            return Ok(None);
+        };
         let assignment = self.dispatch(&id, &key, session_id, &session.worker_id)?;
         if let Some(s) = self.sessions.get_mut(session_id) {
             s.inflight.insert(assignment.token.clone());
@@ -655,11 +845,19 @@ impl Engine {
         Ok(Some(assignment))
     }
 
-    fn dispatch(&mut self, id: &str, key: &str, session_id: &str, worker_id: &str) -> Result<TaskAssignment> {
+    fn dispatch(
+        &mut self,
+        id: &str,
+        key: &str,
+        session_id: &str,
+        worker_id: &str,
+    ) -> Result<TaskAssignment> {
         let now = self.now();
         let state = &self.active[id];
         let def = self.by_hash[&state.definition_hash].clone();
-        let inv = invocation(&def, key).expect("unit has an invocation").clone();
+        let inv = invocation(&def, key)
+            .expect("unit has an invocation")
+            .clone();
         let u = state.units[key].clone();
         let token = uuid::Uuid::new_v4().to_string();
         let deadline = inv.timeout_ms.map(|t| now + t);
@@ -695,7 +893,9 @@ impl Engine {
     fn dispatch_builtins(&mut self) -> Result<()> {
         let mut todo = vec![];
         for (id, state) in &self.active {
-            let Some(def) = self.by_hash.get(&state.definition_hash) else { continue };
+            let Some(def) = self.by_hash.get(&state.definition_hash) else {
+                continue;
+            };
             for (key, u) in &state.units {
                 if u.status() != UnitStatus::Scheduled {
                     continue;
@@ -733,7 +933,12 @@ impl Engine {
             Ok(x) => x,
             Err(ack) => return Ok(ack),
         };
-        let attempt = unit.tokens.iter().find(|(t, _)| t == token).map(|(_, a)| *a).unwrap_or(unit.attempt);
+        let attempt = unit
+            .tokens
+            .iter()
+            .find(|(t, _)| t == token)
+            .map(|(_, a)| *a)
+            .unwrap_or(unit.attempt);
         if output.is_null() {
             output = json!({});
         }
@@ -747,13 +952,20 @@ impl Engine {
             })
             .unwrap_or(Ok(()));
         let event = match validation {
-            Ok(()) => Event::StepSucceeded { step: key.clone(), attempt, output },
+            Ok(()) => Event::StepSucceeded {
+                step: key.clone(),
+                attempt,
+                output,
+            },
             Err(e) => Event::StepAttemptFailed {
                 step: key.clone(),
                 attempt: unit.attempt,
                 error: TaskError::new(
                     codes::OUTPUT_CONTRACT_VIOLATION,
-                    format!("worker output for `{}` does not match its contract at {e}", inv.map(|i| i.task).unwrap_or_default()),
+                    format!(
+                        "worker output for `{}` does not match its contract at {e}",
+                        inv.map(|i| i.task).unwrap_or_default()
+                    ),
                     false,
                 ),
             },
@@ -761,7 +973,10 @@ impl Engine {
         let accepted = matches!(event, Event::StepSucceeded { .. });
         self.commit(&id, vec![event])?;
         self.advance(&id)?;
-        Ok(ResultAck { accepted, reason: (!accepted).then(|| "output violates the task contract".into()) })
+        Ok(ResultAck {
+            accepted,
+            reason: (!accepted).then(|| "output violates the task contract".into()),
+        })
     }
 
     /// Record a failed attempt.
@@ -772,18 +987,44 @@ impl Engine {
         };
         // Failures only count for the attempt currently in flight.
         if unit.token.as_deref() != Some(token) {
-            self.commit(&id, vec![Event::StaleResultIgnored { step: key, token: token.into(), outcome: "failure".into() }])?;
-            return Ok(ResultAck { accepted: false, reason: Some("stale attempt".into()) });
+            self.commit(
+                &id,
+                vec![Event::StaleResultIgnored {
+                    step: key,
+                    token: token.into(),
+                    outcome: "failure".into(),
+                }],
+            )?;
+            return Ok(ResultAck {
+                accepted: false,
+                reason: Some("stale attempt".into()),
+            });
         }
-        self.commit(&id, vec![Event::StepAttemptFailed { step: key, attempt: unit.attempt, error }])?;
+        self.commit(
+            &id,
+            vec![Event::StepAttemptFailed {
+                step: key,
+                attempt: unit.attempt,
+                error,
+            }],
+        )?;
         self.advance(&id)?;
-        Ok(ResultAck { accepted: true, reason: None })
+        Ok(ResultAck {
+            accepted: true,
+            reason: None,
+        })
     }
 
     #[allow(clippy::type_complexity)]
-    fn resolve_token(&mut self, token: &str) -> Result<std::result::Result<(String, String, UnitState, Arc<WorkflowIr>), ResultAck>> {
+    fn resolve_token(
+        &mut self,
+        token: &str,
+    ) -> Result<std::result::Result<(String, String, UnitState, Arc<WorkflowIr>), ResultAck>> {
         let Some((id, key)) = self.tokens.get(token).cloned() else {
-            return Ok(Err(ResultAck { accepted: false, reason: Some("unknown token (execution finished or token invalid)".into()) }));
+            return Ok(Err(ResultAck {
+                accepted: false,
+                reason: Some("unknown token (execution finished or token invalid)".into()),
+            }));
         };
         let state = &self.active[&id];
         let unit = state.units.get(&key).cloned().unwrap_or_default();
@@ -798,11 +1039,25 @@ impl Engine {
         // really happened (reconciliation of uncertain/timed-out attempts).
         let unresolved = matches!(
             unit.status(),
-            UnitStatus::Dispatched | UnitStatus::Scheduled | UnitStatus::RetryWait | UnitStatus::Uncertain | UnitStatus::AttemptFailed
+            UnitStatus::Dispatched
+                | UnitStatus::Scheduled
+                | UnitStatus::RetryWait
+                | UnitStatus::Uncertain
+                | UnitStatus::AttemptFailed
         );
         if !unresolved {
-            self.commit(&id, vec![Event::StaleResultIgnored { step: key, token: token.into(), outcome: "duplicate".into() }])?;
-            return Ok(Err(ResultAck { accepted: false, reason: Some("duplicate result; step already resolved".into()) }));
+            self.commit(
+                &id,
+                vec![Event::StaleResultIgnored {
+                    step: key,
+                    token: token.into(),
+                    outcome: "duplicate".into(),
+                }],
+            )?;
+            return Ok(Err(ResultAck {
+                accepted: false,
+                reason: Some("duplicate result; step already resolved".into()),
+            }));
         }
         Ok(Ok((id, key, unit, def)))
     }

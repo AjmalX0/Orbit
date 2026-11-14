@@ -6,6 +6,9 @@
 //! * [`engine`] — dispatch, worker registry, reconciliation and recovery
 //! * [`server`] — HTTP API and the HTTP/JSON worker protocol binding
 
+// TaskError is returned by value on cold paths; boxing would only add noise.
+#![allow(clippy::result_large_err)]
+
 pub mod decide;
 pub mod engine;
 pub mod http_adapter;
