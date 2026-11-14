@@ -1,0 +1,15 @@
+[package]
+name = "orbit-worker"
+version.workspace = true
+edition.workspace = true
+description = "Rust worker SDK for the ORBIT orchestration runtime"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+orbit-runtime.workspace = true
+orbit-compiler.workspace = true
+tokio.workspace = true

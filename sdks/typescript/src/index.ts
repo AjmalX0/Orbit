@@ -83,7 +83,9 @@ export class Client {
 
   constructor(options: ClientOptions = {}) {
     this.server = (options.server ?? process.env.ORBIT_SERVER ?? DEFAULT_SERVER).replace(/\/+$/, "");
-    this.token = options.token ?? process.env.ORBIT_TOKEN;
+    // Workers should use the restricted worker credential when the runtime has one.
+    // For a private CA over HTTPS, Node.js honours NODE_EXTRA_CA_CERTS=/path/ca.pem.
+    this.token = options.token ?? (process.env.ORBIT_WORKER_TOKEN || process.env.ORBIT_TOKEN);
   }
 
   async request<T = any>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<{ status: number; body: T }> {

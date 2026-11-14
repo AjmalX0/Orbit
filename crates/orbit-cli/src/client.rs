@@ -29,12 +29,25 @@ impl std::fmt::Display for ApiError {
 pub type Result<T> = std::result::Result<T, ApiError>;
 
 impl Client {
-    pub fn new(base: &str, token: Option<String>) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+    pub fn new(base: &str, token: Option<String>, ca_pem: Option<Vec<u8>>) -> Self {
+        let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(330)))
-            .build()
-            .into();
+            .timeout_global(Some(Duration::from_secs(330)));
+        if let Some(pem) = ca_pem {
+            use ureq::tls::{Certificate, RootCerts, TlsConfig};
+            let certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(&pem)
+                .filter_map(|item| match item {
+                    Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            config = config.tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::new_with_certs(&certs))
+                    .build(),
+            );
+        }
+        let agent: ureq::Agent = config.build().into();
         Client {
             base: base.trim_end_matches('/').to_string(),
             token,

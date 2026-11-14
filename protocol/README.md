@@ -4,7 +4,10 @@ The messages are defined in [`orbit/worker/v1/worker.proto`](orbit/worker/v1/wor
 ORBIT v0.1 implements the **HTTP/JSON binding**: each RPC is a `POST` with a
 JSON body that follows the proto3 JSON mapping. Any language with an HTTP
 client can implement a worker. The official SDKs (`sdks/python`,
-`sdks/typescript`) are a few hundred lines each.
+`sdks/typescript`, `sdks/go`, `crates/orbit-worker`) are a few hundred lines each.
+
+When the runtime has a worker credential (`--worker-token`), send it as
+`Authorization: Bearer <token>`. It is accepted only on the endpoints below.
 
 ## Lifecycle
 

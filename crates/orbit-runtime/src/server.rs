@@ -22,6 +22,8 @@ pub struct AppState {
     pub engine: Mutex<Engine>,
     pub changed: Arc<Notify>,
     pub auth_token: Option<String>,
+    /// Optional credential restricted to the worker protocol.
+    pub worker_token: Option<String>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -80,20 +82,45 @@ pub fn router(state: Shared, body_limit: usize) -> Router {
         .with_state(state)
 }
 
+/// Endpoints a worker credential may call.
+fn is_worker_path(path: &str) -> bool {
+    path.starts_with("/v1/workers/") || path.starts_with("/v1/tasks/")
+}
+
+/// Authentication. With an admin token configured, every endpoint except
+/// `/v1/health` requires a bearer token. The admin token can call anything;
+/// the optional worker token can only call the worker protocol endpoints, so
+/// a compromised worker host cannot start, cancel or read executions.
 async fn auth(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    if let Some(expected) = &state.auth_token {
-        if req.uri().path() != "/v1/health" {
-            let ok = req
+    let path = req.uri().path();
+    if let Some(admin) = &state.auth_token {
+        if path != "/v1/health" {
+            let presented = req
                 .headers()
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
-                .is_some_and(|t| constant_time_eq(t.as_bytes(), expected.as_bytes()));
-            if !ok {
+                .map(str::as_bytes);
+            let is_admin = presented.is_some_and(|t| constant_time_eq(t, admin.as_bytes()));
+            let is_worker = presented.is_some_and(|t| {
+                state
+                    .worker_token
+                    .as_ref()
+                    .is_some_and(|w| constant_time_eq(t, w.as_bytes()))
+            });
+            if !is_admin && !is_worker {
                 return ApiError(EngineError::new(
                     401,
                     "UNAUTHENTICATED",
                     "missing or invalid bearer token",
+                ))
+                .into_response();
+            }
+            if !is_admin && !is_worker_path(path) {
+                return ApiError(EngineError::new(
+                    403,
+                    "FORBIDDEN",
+                    "the worker credential may only call /v1/workers/* and /v1/tasks/*",
                 ))
                 .into_response();
             }
@@ -447,9 +474,17 @@ pub async fn run_ticker(state: Shared, interval: Duration) {
     }
 }
 
+/// PEM files for serving HTTPS directly.
+pub struct TlsConfig {
+    pub cert: std::path::PathBuf,
+    pub key: std::path::PathBuf,
+}
+
 pub struct ServerConfig {
     pub addr: SocketAddr,
     pub auth_token: Option<String>,
+    pub worker_token: Option<String>,
+    pub tls: Option<TlsConfig>,
     pub body_limit: usize,
     pub tick_interval: Duration,
 }
@@ -464,14 +499,37 @@ pub async fn serve(
         engine: Mutex::new(engine),
         changed,
         auth_token: config.auth_token,
+        worker_token: config.worker_token,
     });
     let app = router(state.clone(), config.body_limit);
-    let listener = tokio::net::TcpListener::bind(config.addr).await?;
-    tracing::info!(addr = %listener.local_addr()?, "ORBIT runtime listening");
     let ticker = tokio::spawn(run_ticker(state, config.tick_interval));
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await;
+    let result = match config.tls {
+        None => {
+            let listener = tokio::net::TcpListener::bind(config.addr).await?;
+            tracing::info!(addr = %listener.local_addr()?, tls = false, "ORBIT runtime listening");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await
+        }
+        Some(tls) => {
+            let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
+                .await
+                .map_err(|e| {
+                    std::io::Error::new(e.kind(), format!("loading TLS certificate/key: {e}"))
+                })?;
+            let handle = axum_server::Handle::new();
+            let h = handle.clone();
+            tokio::spawn(async move {
+                shutdown.await;
+                h.graceful_shutdown(Some(Duration::from_secs(10)));
+            });
+            tracing::info!(addr = %config.addr, tls = true, "ORBIT runtime listening");
+            axum_server::bind_rustls(config.addr, rustls)
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await
+        }
+    };
     ticker.abort();
     result
 }

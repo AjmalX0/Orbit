@@ -1,0 +1,42 @@
+// Four languages, one workflow: Python normalizes, TypeScript tokenizes,
+// then Go and Rust analyse the result in parallel.
+//
+// Workers: examples/workers/polyglot/ (see README there).
+
+schema WordCount {
+    word: String
+    count: Int
+}
+
+task "text.normalize"   { version "1.0.0" input { text: String } output { text: String } }
+task "text.tokenize"    { version "1.0.0" input { text: String } output { tokens: List<String> } }
+task "text.frequencies" { version "1.0.0" input { tokens: List<String>, top: Int } output { top: List<WordCount>, unique: Int } }
+task "text.fingerprint" { version "1.0.0" input { text: String } output { hash: String, bytes: Int } }
+
+workflow DocumentInsights {
+    version "1.0.0"
+    input {
+        text: String
+        top: Int = 3
+    }
+    output {
+        words: Int
+        unique: Int
+        top_word: String?
+        top: List<WordCount>
+        fingerprint: String
+    }
+
+    step normalize   { worker "text.normalize"   using python     with { text: input.text } }
+    step tokenize    { worker "text.tokenize"    using typescript with { text: normalize.text } }
+    step frequencies { worker "text.frequencies" using go         with { tokens: tokenize.tokens, top: input.top } }
+    step fingerprint { worker "text.fingerprint" using rust       with { text: normalize.text } timeout 5s }
+
+    return {
+        words: len(tokenize.tokens)
+        unique: frequencies.unique
+        top_word: frequencies.top[0].word
+        top: frequencies.top
+        fingerprint: fingerprint.hash
+    }
+}

@@ -149,6 +149,8 @@ Or start a new project with `orbit init my-project`.
 | CLI | `crates/orbit-cli` | `init check validate compile graph server deploy run status inspect logs cancel ps workers` |
 | Python SDK | `sdks/python` | standard library only |
 | TypeScript SDK | `sdks/typescript` | zero dependencies, runs on Node.js and anything with `fetch` |
+| Go SDK | `sdks/go` | standard library only, context-based cancellation |
+| Rust SDK | `crates/orbit-worker` | typed handlers via serde, blocking threads |
 | Worker protocol | `protocol/` | canonical `.proto`, plus the HTTP/JSON binding spec |
 | Specification | `specification/` | RFC-0001 with implementation record, EBNF grammar |
 | Docs | `docs/` | [language](docs/language.md), [runtime semantics](docs/runtime.md), [diagnostics](docs/diagnostics.md) |
@@ -183,13 +185,29 @@ cargo build && python3 -I tests/e2e/test_e2e.py
 ```
 
 `cargo test` runs the compiler, IR and runtime suites. The second command is
-the end-to-end suite: a real server, real Python and TypeScript workers, and a
-SIGKILL crash-recovery scenario. Acceptance criteria are mapped to tests in
+the end-to-end suite: a real server with real Python, TypeScript, Go and Rust
+workers, a SIGKILL crash-recovery scenario, and HTTPS with admin and worker
+credentials. The SDKs also have their own protocol tests:
+
+```bash
+PYTHONPATH=sdks/python python3 -m unittest discover -s sdks/python/tests
+```
+
+```bash
+(cd sdks/typescript && npm test)
+```
+
+```bash
+(cd sdks/go && go test ./...)
+```
+
+The Rust SDK's tests run as part of `cargo test`. Acceptance criteria are mapped to tests in
 [RFC-0001 §15](specification/RFC-0001.md#15-testing-strategy-and-acceptance-criteria).
 
 ## Status
 
-v0.1: single-node, SQLite, HTTP/JSON worker protocol, Python and TypeScript
-SDKs. Next: gRPC binding, PostgreSQL, OpenTelemetry, `orbit fmt` and an LSP,
+v0.1: single-node, SQLite, HTTP/JSON worker protocol over HTTP or HTTPS, admin
+and restricted worker credentials, Python, TypeScript, Go and Rust SDKs
+([four-language example](examples/polyglot.orbit)). Next: gRPC binding, PostgreSQL, OpenTelemetry, `orbit fmt` and an LSP,
 fan-out (`for each`), child workflows, then multi-node execution. See
 [RFC-0001 Appendix A](specification/RFC-0001.md#appendix-a--v010-implementation-record).
