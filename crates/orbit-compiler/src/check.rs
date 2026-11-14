@@ -22,11 +22,7 @@ pub struct Env<'a> {
 pub fn execution_type() -> Type {
     Type::record(
         Some("Execution"),
-        ["id", "workflow", "version"]
-            .iter()
-            .map(|n| FieldType { name: n.to_string(), ty: Type::String, default: None })
-            .chain([FieldType { name: "attempt".into(), ty: Type::Int, default: None }])
-            .collect(),
+        ["id", "workflow", "version"].iter().map(|n| FieldType { name: n.to_string(), ty: Type::String, default: None }).collect(),
     )
 }
 
@@ -363,7 +359,7 @@ impl Checker<'_, '_> {
                 if segs.len() != 2 {
                     self.error(
                         Diagnostic::error("E0402", "expected `execution.<field>`", span)
-                            .with_note("available: execution.id, execution.workflow, execution.version, execution.attempt"),
+                            .with_note("available: execution.id, execution.workflow, execution.version"),
                     );
                     return (Type::Json, lit(Value::Null));
                 }

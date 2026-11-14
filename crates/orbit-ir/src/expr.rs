@@ -51,7 +51,7 @@ pub enum Expr {
     Input { path: Vec<String> },
     /// `<step>.a.b` — the output of a completed (or skipped → `null`) step.
     Step { step: String, path: Vec<String> },
-    /// `execution.id`, `execution.workflow`, `execution.version`, `execution.attempt`
+    /// `execution.id`, `execution.workflow`, `execution.version`
     Execution { field: String },
     Index { target: Box<Expr>, index: Box<Expr> },
     Object { fields: Vec<ObjectField> },
