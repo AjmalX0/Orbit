@@ -233,9 +233,17 @@ pub fn ir_summary(wf: &WorkflowIr, tty: bool) -> String {
     out
 }
 
+/// Rows ordered by when each unit last changed (scheduled, dispatched, finished).
 fn unit_rows(units: &serde_json::Map<String, Value>) -> Vec<(String, String, u64, String, String)> {
-    units
-        .iter()
+    let mut ordered: Vec<(&String, &Value)> = units.iter().collect();
+    ordered.sort_by_key(|(_, u)| {
+        ["finished_at_ms", "dispatched_at_ms", "scheduled_at_ms"]
+            .iter()
+            .find_map(|k| u[*k].as_i64())
+            .unwrap_or(i64::MAX)
+    });
+    ordered
+        .into_iter()
         .map(|(k, u)| {
             let status = u["status"].as_str().unwrap_or("PENDING").to_string();
             let dur = match (

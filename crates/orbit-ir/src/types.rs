@@ -60,7 +60,11 @@ pub struct FieldType {
     #[serde(rename = "type")]
     pub ty: Type,
     /// `Some(Value::Null)` is a real default of `null`, distinct from no default.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub default: Option<Value>,
 }
 

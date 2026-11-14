@@ -1,0 +1,13 @@
+{
+  "name": "orbit-language",
+  "displayName": "ORBIT",
+  "description": "Syntax highlighting for the ORBIT orchestration language",
+  "version": "0.1.0",
+  "publisher": "orbit",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [{ "id": "orbit", "aliases": ["ORBIT", "orbit"], "extensions": [".orbit"], "configuration": "./language-configuration.json" }],
+    "grammars": [{ "language": "orbit", "scopeName": "source.orbit", "path": "./syntaxes/orbit.tmLanguage.json" }]
+  }
+}

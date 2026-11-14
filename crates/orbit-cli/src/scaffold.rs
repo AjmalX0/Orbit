@@ -95,7 +95,10 @@ pub fn init(dir: &Path) -> Result<(), String> {
         "# {name}\n\nAn ORBIT project.\n\n```bash\norbit check workflows/hello.orbit\norbit server &\nPYTHONPATH=$ORBIT_HOME/sdks/python python workers/python/worker.py &\nnode workers/typescript/worker.ts &\norbit run workflows/hello.orbit --input '{{\"name\": \"Ada\"}}'\n```\n\nThe TypeScript worker imports the SDK by relative path; adjust it if the project lives\noutside the ORBIT repository (or install `@orbit/sdk`).\n"
     );
     let files: [(&str, String); 5] = [
-        ("workers/typescript/package.json", "{ \"private\": true, \"type\": \"module\" }\n".to_string()),
+        (
+            "workers/typescript/package.json",
+            "{ \"private\": true, \"type\": \"module\" }\n".to_string(),
+        ),
         ("workflows/hello.orbit", HELLO.to_string()),
         ("workers/python/worker.py", PY_WORKER.to_string()),
         ("workers/typescript/worker.ts", TS_WORKER.to_string()),

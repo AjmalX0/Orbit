@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ORBIT",
+  "scopeName": "source.orbit",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    {
+      "match": "\\b(workflow|schema|task)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": { "1": { "name": "keyword.declaration.orbit" }, "2": { "name": "entity.name.type.orbit" } }
+    },
+    {
+      "match": "\\b(step)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": { "1": { "name": "keyword.declaration.orbit" }, "2": { "name": "entity.name.function.orbit" } }
+    },
+    { "name": "keyword.control.orbit", "match": "\\b(import|workflow|schema|task|step|return|when|after|compensate|retry|if|then|else|on)\\b" },
+    { "name": "keyword.other.orbit", "match": "\\b(version|description|input|output|worker|sleep|using|with|timeout|queue_timeout|idempotency_key)\\b" },
+    { "name": "storage.type.orbit", "match": "\\b(String|Int|Float|Bool|Bytes|Duration|Timestamp|UUID|JSON|List|Map)\\b" },
+    { "name": "constant.language.orbit", "match": "\\b(true|false|null|fixed|exponential)\\b" },
+    { "name": "constant.numeric.duration.orbit", "match": "\\b\\d[\\d_]*(\\.\\d+)?(ms|s|m|h|d)\\b" },
+    { "name": "constant.numeric.orbit", "match": "\\b\\d[\\d_]*(\\.\\d[\\d_]*)?\\b" },
+    { "name": "support.function.builtin.orbit", "match": "\\b(len|coalesce|is_null|string|int|float|contains|lower|upper|trim|join|keys|min|max|abs)(?=\\()" },
+    { "name": "variable.language.orbit", "match": "\\b(input|execution)\\b(?=\\.)" },
+    { "name": "keyword.operator.orbit", "match": "==|!=|<=|>=|&&|\\|\\||[-+*/%!<>?=]" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.orbit", "match": "//.*$" },
+        { "name": "comment.block.orbit", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.orbit",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "name": "constant.character.escape.orbit", "match": "\\\\(n|t|r|\"|\\\\|u\\{[0-9a-fA-F]+\\})" }]
+    }
+  }
+}
