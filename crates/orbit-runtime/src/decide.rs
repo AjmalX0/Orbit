@@ -52,7 +52,10 @@ fn unit(state: &ExecutionState, key: &str) -> UnitState {
 /// Evaluate the payload and idempotency key for a unit's first attempt.
 fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocation) -> Event {
     let scope = StateScope { state };
-    let fail = |code: &str, msg: String| Event::StepFailed { step: key.into(), error: TaskError::new(code, msg, false) };
+    let fail = |code: &str, msg: String| Event::StepFailed {
+        step: key.into(),
+        error: TaskError::new(code, msg, false),
+    };
     let mut input = match eval(&inv.input, &scope) {
         Ok(v) => v,
         Err(e) => return fail(codes::EXPRESSION_ERROR, format!("evaluating input: {e}")),
@@ -60,7 +63,10 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
     if let Some(contract) = def.contracts.get(&inv.task) {
         contract.input.apply_defaults(&mut input);
         if let Err(e) = contract.input.validate(&input, false) {
-            return fail(codes::INPUT_CONTRACT_VIOLATION, format!("input for `{}` is invalid at {e}", inv.task));
+            return fail(
+                codes::INPUT_CONTRACT_VIOLATION,
+                format!("input for `{}` is invalid at {e}", inv.task),
+            );
         }
     }
     let idempotency_key = match &inv.idempotency_key {
@@ -68,41 +74,82 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
             Ok(Value::String(s)) => s,
             Ok(Value::Null) => format!("{}/{key}", state.id),
             Ok(other) => other.to_string(),
-            Err(e) => return fail(codes::EXPRESSION_ERROR, format!("evaluating idempotency_key: {e}")),
+            Err(e) => {
+                return fail(
+                    codes::EXPRESSION_ERROR,
+                    format!("evaluating idempotency_key: {e}"),
+                )
+            }
         },
         None => format!("{}/{key}", state.id),
     };
-    Event::StepScheduled { step: key.into(), attempt: 1, input, idempotency_key, redelivery: false }
+    Event::StepScheduled {
+        step: key.into(),
+        attempt: 1,
+        input,
+        idempotency_key,
+        redelivery: false,
+    }
 }
 
 /// Retry-or-fail decision after a failed attempt.
-fn after_failure(state: &ExecutionState, key: &str, u: &UnitState, inv: Option<&Invocation>, now: u64) -> Event {
-    let error = u.last_error.clone().unwrap_or_else(|| TaskError::new("UNKNOWN", "attempt failed", true));
+fn after_failure(
+    state: &ExecutionState,
+    key: &str,
+    u: &UnitState,
+    inv: Option<&Invocation>,
+    now: u64,
+) -> Event {
+    let error = u
+        .last_error
+        .clone()
+        .unwrap_or_else(|| TaskError::new("UNKNOWN", "attempt failed", true));
     let is_compensation = key.starts_with("compensate:");
     let aborting = state.abort.is_some() && !is_compensation;
     if let Some(inv) = inv {
         let policy = &inv.retry;
-        let retryable = error.retryable && !policy.non_retryable.iter().any(|c| *c == error.code);
+        let retryable = error.retryable && !policy.non_retryable.contains(&error.code);
         if retryable && !aborting && u.attempt < policy.max_attempts {
             let next = u.attempt + 1;
             let delay = policy.delay_before(next);
-            return Event::RetryScheduled { step: key.into(), next_attempt: next, delay_ms: delay, fire_at_ms: now + delay };
+            return Event::RetryScheduled {
+                step: key.into(),
+                next_attempt: next,
+                delay_ms: delay,
+                fire_at_ms: now + delay,
+            };
         }
         if retryable && u.attempt >= policy.max_attempts && policy.max_attempts > 1 {
             let mut e = error.clone();
             e.message = format!("{} (gave up after {} attempts)", e.message, u.attempt);
-            return Event::StepFailed { step: key.into(), error: e };
+            return Event::StepFailed {
+                step: key.into(),
+                error: e,
+            };
         }
     }
-    Event::StepFailed { step: key.into(), error }
+    Event::StepFailed {
+        step: key.into(),
+        error,
+    }
 }
 
 fn finish(state: &ExecutionState, outcome: CompensationOutcome) -> Event {
     match &state.abort {
-        Some(AbortReason::Cancelled { .. }) => Event::WorkflowCancelled { compensation: outcome },
-        Some(AbortReason::TimedOut) => Event::WorkflowTimedOut { compensation: outcome },
-        Some(AbortReason::Failed { error }) => Event::WorkflowFailed { error: error.clone(), compensation: outcome },
-        None => Event::WorkflowFailed { error: TaskError::new("UNKNOWN", "workflow aborted", false), compensation: outcome },
+        Some(AbortReason::Cancelled { .. }) => Event::WorkflowCancelled {
+            compensation: outcome,
+        },
+        Some(AbortReason::TimedOut) => Event::WorkflowTimedOut {
+            compensation: outcome,
+        },
+        Some(AbortReason::Failed { error }) => Event::WorkflowFailed {
+            error: error.clone(),
+            compensation: outcome,
+        },
+        None => Event::WorkflowFailed {
+            error: TaskError::new("UNKNOWN", "workflow aborted", false),
+            compensation: outcome,
+        },
     }
 }
 
@@ -131,7 +178,11 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
                     out.push(Event::StepAttemptFailed {
                         step: key.clone(),
                         attempt: u.attempt,
-                        error: TaskError::new(codes::TIMEOUT, format!("attempt {} exceeded its timeout", u.attempt), true),
+                        error: TaskError::new(
+                            codes::TIMEOUT,
+                            format!("attempt {} exceeded its timeout", u.attempt),
+                            true,
+                        ),
                     });
                 }
             }
@@ -142,7 +193,11 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
                         out.push(Event::StepAttemptFailed {
                             step: key.clone(),
                             attempt: u.attempt,
-                            error: TaskError::new(codes::QUEUE_TIMEOUT, "no worker picked up the task before queue_timeout", false),
+                            error: TaskError::new(
+                                codes::QUEUE_TIMEOUT,
+                                "no worker picked up the task before queue_timeout",
+                                false,
+                            ),
                         });
                     }
                 }
@@ -157,7 +212,9 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
                     if state.abort.is_some() && !key.starts_with("compensate:") {
                         out.push(Event::StepFailed {
                             step: key.clone(),
-                            error: u.last_error.clone().unwrap_or_else(|| TaskError::new(codes::CANCELLED, "aborted", false)),
+                            error: u.last_error.clone().unwrap_or_else(|| {
+                                TaskError::new(codes::CANCELLED, "aborted", false)
+                            }),
                         });
                     } else {
                         out.push(Event::StepScheduled {
@@ -193,9 +250,12 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
 }
 
 fn deps_done(state: &ExecutionState, step: &StepIr) -> bool {
-    step.dependencies
-        .iter()
-        .all(|d| matches!(unit(state, d).status(), UnitStatus::Succeeded | UnitStatus::Skipped))
+    step.dependencies.iter().all(|d| {
+        matches!(
+            unit(state, d).status(),
+            UnitStatus::Succeeded | UnitStatus::Skipped
+        )
+    })
 }
 
 fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> {
@@ -210,41 +270,62 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
                 match eval(cond, &StateScope { state }) {
                     Ok(Value::Bool(true)) => {}
                     Ok(Value::Bool(false)) | Ok(Value::Null) => {
-                        out.push(Event::StepSkipped { step: step.id.clone(), reason: "`when` condition was false".into() });
+                        out.push(Event::StepSkipped {
+                            step: step.id.clone(),
+                            reason: "`when` condition was false".into(),
+                        });
                         continue;
                     }
                     Ok(other) => {
                         out.push(Event::StepFailed {
                             step: step.id.clone(),
-                            error: TaskError::new(codes::EXPRESSION_ERROR, format!("`when` evaluated to {other}, expected Bool"), false),
+                            error: TaskError::new(
+                                codes::EXPRESSION_ERROR,
+                                format!("`when` evaluated to {other}, expected Bool"),
+                                false,
+                            ),
                         });
                         continue;
                     }
                     Err(e) => {
                         out.push(Event::StepFailed {
                             step: step.id.clone(),
-                            error: TaskError::new(codes::EXPRESSION_ERROR, format!("evaluating `when`: {e}"), false),
+                            error: TaskError::new(
+                                codes::EXPRESSION_ERROR,
+                                format!("evaluating `when`: {e}"),
+                                false,
+                            ),
                         });
                         continue;
                     }
                 }
             }
             match &step.action {
-                Action::Sleep { duration_ms } => out.push(Event::TimerStarted { step: step.id.clone(), fire_at_ms: now + duration_ms }),
+                Action::Sleep { duration_ms } => out.push(Event::TimerStarted {
+                    step: step.id.clone(),
+                    fire_at_ms: now + duration_ms,
+                }),
                 Action::Task(inv) => out.push(schedule(state, def, &step.id, inv)),
             }
         }
         if !out.is_empty() {
             return out;
         }
-        let all_done = def.steps.iter().all(|s| unit(state, &s.id).status().is_terminal());
+        let all_done = def
+            .steps
+            .iter()
+            .all(|s| unit(state, &s.id).status().is_terminal());
         if all_done {
             let output = match &def.result {
                 Some(expr) => match eval(expr, &StateScope { state }) {
                     Ok(v) => v,
                     Err(e) => {
                         return vec![Event::WorkflowFailed {
-                            error: TaskError::new(codes::EXPRESSION_ERROR, format!("evaluating `return`: {e}"), false),
+                            error: TaskError::new(
+                                codes::EXPRESSION_ERROR,
+                                format!("evaluating `return`: {e}"),
+                                false,
+                            ),
                             compensation: CompensationOutcome::None,
                         }]
                     }
@@ -253,7 +334,11 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
             };
             if let Err(e) = def.output.validate(&output, false) {
                 return vec![Event::WorkflowFailed {
-                    error: TaskError::new(codes::OUTPUT_CONTRACT_VIOLATION, format!("workflow output is invalid at {e}"), false),
+                    error: TaskError::new(
+                        codes::OUTPUT_CONTRACT_VIOLATION,
+                        format!("workflow output is invalid at {e}"),
+                        false,
+                    ),
                     compensation: CompensationOutcome::None,
                 }];
             }
@@ -268,9 +353,18 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
     for step in &def.steps {
         let u = unit(state, &step.id);
         match u.status() {
-            UnitStatus::Pending | UnitStatus::Waiting | UnitStatus::RetryWait => out.push(Event::StepCancelled { step: step.id.clone() }),
-            UnitStatus::Scheduled if !u.redelivery => out.push(Event::StepCancelled { step: step.id.clone() }),
-            UnitStatus::Scheduled | UnitStatus::Dispatched | UnitStatus::AttemptFailed | UnitStatus::Uncertain => in_flight = true,
+            UnitStatus::Pending | UnitStatus::Waiting | UnitStatus::RetryWait => {
+                out.push(Event::StepCancelled {
+                    step: step.id.clone(),
+                })
+            }
+            UnitStatus::Scheduled if !u.redelivery => out.push(Event::StepCancelled {
+                step: step.id.clone(),
+            }),
+            UnitStatus::Scheduled
+            | UnitStatus::Dispatched
+            | UnitStatus::AttemptFailed
+            | UnitStatus::Uncertain => in_flight = true,
             _ => {}
         }
     }
@@ -283,10 +377,11 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
         .filter(|s| s.compensation.is_some())
         .filter_map(|s| {
             let u = state.units.get(&s.id)?;
-            (u.status() == UnitStatus::Succeeded).then(|| (s.id.as_str(), u.succeeded_seq.unwrap_or(0)))
+            (u.status() == UnitStatus::Succeeded)
+                .then(|| (s.id.as_str(), u.succeeded_seq.unwrap_or(0)))
         })
         .collect();
-    done.sort_by(|a, b| b.1.cmp(&a.1));
+    done.sort_by_key(|d| std::cmp::Reverse(d.1));
     if done.is_empty() {
         return vec![finish(state, CompensationOutcome::None)];
     }
@@ -296,7 +391,10 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
         Some(AbortReason::TimedOut) => "workflow timed out".into(),
         None => String::new(),
     };
-    vec![Event::CompensationStarted { reason, steps: done.into_iter().map(|(s, _)| s.to_string()).collect() }]
+    vec![Event::CompensationStarted {
+        reason,
+        steps: done.into_iter().map(|(s, _)| s.to_string()).collect(),
+    }]
 }
 
 fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {
@@ -307,17 +405,31 @@ fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {
         match u.status() {
             UnitStatus::Succeeded => continue,
             UnitStatus::Failed | UnitStatus::Cancelled => {
-                let error = u.error.unwrap_or_else(|| TaskError::new("UNKNOWN", "compensation failed", false));
-                return vec![Event::CompensationFailed { step: step.clone(), error }, finish(state, CompensationOutcome::Failed)];
+                let error = u
+                    .error
+                    .unwrap_or_else(|| TaskError::new("UNKNOWN", "compensation failed", false));
+                return vec![
+                    Event::CompensationFailed {
+                        step: step.clone(),
+                        error,
+                    },
+                    finish(state, CompensationOutcome::Failed),
+                ];
             }
             UnitStatus::Pending => {
                 return match invocation(def, &key) {
                     Some(inv) => vec![schedule(state, def, &key, inv)],
-                    None => vec![Event::StepFailed { step: key, error: TaskError::new("UNKNOWN", "missing compensation", false) }],
+                    None => vec![Event::StepFailed {
+                        step: key,
+                        error: TaskError::new("UNKNOWN", "missing compensation", false),
+                    }],
                 };
             }
             _ => return vec![],
         }
     }
-    vec![Event::CompensationCompleted {}, finish(state, CompensationOutcome::Completed)]
+    vec![
+        Event::CompensationCompleted {},
+        finish(state, CompensationOutcome::Completed),
+    ]
 }

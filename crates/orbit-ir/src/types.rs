@@ -37,9 +37,16 @@ pub enum Type {
     Json,
     /// The type of the `null` literal. Never appears in a field position.
     Null,
-    List { item: Box<Type> },
-    Map { key: Box<Type>, value: Box<Type> },
-    Optional { inner: Box<Type> },
+    List {
+        item: Box<Type>,
+    },
+    Map {
+        key: Box<Type>,
+        value: Box<Type>,
+    },
+    Optional {
+        inner: Box<Type>,
+    },
     Record {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -52,8 +59,14 @@ pub struct FieldType {
     pub name: String,
     #[serde(rename = "type")]
     pub ty: Type,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `Some(Value::Null)` is a real default of `null`, distinct from no default.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     pub default: Option<Value>,
+}
+
+/// Deserialize a present field as `Some`, even when its value is `null`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(d).map(Some)
 }
 
 impl FieldType {
@@ -67,7 +80,9 @@ impl Type {
     pub fn optional(self) -> Type {
         match self {
             Type::Optional { .. } | Type::Json | Type::Null => self,
-            other => Type::Optional { inner: Box::new(other) },
+            other => Type::Optional {
+                inner: Box::new(other),
+            },
         }
     }
 
@@ -88,7 +103,10 @@ impl Type {
     }
 
     pub fn record(name: Option<&str>, fields: Vec<FieldType>) -> Type {
-        Type::Record { name: name.map(str::to_string), fields }
+        Type::Record {
+            name: name.map(str::to_string),
+            fields,
+        }
     }
 
     pub fn field(&self, name: &str) -> Option<&FieldType> {
@@ -108,20 +126,70 @@ impl Type {
         self.validate_at(value, strict, &mut path)
     }
 
-    fn validate_at(&self, value: &Value, strict: bool, path: &mut String) -> Result<(), ValidationError> {
+    fn validate_at(
+        &self,
+        value: &Value,
+        strict: bool,
+        path: &mut String,
+    ) -> Result<(), ValidationError> {
         let fail = |path: &str, expected: &Type| {
-            Err(ValidationError { path: path.to_string(), message: format!("expected {expected}, found {}", describe(value)) })
+            Err(ValidationError {
+                path: path.to_string(),
+                message: format!("expected {expected}, found {}", describe(value)),
+            })
         };
         match self {
             Type::Json => Ok(()),
-            Type::Null => if value.is_null() { Ok(()) } else { fail(path, self) },
-            Type::Optional { inner } => if value.is_null() { Ok(()) } else { inner.validate_at(value, strict, path) },
+            Type::Null => {
+                if value.is_null() {
+                    Ok(())
+                } else {
+                    fail(path, self)
+                }
+            }
+            Type::Optional { inner } => {
+                if value.is_null() {
+                    Ok(())
+                } else {
+                    inner.validate_at(value, strict, path)
+                }
+            }
             _ if value.is_null() => fail(path, self),
-            Type::String => if value.is_string() { Ok(()) } else { fail(path, self) },
-            Type::Int => if value.is_i64() { Ok(()) } else { fail(path, self) },
-            Type::Float => if value.is_number() { Ok(()) } else { fail(path, self) },
-            Type::Bool => if value.is_boolean() { Ok(()) } else { fail(path, self) },
-            Type::Duration => if value.is_u64() { Ok(()) } else { fail(path, self) },
+            Type::String => {
+                if value.is_string() {
+                    Ok(())
+                } else {
+                    fail(path, self)
+                }
+            }
+            Type::Int => {
+                if value.is_i64() {
+                    Ok(())
+                } else {
+                    fail(path, self)
+                }
+            }
+            Type::Float => {
+                if value.is_number() {
+                    Ok(())
+                } else {
+                    fail(path, self)
+                }
+            }
+            Type::Bool => {
+                if value.is_boolean() {
+                    Ok(())
+                } else {
+                    fail(path, self)
+                }
+            }
+            Type::Duration => {
+                if value.is_u64() {
+                    Ok(())
+                } else {
+                    fail(path, self)
+                }
+            }
             Type::Bytes => match value.as_str() {
                 Some(s) if is_base64(s) => Ok(()),
                 _ => fail(path, self),
@@ -135,7 +203,9 @@ impl Type {
                 _ => fail(path, self),
             },
             Type::List { item } => {
-                let Some(items) = value.as_array() else { return fail(path, self) };
+                let Some(items) = value.as_array() else {
+                    return fail(path, self);
+                };
                 for (i, v) in items.iter().enumerate() {
                     let len = path.len();
                     path.push_str(&format!("[{i}]"));
@@ -145,7 +215,9 @@ impl Type {
                 Ok(())
             }
             Type::Map { value: vt, .. } => {
-                let Some(obj) = value.as_object() else { return fail(path, self) };
+                let Some(obj) = value.as_object() else {
+                    return fail(path, self);
+                };
                 for (k, v) in obj {
                     let len = path.len();
                     path.push_str(&format!("[{k:?}]"));
@@ -155,7 +227,9 @@ impl Type {
                 Ok(())
             }
             Type::Record { fields, .. } => {
-                let Some(obj) = value.as_object() else { return fail(path, self) };
+                let Some(obj) = value.as_object() else {
+                    return fail(path, self);
+                };
                 for f in fields {
                     let len = path.len();
                     path.push('.');
@@ -165,7 +239,10 @@ impl Type {
                         None if f.required() => {
                             return Err(ValidationError {
                                 path: path.clone(),
-                                message: format!("missing required field `{}` of type {}", f.name, f.ty),
+                                message: format!(
+                                    "missing required field `{}` of type {}",
+                                    f.name, f.ty
+                                ),
                             })
                         }
                         None => {}
@@ -189,8 +266,12 @@ impl Type {
     pub fn apply_defaults(&self, value: &mut Value) {
         match (self, value) {
             (Type::Optional { inner }, v) if !v.is_null() => inner.apply_defaults(v),
-            (Type::List { item }, Value::Array(items)) => items.iter_mut().for_each(|v| item.apply_defaults(v)),
-            (Type::Map { value: vt, .. }, Value::Object(obj)) => obj.values_mut().for_each(|v| vt.apply_defaults(v)),
+            (Type::List { item }, Value::Array(items)) => {
+                items.iter_mut().for_each(|v| item.apply_defaults(v))
+            }
+            (Type::Map { value: vt, .. }, Value::Object(obj)) => {
+                obj.values_mut().for_each(|v| vt.apply_defaults(v))
+            }
             (Type::Record { fields, .. }, Value::Object(obj)) => {
                 for f in fields {
                     match obj.get_mut(&f.name) {
@@ -280,11 +361,24 @@ pub fn is_uuid(s: &str) -> bool {
 /// RFC 3339 `YYYY-MM-DDTHH:MM:SS[.frac](Z|±HH:MM)`.
 pub fn is_timestamp(s: &str) -> bool {
     let b = s.as_bytes();
-    let digits = |r: std::ops::Range<usize>| r.clone().all(|i| b.get(i).is_some_and(u8::is_ascii_digit));
-    if b.len() < 20 || !digits(0..4) || b[4] != b'-' || !digits(5..7) || b[7] != b'-' || !digits(8..10) {
+    let digits =
+        |r: std::ops::Range<usize>| r.clone().all(|i| b.get(i).is_some_and(u8::is_ascii_digit));
+    if b.len() < 20
+        || !digits(0..4)
+        || b[4] != b'-'
+        || !digits(5..7)
+        || b[7] != b'-'
+        || !digits(8..10)
+    {
         return false;
     }
-    if !matches!(b[10], b'T' | b't' | b' ') || !digits(11..13) || b[13] != b':' || !digits(14..16) || b[16] != b':' || !digits(17..19) {
+    if !matches!(b[10], b'T' | b't' | b' ')
+        || !digits(11..13)
+        || b[13] != b':'
+        || !digits(14..16)
+        || b[16] != b':'
+        || !digits(17..19)
+    {
         return false;
     }
     let mut i = 19;
@@ -300,14 +394,18 @@ pub fn is_timestamp(s: &str) -> bool {
     }
     match b.get(i) {
         Some(b'Z' | b'z') => i + 1 == b.len(),
-        Some(b'+' | b'-') => b.len() == i + 6 && digits(i + 1..i + 3) && b[i + 3] == b':' && digits(i + 4..i + 6),
+        Some(b'+' | b'-') => {
+            b.len() == i + 6 && digits(i + 1..i + 3) && b[i + 3] == b':' && digits(i + 4..i + 6)
+        }
         _ => false,
     }
 }
 
 pub fn is_base64(s: &str) -> bool {
-    s.len() % 4 == 0
-        && s.trim_end_matches('=').bytes().all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
+    s.len().is_multiple_of(4)
+        && s.trim_end_matches('=')
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
         && s.len() - s.trim_end_matches('=').len() <= 2
 }
 
@@ -320,10 +418,28 @@ mod tests {
         Type::record(
             Some("Order"),
             vec![
-                FieldType { name: "id".into(), ty: Type::Uuid, default: None },
-                FieldType { name: "qty".into(), ty: Type::Int, default: Some(json!(1)) },
-                FieldType { name: "note".into(), ty: Type::String.optional(), default: None },
-                FieldType { name: "tags".into(), ty: Type::List { item: Box::new(Type::String) }, default: None },
+                FieldType {
+                    name: "id".into(),
+                    ty: Type::Uuid,
+                    default: None,
+                },
+                FieldType {
+                    name: "qty".into(),
+                    ty: Type::Int,
+                    default: Some(json!(1)),
+                },
+                FieldType {
+                    name: "note".into(),
+                    ty: Type::String.optional(),
+                    default: None,
+                },
+                FieldType {
+                    name: "tags".into(),
+                    ty: Type::List {
+                        item: Box::new(Type::String),
+                    },
+                    default: None,
+                },
             ],
         )
     }
@@ -333,13 +449,21 @@ mod tests {
         let t = order();
         let id = "123e4567-e89b-12d3-a456-426614174000";
         assert!(t.validate(&json!({"id": id, "tags": []}), true).is_ok());
-        let e = t.validate(&json!({"id": id, "tags": [1]}), true).unwrap_err();
+        let e = t
+            .validate(&json!({"id": id, "tags": [1]}), true)
+            .unwrap_err();
         assert_eq!(e.path, "$.tags[0]");
         let e = t.validate(&json!({"tags": []}), true).unwrap_err();
         assert!(e.message.contains("missing required field `id`"));
-        assert!(t.validate(&json!({"id": id, "tags": [], "x": 1}), true).is_err());
-        assert!(t.validate(&json!({"id": id, "tags": [], "x": 1}), false).is_ok());
-        assert!(t.validate(&json!({"id": "nope", "tags": []}), true).is_err());
+        assert!(t
+            .validate(&json!({"id": id, "tags": [], "x": 1}), true)
+            .is_err());
+        assert!(t
+            .validate(&json!({"id": id, "tags": [], "x": 1}), false)
+            .is_ok());
+        assert!(t
+            .validate(&json!({"id": "nope", "tags": []}), true)
+            .is_err());
     }
 
     #[test]

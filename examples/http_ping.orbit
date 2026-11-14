@@ -1,0 +1,19 @@
+// Calls an HTTP endpoint with the built-in adapter: no worker required.
+// Start the runtime with `orbit server --enable-http-adapter`.
+
+workflow HttpPing {
+    version "1.0.0"
+    input { url: String = "http://127.0.0.1:7233/v1/health" }
+
+    step probe {
+        worker "orbit.http.request"
+        with { url: input.url, headers: { accept: "application/json" } }
+        timeout 5s
+        retry { attempts: 3, backoff: exponential, initial_delay: 200ms }
+    }
+
+    return {
+        status: probe.status
+        healthy: probe.status == 200
+    }
+}

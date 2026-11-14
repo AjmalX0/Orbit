@@ -2,7 +2,6 @@
 name = "orbit-ir"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 description = "ORBIT typed intermediate representation (orbit-ir/1)"
 
 [dependencies]

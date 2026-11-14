@@ -16,15 +16,30 @@ pub struct ParseResult {
 /// Lex and parse one source file.
 pub fn parse(file: FileId, src: &str) -> ParseResult {
     let (tokens, mut diagnostics) = tokenize(file, src);
-    let mut p = Parser { tokens, pos: 0, diagnostics: vec![] };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        diagnostics: vec![],
+    };
     let program = p.program();
     diagnostics.append(&mut p.diagnostics);
-    ParseResult { program, diagnostics }
+    ParseResult {
+        program,
+        diagnostics,
+    }
 }
 
 const TOP_LEVEL: &[&str] = &["workflow", "schema", "task", "import"];
-const WORKFLOW_MEMBERS: &[&str] =
-    &["version", "description", "timeout", "input", "output", "step", "return", "on"];
+const WORKFLOW_MEMBERS: &[&str] = &[
+    "version",
+    "description",
+    "timeout",
+    "input",
+    "output",
+    "step",
+    "return",
+    "on",
+];
 const STEP_MEMBERS: &[&str] = &[
     "worker",
     "sleep",
@@ -95,7 +110,11 @@ impl Parser {
     fn error_here(&mut self, expected: &str) {
         let found = self.kind().describe();
         let span = self.span();
-        self.diagnostics.push(Diagnostic::error("E0100", format!("expected {expected}, found {found}"), span));
+        self.diagnostics.push(Diagnostic::error(
+            "E0100",
+            format!("expected {expected}, found {found}"),
+            span,
+        ));
     }
 
     fn expect(&mut self, k: TokenKind) -> PResult<Span> {
@@ -172,7 +191,9 @@ impl Parser {
                     }
                     depth -= 1;
                 }
-                TokenKind::Ident(w) if depth == 0 && self.tok().newline_before && members.contains(&w.as_str()) => {
+                TokenKind::Ident(w)
+                    if depth == 0 && self.tok().newline_before && members.contains(&w.as_str()) =>
+                {
                     return
                 }
                 _ => {}
@@ -198,7 +219,12 @@ impl Parser {
     }
 
     /// Parse `{ ... }` calling `member` for each element until `}`.
-    fn block(&mut self, context: &str, members: &[&str], mut member: impl FnMut(&mut Self) -> PResult<bool>) -> Span {
+    fn block(
+        &mut self,
+        context: &str,
+        members: &[&str],
+        mut member: impl FnMut(&mut Self) -> PResult<bool>,
+    ) -> Span {
         let open = self.span();
         if self.expect(TokenKind::LBrace).is_err() {
             self.recover(members);
@@ -234,12 +260,19 @@ impl Parser {
                 return program;
             }
             let decl = match self.kind() {
-                TokenKind::Ident(w) if w == "workflow" => self.workflow().map(Declaration::Workflow),
+                TokenKind::Ident(w) if w == "workflow" => {
+                    self.workflow().map(Declaration::Workflow)
+                }
                 TokenKind::Ident(w) if w == "schema" => self.schema().map(Declaration::Schema),
                 TokenKind::Ident(w) if w == "task" => self.task().map(Declaration::Task),
                 TokenKind::Ident(w) if w == "import" => {
                     let start = self.bump().span;
-                    self.string("an import path string").map(|(path, s)| Declaration::Import(Import { path, span: start.to(s) }))
+                    self.string("an import path string").map(|(path, s)| {
+                        Declaration::Import(Import {
+                            path,
+                            span: start.to(s),
+                        })
+                    })
                 }
                 _ => {
                     let span = self.span();
@@ -248,7 +281,9 @@ impl Parser {
                         format!("expected a declaration, found {}", self.kind().describe()),
                         span,
                     )
-                    .with_note("top-level declarations are `workflow`, `schema`, `task` and `import`");
+                    .with_note(
+                        "top-level declarations are `workflow`, `schema`, `task` and `import`",
+                    );
                     if let TokenKind::Ident(w) = self.kind() {
                         if let Some(s) = suggest(w, TOP_LEVEL.iter().copied()) {
                             d = d.with_help(format!("did you mean `{s}`?"));
@@ -279,7 +314,11 @@ impl Parser {
         let start = self.bump().span;
         let name = self.ident("a schema name")?;
         let (fields, span) = self.record_fields("schema")?;
-        Ok(Schema { name, fields, span: start.to(span) })
+        Ok(Schema {
+            name,
+            fields,
+            span: start.to(span),
+        })
     }
 
     fn task(&mut self) -> PResult<TaskDecl> {
@@ -345,9 +384,21 @@ impl Parser {
         let name = self.ident("a field name")?;
         self.expect(TokenKind::Colon)?;
         let ty = self.type_expr()?;
-        let default = if self.eat(&TokenKind::Eq) { Some(self.expr()) } else { None };
-        let end = default.as_ref().map(|d| d.span()).unwrap_or_else(|| ty.span());
-        Ok(Field { span: name.span.to(end), name, ty, default })
+        let default = if self.eat(&TokenKind::Eq) {
+            Some(self.expr())
+        } else {
+            None
+        };
+        let end = default
+            .as_ref()
+            .map(|d| d.span())
+            .unwrap_or_else(|| ty.span());
+        Ok(Field {
+            span: name.span.to(end),
+            name,
+            ty,
+            default,
+        })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -458,10 +509,15 @@ impl Parser {
                     p.diagnostics.push(
                         Diagnostic::error(
                             "E0105",
-                            format!("`on {}` handlers are reserved but not supported in ORBIT v0.1", what.name),
+                            format!(
+                                "`on {}` handlers are reserved but not supported in ORBIT v0.1",
+                                what.name
+                            ),
                             s.to(span),
                         )
-                        .with_help("use a `compensate { ... }` block on the step that needs undoing"),
+                        .with_help(
+                            "use a `compensate { ... }` block on the step that needs undoing",
+                        ),
                     );
                 }
                 _ => return Ok(false),
@@ -483,16 +539,32 @@ impl Parser {
                 let s = p.bump().span;
                 let mut c_action = None;
                 let mut c_body = StepBody::default();
-                let span = p.block("compensate block", STEP_MEMBERS, |p| p.step_member(&mut c_action, &mut c_body));
-                compensation = Some(Compensation { action: c_action, body: c_body, span: s.to(span) });
+                let span = p.block("compensate block", STEP_MEMBERS, |p| {
+                    p.step_member(&mut c_action, &mut c_body)
+                });
+                compensation = Some(Compensation {
+                    action: c_action,
+                    body: c_body,
+                    span: s.to(span),
+                });
                 return Ok(true);
             }
             p.step_member(&mut action, &mut body)
         });
-        Ok(Step { name, action, body, compensation, span: start.to(span) })
+        Ok(Step {
+            name,
+            action,
+            body,
+            compensation,
+            span: start.to(span),
+        })
     }
 
-    fn step_member(&mut self, action: &mut Option<StepAction>, body: &mut StepBody) -> PResult<bool> {
+    fn step_member(
+        &mut self,
+        action: &mut Option<StepAction>,
+        body: &mut StepBody,
+    ) -> PResult<bool> {
         let word = match self.kind() {
             TokenKind::Ident(w) => w.clone(),
             _ => return Ok(false),
@@ -500,7 +572,11 @@ impl Parser {
         let kw_span = self.span();
         let dup = |p: &mut Self, set: bool| {
             if set {
-                p.diagnostics.push(Diagnostic::error("E0106", format!("duplicate `{word}`"), kw_span));
+                p.diagnostics.push(Diagnostic::error(
+                    "E0106",
+                    format!("duplicate `{word}`"),
+                    kw_span,
+                ));
             }
         };
         match word.as_str() {
@@ -516,8 +592,12 @@ impl Parser {
                 };
                 if action.is_some() {
                     self.diagnostics.push(
-                        Diagnostic::error("E0106", "a step can only have one `worker` or `sleep`", kw_span)
-                            .with_help("split the work into separate steps"),
+                        Diagnostic::error(
+                            "E0106",
+                            "a step can only have one `worker` or `sleep`",
+                            kw_span,
+                        )
+                        .with_help("split the work into separate steps"),
                     );
                 }
                 *action = Some(new);
@@ -578,7 +658,10 @@ impl Parser {
                     members.push((key, p.expr()));
                     Ok(true)
                 });
-                body.retry = Some(Retry { members, span: s.to(span) });
+                body.retry = Some(Retry {
+                    members,
+                    span: s.to(span),
+                });
             }
             _ => return Ok(false),
         }
@@ -588,7 +671,8 @@ impl Parser {
     // ------------------------------------------------------------ expressions
 
     pub fn expr(&mut self) -> Expr {
-        self.binary(1).unwrap_or_else(|_| Expr::Error(self.prev_span()))
+        self.binary(1)
+            .unwrap_or_else(|_| Expr::Error(self.prev_span()))
     }
 
     fn binop(&self) -> Option<(BinOp, u8)> {
@@ -734,7 +818,10 @@ impl Parser {
                         return Err(());
                     }
                     items.push(self.expr());
-                    if !self.eat(&TokenKind::Comma) && !self.at(&TokenKind::RBracket) && !self.tok().newline_before {
+                    if !self.eat(&TokenKind::Comma)
+                        && !self.at(&TokenKind::RBracket)
+                        && !self.tok().newline_before
+                    {
                         self.error_here("`,` or `]`");
                         return Err(());
                     }
@@ -751,8 +838,14 @@ impl Parser {
                         break;
                     }
                     let key = match self.kind().clone() {
-                        TokenKind::Ident(name) => Ident { name, span: self.bump().span },
-                        TokenKind::Str(name) => Ident { name, span: self.bump().span },
+                        TokenKind::Ident(name) => Ident {
+                            name,
+                            span: self.bump().span,
+                        },
+                        TokenKind::Str(name) => Ident {
+                            name,
+                            span: self.bump().span,
+                        },
                         _ => {
                             self.error_here("a field name or `}`");
                             return Err(());
@@ -760,8 +853,12 @@ impl Parser {
                     };
                     if let Some((prev, _)) = fields.iter().find(|(k, _)| k.name == key.name) {
                         self.diagnostics.push(
-                            Diagnostic::error("E0107", format!("duplicate field `{}` in object", key.name), key.span)
-                                .with_label(prev.span, "first defined here"),
+                            Diagnostic::error(
+                                "E0107",
+                                format!("duplicate field `{}` in object", key.name),
+                                key.span,
+                            )
+                            .with_label(prev.span, "first defined here"),
                         );
                     }
                     // Shorthand `{ order_id }` means `{ order_id: order_id }`... but
@@ -839,7 +936,13 @@ mod tests {
         let wf = p
             .declarations
             .iter()
-            .find_map(|d| if let Declaration::Workflow(w) = d { Some(w) } else { None })
+            .find_map(|d| {
+                if let Declaration::Workflow(w) = d {
+                    Some(w)
+                } else {
+                    None
+                }
+            })
             .unwrap();
         assert_eq!(wf.name.name, "OrderProcessing");
         assert!(wf.steps.len() >= 5);
@@ -849,18 +952,30 @@ mod tests {
     #[test]
     fn precedence() {
         let p = ok("workflow W { return 1 + 2 * 3 == 7 && !false }");
-        let Declaration::Workflow(w) = &p.declarations[0] else { panic!() };
-        let Some(Expr::Binary(BinOp::And, lhs, _, _)) = &w.ret else { panic!("{:?}", w.ret) };
-        let Expr::Binary(BinOp::Eq, add, _, _) = lhs.as_ref() else { panic!() };
-        let Expr::Binary(BinOp::Add, _, mul, _) = add.as_ref() else { panic!() };
+        let Declaration::Workflow(w) = &p.declarations[0] else {
+            panic!()
+        };
+        let Some(Expr::Binary(BinOp::And, lhs, _, _)) = &w.ret else {
+            panic!("{:?}", w.ret)
+        };
+        let Expr::Binary(BinOp::Eq, add, _, _) = lhs.as_ref() else {
+            panic!()
+        };
+        let Expr::Binary(BinOp::Add, _, mul, _) = add.as_ref() else {
+            panic!()
+        };
         assert!(matches!(mul.as_ref(), Expr::Binary(BinOp::Mul, _, _, _)));
     }
 
     #[test]
     fn left_associative() {
         let p = ok("workflow W { return 10 - 3 - 2 }");
-        let Declaration::Workflow(w) = &p.declarations[0] else { panic!() };
-        let Some(Expr::Binary(BinOp::Sub, lhs, rhs, _)) = &w.ret else { panic!() };
+        let Declaration::Workflow(w) = &p.declarations[0] else {
+            panic!()
+        };
+        let Some(Expr::Binary(BinOp::Sub, lhs, rhs, _)) = &w.ret else {
+            panic!()
+        };
         assert!(matches!(lhs.as_ref(), Expr::Binary(BinOp::Sub, _, _, _)));
         assert!(matches!(rhs.as_ref(), Expr::Int(2, _)));
     }
@@ -868,17 +983,27 @@ mod tests {
     #[test]
     fn newline_ends_expression() {
         let p = ok("workflow W { return { a: 1\n b: -2 } }");
-        let Declaration::Workflow(w) = &p.declarations[0] else { panic!() };
-        let Some(Expr::Object(f, _)) = &w.ret else { panic!() };
+        let Declaration::Workflow(w) = &p.declarations[0] else {
+            panic!()
+        };
+        let Some(Expr::Object(f, _)) = &w.ret else {
+            panic!()
+        };
         assert_eq!(f.len(), 2);
     }
 
     #[test]
     fn recovers_and_suggests() {
-        let r = parse(0, "workflow W {\n step a {\n wrker \"x\"\n timeout 5\n }\n}");
+        let r = parse(
+            0,
+            "workflow W {\n step a {\n wrker \"x\"\n timeout 5\n }\n}",
+        );
         let codes: Vec<_> = r.diagnostics.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec!["E0102", "E0101"]);
-        assert_eq!(r.diagnostics[0].help.as_deref(), Some("did you mean `worker`?"));
+        assert_eq!(
+            r.diagnostics[0].help.as_deref(),
+            Some("did you mean `worker`?")
+        );
     }
 
     #[test]

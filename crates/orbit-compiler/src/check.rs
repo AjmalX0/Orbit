@@ -22,7 +22,14 @@ pub struct Env<'a> {
 pub fn execution_type() -> Type {
     Type::record(
         Some("Execution"),
-        ["id", "workflow", "version"].iter().map(|n| FieldType { name: n.to_string(), ty: Type::String, default: None }).collect(),
+        ["id", "workflow", "version"]
+            .iter()
+            .map(|n| FieldType {
+                name: n.to_string(),
+                ty: Type::String,
+                default: None,
+            })
+            .collect(),
     )
 }
 
@@ -34,7 +41,12 @@ pub struct Checker<'e, 'd> {
 /// Evaluate a constant expression (used for field defaults).
 pub fn constant(e: &Expr, ty: &Type, diags: &mut Vec<Diagnostic>) -> Option<Value> {
     let steps = BTreeMap::new();
-    let env = Env { input: None, steps: &steps, allowed: None, context: "a default value" };
+    let env = Env {
+        input: None,
+        steps: &steps,
+        allowed: None,
+        context: "a default value",
+    };
     let before = diags.len();
     let (_, lowered) = Checker { env: &env, diags }.check(e, Some(ty));
     if diags.len() != before {
@@ -55,7 +67,11 @@ pub fn constant(e: &Expr, ty: &Type, diags: &mut Vec<Diagnostic>) -> Option<Valu
     match ir::eval(&lowered, &Empty(json!({}))) {
         Ok(v) => Some(v),
         Err(err) => {
-            diags.push(Diagnostic::error("E0205", format!("invalid default value: {err}"), e.span()));
+            diags.push(Diagnostic::error(
+                "E0205",
+                format!("invalid default value: {err}"),
+                e.span(),
+            ));
             None
         }
     }
@@ -73,13 +89,18 @@ impl Checker<'_, '_> {
     /// Report a mismatch between an inferred and expected type.
     fn expect(&mut self, found: &Type, expected: &Type, span: Span) {
         if let Err(reason) = assignable(found, expected) {
-            let optional = found.is_optional() && assignable(found.unwrap_optional(), expected).is_ok();
+            let optional =
+                found.is_optional() && assignable(found.unwrap_optional(), expected).is_ok();
             let mut d = if optional {
                 Diagnostic::error("E0405", format!("value may be `null` but `{expected}` is required"), span).with_help(
                     "provide a fallback with `coalesce(value, default)`, or declare the target as optional with `?`",
                 )
             } else {
-                Diagnostic::error("E0400", format!("type mismatch: expected `{expected}`, found `{found}`"), span)
+                Diagnostic::error(
+                    "E0400",
+                    format!("type mismatch: expected `{expected}`, found `{found}`"),
+                    span,
+                )
             };
             if !optional && !reason.starts_with("expected") {
                 d = d.with_note(reason);
@@ -92,16 +113,24 @@ impl Checker<'_, '_> {
         // Expected-type directed checking for literals gives precise spans.
         if let Some(exp) = expected {
             match (e, exp.unwrap_optional()) {
-                (Expr::Object(fields, span), Type::Record { fields: want, .. }) if !matches!(exp, Type::Json) => {
+                (Expr::Object(fields, span), Type::Record { fields: want, .. })
+                    if !matches!(exp, Type::Json) =>
+                {
                     return self.check_object_against(fields, *span, want, exp);
                 }
                 (Expr::Object(fields, _), Type::Map { value, .. }) => {
                     let value = (**value).clone();
                     let lowered = fields
                         .iter()
-                        .map(|(k, v)| ir::ObjectField { name: k.name.clone(), value: self.check(v, Some(&value)).1 })
+                        .map(|(k, v)| ir::ObjectField {
+                            name: k.name.clone(),
+                            value: self.check(v, Some(&value)).1,
+                        })
                         .collect();
-                    return (exp.unwrap_optional().clone(), ir::Expr::Object { fields: lowered });
+                    return (
+                        exp.unwrap_optional().clone(),
+                        ir::Expr::Object { fields: lowered },
+                    );
                 }
                 (Expr::List(items, _), Type::List { item }) => {
                     let item = (**item).clone();
@@ -110,15 +139,23 @@ impl Checker<'_, '_> {
                 }
                 (Expr::Str(s, span), Type::Uuid) => {
                     if !orbit_ir::types::is_uuid(s) {
-                        self.error(Diagnostic::error("E0400", format!("`{s}` is not a valid UUID"), *span));
+                        self.error(Diagnostic::error(
+                            "E0400",
+                            format!("`{s}` is not a valid UUID"),
+                            *span,
+                        ));
                     }
                     return (Type::Uuid, lit(json!(s)));
                 }
                 (Expr::Str(s, span), Type::Timestamp) => {
                     if !orbit_ir::types::is_timestamp(s) {
                         self.error(
-                            Diagnostic::error("E0400", format!("`{s}` is not a valid RFC 3339 timestamp"), *span)
-                                .with_help("use the form `2026-01-31T09:00:00Z`"),
+                            Diagnostic::error(
+                                "E0400",
+                                format!("`{s}` is not a valid RFC 3339 timestamp"),
+                                *span,
+                            )
+                            .with_help("use the form `2026-01-31T09:00:00Z`"),
                         );
                     }
                     return (Type::Timestamp, lit(json!(s)));
@@ -145,16 +182,26 @@ impl Checker<'_, '_> {
             match want.iter().find(|f| f.name == k.name) {
                 Some(f) => {
                     let (_, l) = self.check(v, Some(&f.ty));
-                    out.push(ir::ObjectField { name: k.name.clone(), value: l });
+                    out.push(ir::ObjectField {
+                        name: k.name.clone(),
+                        value: l,
+                    });
                 }
                 None => {
-                    let mut d = Diagnostic::error("E0404", format!("unknown field `{}` for `{}`", k.name, exp.unwrap_optional()), k.span);
+                    let mut d = Diagnostic::error(
+                        "E0404",
+                        format!("unknown field `{}` for `{}`", k.name, exp.unwrap_optional()),
+                        k.span,
+                    );
                     if let Some(s) = suggest(&k.name, want.iter().map(|f| f.name.as_str())) {
                         d = d.with_help(format!("did you mean `{s}`?"));
                     } else {
                         d = d.with_note(format!(
                             "expected fields: {}",
-                            want.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")
+                            want.iter()
+                                .map(|f| f.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
                     self.error(d);
@@ -162,19 +209,32 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        let missing: Vec<&FieldType> = want.iter().filter(|f| f.required() && !fields.iter().any(|(k, _)| k.name == f.name)).collect();
+        let missing: Vec<&FieldType> = want
+            .iter()
+            .filter(|f| f.required() && !fields.iter().any(|(k, _)| k.name == f.name))
+            .collect();
         if !missing.is_empty() {
-            let list = missing.iter().map(|f| format!("`{}: {}`", f.name, f.ty)).collect::<Vec<_>>().join(", ");
+            let list = missing
+                .iter()
+                .map(|f| format!("`{}: {}`", f.name, f.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
             self.error(
                 Diagnostic::error(
                     "E0403",
-                    format!("missing required field{} {list}", if missing.len() > 1 { "s" } else { "" }),
+                    format!(
+                        "missing required field{} {list}",
+                        if missing.len() > 1 { "s" } else { "" }
+                    ),
                     span,
                 )
                 .with_note(format!("required by `{}`", exp.unwrap_optional())),
             );
         }
-        (exp.unwrap_optional().clone(), ir::Expr::Object { fields: out })
+        (
+            exp.unwrap_optional().clone(),
+            ir::Expr::Object { fields: out },
+        )
     }
 
     fn infer(&mut self, e: &Expr) -> (Type, ir::Expr) {
@@ -212,18 +272,32 @@ impl Checker<'_, '_> {
                                 }
                             },
                             _ => {
-                                self.error(Diagnostic::error("E0406", "records can only be indexed with a literal field name", index.span()));
+                                self.error(Diagnostic::error(
+                                    "E0406",
+                                    "records can only be indexed with a literal field name",
+                                    index.span(),
+                                ));
                                 Type::Json
                             }
                         }
                     }
                     other => {
-                        self.error(Diagnostic::error("E0406", format!("type `{other}` cannot be indexed"), *span));
+                        self.error(Diagnostic::error(
+                            "E0406",
+                            format!("type `{other}` cannot be indexed"),
+                            *span,
+                        ));
                         Type::Json
                     }
                 };
                 let ty = if opt { ty.optional() } else { ty };
-                (ty, ir::Expr::Index { target: Box::new(tl), index: Box::new(il) })
+                (
+                    ty,
+                    ir::Expr::Index {
+                        target: Box::new(tl),
+                        index: Box::new(il),
+                    },
+                )
             }
             Expr::Object(fields, _) => {
                 let mut ftypes = vec![];
@@ -231,10 +305,20 @@ impl Checker<'_, '_> {
                 for (k, v) in fields {
                     let (t, l) = self.infer(v);
                     let t = if t == Type::Null { Type::Json } else { t };
-                    ftypes.push(FieldType { name: k.name.clone(), ty: t, default: None });
-                    lowered.push(ir::ObjectField { name: k.name.clone(), value: l });
+                    ftypes.push(FieldType {
+                        name: k.name.clone(),
+                        ty: t,
+                        default: None,
+                    });
+                    lowered.push(ir::ObjectField {
+                        name: k.name.clone(),
+                        value: l,
+                    });
                 }
-                (Type::record(None, ftypes), ir::Expr::Object { fields: lowered })
+                (
+                    Type::record(None, ftypes),
+                    ir::Expr::Object { fields: lowered },
+                )
             }
             Expr::List(items, _) => {
                 let mut ty: Option<Type> = None;
@@ -244,19 +328,26 @@ impl Checker<'_, '_> {
                     lowered.push(l);
                     ty = Some(match ty {
                         None => t,
-                        Some(prev) => match join(&prev, &t) {
-                            Some(j) => j,
-                            None => {
-                                self.error(
+                        Some(prev) => {
+                            match join(&prev, &t) {
+                                Some(j) => j,
+                                None => {
+                                    self.error(
                                     Diagnostic::error("E0400", format!("list items have incompatible types `{prev}` and `{t}`"), item.span())
                                         .with_help("use `List<JSON>` if mixed values are intended"),
                                 );
-                                Type::Json
+                                    Type::Json
+                                }
                             }
-                        },
+                        }
                     });
                 }
-                (Type::List { item: Box::new(ty.unwrap_or(Type::Json)) }, ir::Expr::List { items: lowered })
+                (
+                    Type::List {
+                        item: Box::new(ty.unwrap_or(Type::Json)),
+                    },
+                    ir::Expr::List { items: lowered },
+                )
             }
             Expr::Unary(op, operand, span) => {
                 let (t, l) = self.infer(operand);
@@ -267,22 +358,40 @@ impl Checker<'_, '_> {
                     }
                     UnOp::Neg => {
                         if !t.is_numeric() && t != Type::Json {
-                            self.error(Diagnostic::error("E0406", format!("cannot negate `{t}`"), *span));
+                            self.error(Diagnostic::error(
+                                "E0406",
+                                format!("cannot negate `{t}`"),
+                                *span,
+                            ));
                         }
-                        if t == Type::Json { Type::Float } else { t }
+                        if t == Type::Json {
+                            Type::Float
+                        } else {
+                            t
+                        }
                     }
                 };
                 let op = match op {
                     UnOp::Not => ir::UnOp::Not,
                     UnOp::Neg => ir::UnOp::Neg,
                 };
-                (ty, ir::Expr::Unary { operator: op, operand: Box::new(l) })
+                (
+                    ty,
+                    ir::Expr::Unary {
+                        operator: op,
+                        operand: Box::new(l),
+                    },
+                )
             }
             Expr::Binary(op, l, r, span) => self.binary(*op, l, r, *span),
             Expr::If(c, a, b, _) => {
                 let (ct, cl) = self.infer(c);
                 if assignable(&ct, &Type::Bool.optional()).is_err() {
-                    self.error(Diagnostic::error("E0408", format!("`if` condition must be `Bool`, found `{ct}`"), c.span()));
+                    self.error(Diagnostic::error(
+                        "E0408",
+                        format!("`if` condition must be `Bool`, found `{ct}`"),
+                        c.span(),
+                    ));
                 }
                 let (at, al) = self.infer(a);
                 let (bt, bl) = self.infer(b);
@@ -290,20 +399,35 @@ impl Checker<'_, '_> {
                     Some(t) => t,
                     None => {
                         self.error(
-                            Diagnostic::error("E0400", format!("`if` branches have incompatible types `{at}` and `{bt}`"), b.span())
-                                .with_label(a.span(), format!("this is `{at}`")),
+                            Diagnostic::error(
+                                "E0400",
+                                format!("`if` branches have incompatible types `{at}` and `{bt}`"),
+                                b.span(),
+                            )
+                            .with_label(a.span(), format!("this is `{at}`")),
                         );
                         Type::Json
                     }
                 };
-                (ty, ir::Expr::If { condition: Box::new(cl), then: Box::new(al), otherwise: Box::new(bl) })
+                (
+                    ty,
+                    ir::Expr::If {
+                        condition: Box::new(cl),
+                        then: Box::new(al),
+                        otherwise: Box::new(bl),
+                    },
+                )
             }
             Expr::Call(name, args, span) => self.call(name, args, *span),
         }
     }
 
     fn unknown_field(&mut self, name: &str, span: Span, on: &Type) {
-        let mut d = Diagnostic::error("E0402", format!("no field `{name}` on type `{}`", on.unwrap_optional()), span);
+        let mut d = Diagnostic::error(
+            "E0402",
+            format!("no field `{name}` on type `{}`", on.unwrap_optional()),
+            span,
+        );
         let names = field_names(on);
         if let Some(s) = suggest(name, names.iter().copied()) {
             d = d.with_help(format!("did you mean `{s}`?"));
@@ -328,7 +452,11 @@ impl Checker<'_, '_> {
                 },
                 Type::Map { value, .. } => value.as_ref().clone().optional(),
                 other => {
-                    self.error(Diagnostic::error("E0402", format!("type `{other}` has no field `{}`", seg.name), seg.span));
+                    self.error(Diagnostic::error(
+                        "E0402",
+                        format!("type `{other}` has no field `{}`", seg.name),
+                        seg.span,
+                    ));
                     return Type::Json;
                 }
             };
@@ -347,38 +475,70 @@ impl Checker<'_, '_> {
                     (ty, ir::Expr::Input { path: rest })
                 }
                 None => {
-                    self.error(Diagnostic::error("E0401", format!("`input` cannot be used in {}", self.env.context), root.span));
+                    self.error(Diagnostic::error(
+                        "E0401",
+                        format!("`input` cannot be used in {}", self.env.context),
+                        root.span,
+                    ));
                     (Type::Json, lit(Value::Null))
                 }
             },
             "execution" => {
                 if self.env.input.is_none() {
-                    self.error(Diagnostic::error("E0401", format!("`execution` cannot be used in {}", self.env.context), root.span));
+                    self.error(Diagnostic::error(
+                        "E0401",
+                        format!("`execution` cannot be used in {}", self.env.context),
+                        root.span,
+                    ));
                     return (Type::Json, lit(Value::Null));
                 }
                 if segs.len() != 2 {
                     self.error(
-                        Diagnostic::error("E0402", "expected `execution.<field>`", span)
-                            .with_note("available: execution.id, execution.workflow, execution.version"),
+                        Diagnostic::error("E0402", "expected `execution.<field>`", span).with_note(
+                            "available: execution.id, execution.workflow, execution.version",
+                        ),
                     );
                     return (Type::Json, lit(Value::Null));
                 }
                 let ty = self.walk_fields(execution_type(), &segs[1..]);
-                (ty, ir::Expr::Execution { field: rest[0].clone() })
+                (
+                    ty,
+                    ir::Expr::Execution {
+                        field: rest[0].clone(),
+                    },
+                )
             }
             name => match self.env.steps.get(name) {
                 Some(t) => {
                     if let Some((allowed, why)) = self.env.allowed {
                         if !allowed.contains(name) {
-                            self.error(Diagnostic::error("E0308", format!("step `{name}` cannot be referenced here"), root.span).with_note(why.to_string()));
+                            self.error(
+                                Diagnostic::error(
+                                    "E0308",
+                                    format!("step `{name}` cannot be referenced here"),
+                                    root.span,
+                                )
+                                .with_note(why.to_string()),
+                            );
                         }
                     }
                     let ty = self.walk_fields(t.clone(), &segs[1..]);
-                    (ty, ir::Expr::Step { step: name.to_string(), path: rest })
+                    (
+                        ty,
+                        ir::Expr::Step {
+                            step: name.to_string(),
+                            path: rest,
+                        },
+                    )
                 }
                 None => {
-                    let mut d = Diagnostic::error("E0401", format!("unknown reference `{name}`"), root.span);
-                    let mut candidates: Vec<&str> = self.env.steps.keys().map(String::as_str).collect();
+                    let mut d = Diagnostic::error(
+                        "E0401",
+                        format!("unknown reference `{name}`"),
+                        root.span,
+                    );
+                    let mut candidates: Vec<&str> =
+                        self.env.steps.keys().map(String::as_str).collect();
                     if self.env.input.is_some() {
                         candidates.extend(["input", "execution"]);
                     }
@@ -414,12 +574,19 @@ impl Checker<'_, '_> {
             BinOp::And => ir::BinOp::And,
             BinOp::Or => ir::BinOp::Or,
         };
-        let lowered = ir::Expr::Binary { operator: iop, left: Box::new(ll), right: Box::new(rl) };
+        let lowered = ir::Expr::Binary {
+            operator: iop,
+            left: Box::new(ll),
+            right: Box::new(rl),
+        };
         let dynamic = lt == Type::Json || rt == Type::Json;
         let bad = |this: &mut Self, help: Option<&str>| {
             let mut d = Diagnostic::error(
                 "E0406",
-                format!("operator `{}` cannot be applied to `{lt}` and `{rt}`", op.symbol()),
+                format!(
+                    "operator `{}` cannot be applied to `{lt}` and `{rt}`",
+                    op.symbol()
+                ),
                 span,
             )
             .with_label(l.span(), format!("`{lt}`"))
@@ -433,7 +600,10 @@ impl Checker<'_, '_> {
         let ty = match op {
             BinOp::And | BinOp::Or => {
                 if !dynamic && (lt != Type::Bool || rt != Type::Bool) {
-                    bad(self, (lt.is_optional() || rt.is_optional()).then_some(optional_help));
+                    bad(
+                        self,
+                        (lt.is_optional() || rt.is_optional()).then_some(optional_help),
+                    );
                 }
                 Type::Bool
             }
@@ -444,25 +614,36 @@ impl Checker<'_, '_> {
                 Type::Bool
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let ok = dynamic || (lt.is_numeric() && rt.is_numeric()) || (lt == Type::String && rt == Type::String);
+                let ok = dynamic
+                    || (lt.is_numeric() && rt.is_numeric())
+                    || (lt == Type::String && rt == Type::String);
                 if !ok {
-                    bad(self, (lt.is_optional() || rt.is_optional()).then_some(optional_help));
+                    bad(
+                        self,
+                        (lt.is_optional() || rt.is_optional()).then_some(optional_help),
+                    );
                 }
                 Type::Bool
             }
             BinOp::Add if lt == Type::String && rt == Type::String => Type::String,
-            BinOp::Add if matches!((&lt, &rt), (Type::List { .. }, Type::List { .. })) => match join(&lt, &rt) {
-                Some(t) => t,
-                None => {
-                    bad(self, None);
-                    Type::Json
+            BinOp::Add if matches!((&lt, &rt), (Type::List { .. }, Type::List { .. })) => {
+                match join(&lt, &rt) {
+                    Some(t) => t,
+                    None => {
+                        bad(self, None);
+                        Type::Json
+                    }
                 }
-            },
+            }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 if dynamic {
                     Type::Json
                 } else if lt.is_numeric() && rt.is_numeric() {
-                    if lt == Type::Int && rt == Type::Int { Type::Int } else { Type::Float }
+                    if lt == Type::Int && rt == Type::Int {
+                        Type::Int
+                    } else {
+                        Type::Float
+                    }
                 } else {
                     let help = if lt.is_optional() || rt.is_optional() {
                         Some(optional_help)
@@ -481,15 +662,32 @@ impl Checker<'_, '_> {
 
     fn call(&mut self, name: &ast::Ident, args: &[Expr], span: Span) -> (Type, ir::Expr) {
         let typed: Vec<(Type, ir::Expr)> = args.iter().map(|a| self.infer(a)).collect();
-        let lowered = ir::Expr::Call { function: name.name.clone(), args: typed.iter().map(|t| t.1.clone()).collect() };
+        let lowered = ir::Expr::Call {
+            function: name.name.clone(),
+            args: typed.iter().map(|t| t.1.clone()).collect(),
+        };
         let tys: Vec<&Type> = typed.iter().map(|t| &t.0).collect();
         let arity = |this: &mut Self, n: std::ops::RangeInclusive<usize>, sig: &str| -> bool {
             if !n.contains(&args.len()) {
-                this.error(Diagnostic::error(
-                    "E0407",
-                    format!("`{}` takes {} argument(s), found {}", name.name, if n.start() == n.end() { n.start().to_string() } else if *n.end() == usize::MAX { format!("at least {}", n.start()) } else { format!("{}-{}", n.start(), n.end()) }, args.len()),
-                    span,
-                ).with_note(format!("signature: {sig}")));
+                this.error(
+                    Diagnostic::error(
+                        "E0407",
+                        format!(
+                            "`{}` takes {} argument(s), found {}",
+                            name.name,
+                            if n.start() == n.end() {
+                                n.start().to_string()
+                            } else if *n.end() == usize::MAX {
+                                format!("at least {}", n.start())
+                            } else {
+                                format!("{}-{}", n.start(), n.end())
+                            },
+                            args.len()
+                        ),
+                        span,
+                    )
+                    .with_note(format!("signature: {sig}")),
+                );
                 false
             } else {
                 true
@@ -498,7 +696,12 @@ impl Checker<'_, '_> {
         let arg_err = |this: &mut Self, i: usize, want: &str| {
             this.error(Diagnostic::error(
                 "E0400",
-                format!("argument {} of `{}` must be {want}, found `{}`", i + 1, name.name, tys[i]),
+                format!(
+                    "argument {} of `{}` must be {want}, found `{}`",
+                    i + 1,
+                    name.name,
+                    tys[i]
+                ),
                 args[i].span(),
             ));
         };
@@ -506,7 +709,9 @@ impl Checker<'_, '_> {
         let ty = match name.name.as_str() {
             "len" => {
                 if arity(self, 1..=1, "len(String | List<T> | Map<String, T>) -> Int")
-                    && !is(tys[0], |t| matches!(t, Type::String | Type::List { .. } | Type::Map { .. }))
+                    && !is(tys[0], |t| {
+                        matches!(t, Type::String | Type::List { .. } | Type::Map { .. })
+                    })
                 {
                     arg_err(self, 0, "a String, List or Map");
                 }
@@ -525,7 +730,11 @@ impl Checker<'_, '_> {
                         };
                     }
                     // The result is non-null if any argument is non-null.
-                    if tys.iter().any(|t| !t.is_optional()) { acc.unwrap_optional().clone() } else { acc }
+                    if tys.iter().any(|t| !t.is_optional()) {
+                        acc.unwrap_optional().clone()
+                    } else {
+                        acc
+                    }
                 } else {
                     Type::Json
                 }
@@ -539,12 +748,24 @@ impl Checker<'_, '_> {
                 Type::String
             }
             "int" | "float" => {
-                if arity(self, 1..=1, &format!("{}(Int | Float | String | Bool) -> {}", name.name, if name.name == "int" { "Int" } else { "Float" }))
-                    && !is(tys[0], |t| matches!(t, Type::Int | Type::Float | Type::String | Type::Bool))
-                {
+                if arity(
+                    self,
+                    1..=1,
+                    &format!(
+                        "{}(Int | Float | String | Bool) -> {}",
+                        name.name,
+                        if name.name == "int" { "Int" } else { "Float" }
+                    ),
+                ) && !is(tys[0], |t| {
+                    matches!(t, Type::Int | Type::Float | Type::String | Type::Bool)
+                }) {
                     arg_err(self, 0, "a number, String or Bool");
                 }
-                if name.name == "int" { Type::Int } else { Type::Float }
+                if name.name == "int" {
+                    Type::Int
+                } else {
+                    Type::Float
+                }
             }
             "contains" => {
                 arity(self, 2..=2, "contains(String, String) | contains(List<T>, T) | contains(Map<String, T>, String) -> Bool");
@@ -555,7 +776,11 @@ impl Checker<'_, '_> {
                     if !is(tys[0], |t| *t == Type::String) {
                         arg_err(self, 0, "a String");
                     }
-                    if tys[0].is_optional() { Type::String.optional() } else { Type::String }
+                    if tys[0].is_optional() {
+                        Type::String.optional()
+                    } else {
+                        Type::String
+                    }
                 } else {
                     Type::String
                 }
@@ -572,33 +797,54 @@ impl Checker<'_, '_> {
                 Type::String
             }
             "keys" => {
-                if arity(self, 1..=1, "keys(Map<String, T>) -> List<String>") && !is(tys[0], |t| matches!(t, Type::Map { .. } | Type::Record { .. })) {
+                if arity(self, 1..=1, "keys(Map<String, T>) -> List<String>")
+                    && !is(tys[0], |t| {
+                        matches!(t, Type::Map { .. } | Type::Record { .. })
+                    })
+                {
                     arg_err(self, 0, "a Map");
                 }
-                Type::List { item: Box::new(Type::String) }
+                Type::List {
+                    item: Box::new(Type::String),
+                }
             }
             "min" | "max" => {
-                if arity(self, 1..=usize::MAX, &format!("{}(number, ...) -> number", name.name)) {
+                if arity(
+                    self,
+                    1..=usize::MAX,
+                    &format!("{}(number, ...) -> number", name.name),
+                ) {
                     for (i, t) in tys.iter().enumerate() {
                         if !t.is_numeric() && **t != Type::Json {
                             arg_err(self, i, "Int or Float");
                         }
                     }
                 }
-                if tys.iter().all(|t| **t == Type::Int) { Type::Int } else { Type::Float }
+                if tys.iter().all(|t| **t == Type::Int) {
+                    Type::Int
+                } else {
+                    Type::Float
+                }
             }
             "abs" => {
-                if arity(self, 1..=1, "abs(number) -> number") && !tys[0].is_numeric() && *tys[0] != Type::Json {
+                if arity(self, 1..=1, "abs(number) -> number")
+                    && !tys[0].is_numeric()
+                    && *tys[0] != Type::Json
+                {
                     arg_err(self, 0, "Int or Float");
                 }
                 tys.first().map(|t| (*t).clone()).unwrap_or(Type::Float)
             }
             other => {
-                let mut d = Diagnostic::error("E0407", format!("unknown function `{other}`"), name.span);
+                let mut d =
+                    Diagnostic::error("E0407", format!("unknown function `{other}`"), name.span);
                 if let Some(s) = suggest(other, ir::expr::BUILTINS.iter().copied()) {
                     d = d.with_help(format!("did you mean `{s}`?"));
                 } else {
-                    d = d.with_note(format!("built-in functions: {}", ir::expr::BUILTINS.join(", ")));
+                    d = d.with_note(format!(
+                        "built-in functions: {}",
+                        ir::expr::BUILTINS.join(", ")
+                    ));
                 }
                 self.error(d);
                 Type::Json

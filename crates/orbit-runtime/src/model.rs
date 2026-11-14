@@ -25,7 +25,12 @@ fn yes() -> bool {
 
 impl TaskError {
     pub fn new(code: &str, message: impl Into<String>, retryable: bool) -> Self {
-        TaskError { code: code.into(), message: message.into(), retryable, details: None }
+        TaskError {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            details: None,
+        }
     }
 }
 
@@ -45,34 +50,103 @@ pub mod codes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
-    WorkflowCreated { workflow: String, version: String, definition_hash: String, input: Value },
+    WorkflowCreated {
+        workflow: String,
+        version: String,
+        definition_hash: String,
+        input: Value,
+    },
     WorkflowStarted {},
     /// The unit is ready and queued for a worker. `input` is the fully evaluated payload.
-    StepScheduled { step: String, attempt: u32, input: Value, idempotency_key: String, redelivery: bool },
-    StepSkipped { step: String, reason: String },
-    StepDispatched { step: String, attempt: u32, token: String, worker_id: String, worker_session: String, deadline_ms: Option<u64> },
-    StepSucceeded { step: String, attempt: u32, output: Value },
-    StepAttemptFailed { step: String, attempt: u32, error: TaskError },
+    StepScheduled {
+        step: String,
+        attempt: u32,
+        input: Value,
+        idempotency_key: String,
+        redelivery: bool,
+    },
+    StepSkipped {
+        step: String,
+        reason: String,
+    },
+    StepDispatched {
+        step: String,
+        attempt: u32,
+        token: String,
+        worker_id: String,
+        worker_session: String,
+        deadline_ms: Option<u64>,
+    },
+    StepSucceeded {
+        step: String,
+        attempt: u32,
+        output: Value,
+    },
+    StepAttemptFailed {
+        step: String,
+        attempt: u32,
+        error: TaskError,
+    },
     /// The outcome of a dispatched attempt is unknown (worker lost, runtime restarted).
     /// The same attempt is redelivered with the same idempotency key.
-    StepAttemptUncertain { step: String, attempt: u32, reason: String },
-    RetryScheduled { step: String, next_attempt: u32, delay_ms: u64, fire_at_ms: u64 },
-    StepFailed { step: String, error: TaskError },
+    StepAttemptUncertain {
+        step: String,
+        attempt: u32,
+        reason: String,
+    },
+    RetryScheduled {
+        step: String,
+        next_attempt: u32,
+        delay_ms: u64,
+        fire_at_ms: u64,
+    },
+    StepFailed {
+        step: String,
+        error: TaskError,
+    },
     /// A queued unit was withdrawn because the workflow is being aborted.
-    StepCancelled { step: String },
-    TimerStarted { step: String, fire_at_ms: u64 },
-    TimerFired { step: String },
+    StepCancelled {
+        step: String,
+    },
+    TimerStarted {
+        step: String,
+        fire_at_ms: u64,
+    },
+    TimerFired {
+        step: String,
+    },
     /// A result arrived for an attempt that no longer matters (duplicate or late).
-    StaleResultIgnored { step: String, token: String, outcome: String },
-    CancelRequested { reason: String },
+    StaleResultIgnored {
+        step: String,
+        token: String,
+        outcome: String,
+    },
+    CancelRequested {
+        reason: String,
+    },
     WorkflowTimeoutReached {},
-    CompensationStarted { reason: String, steps: Vec<String> },
+    CompensationStarted {
+        reason: String,
+        steps: Vec<String>,
+    },
     CompensationCompleted {},
-    CompensationFailed { step: String, error: TaskError },
-    WorkflowCompleted { output: Value },
-    WorkflowFailed { error: TaskError, compensation: CompensationOutcome },
-    WorkflowCancelled { compensation: CompensationOutcome },
-    WorkflowTimedOut { compensation: CompensationOutcome },
+    CompensationFailed {
+        step: String,
+        error: TaskError,
+    },
+    WorkflowCompleted {
+        output: Value,
+    },
+    WorkflowFailed {
+        error: TaskError,
+        compensation: CompensationOutcome,
+    },
+    WorkflowCancelled {
+        compensation: CompensationOutcome,
+    },
+    WorkflowTimedOut {
+        compensation: CompensationOutcome,
+    },
 }
 
 impl Event {
@@ -155,7 +229,13 @@ pub enum WorkflowStatus {
 
 impl WorkflowStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled | WorkflowStatus::TimedOut)
+        matches!(
+            self,
+            WorkflowStatus::Completed
+                | WorkflowStatus::Failed
+                | WorkflowStatus::Cancelled
+                | WorkflowStatus::TimedOut
+        )
     }
 
     pub fn as_str(self) -> &'static str {
@@ -192,7 +272,13 @@ pub enum UnitStatus {
 
 impl UnitStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, UnitStatus::Succeeded | UnitStatus::Skipped | UnitStatus::Failed | UnitStatus::Cancelled)
+        matches!(
+            self,
+            UnitStatus::Succeeded
+                | UnitStatus::Skipped
+                | UnitStatus::Failed
+                | UnitStatus::Cancelled
+        )
     }
 }
 
@@ -328,7 +414,12 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
     s.last_seq = h.seq;
     s.updated_at_ms = ts;
     match &h.event {
-        Event::WorkflowCreated { workflow, version, definition_hash, input } => {
+        Event::WorkflowCreated {
+            workflow,
+            version,
+            definition_hash,
+            input,
+        } => {
             s.workflow = workflow.clone();
             s.version = version.clone();
             s.definition_hash = definition_hash.clone();
@@ -337,7 +428,13 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             s.status = WorkflowStatus::Running;
         }
         Event::WorkflowStarted {} => {}
-        Event::StepScheduled { step, attempt, input, idempotency_key, redelivery } => {
+        Event::StepScheduled {
+            step,
+            attempt,
+            input,
+            idempotency_key,
+            redelivery,
+        } => {
             let u = s.units.entry(step.clone()).or_default();
             u.status = Some(UnitStatus::Scheduled);
             u.attempt = *attempt;
@@ -355,7 +452,14 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             u.output = Some(Value::Null);
             u.finished_at_ms = Some(ts);
         }
-        Event::StepDispatched { step, attempt, token, worker_id, worker_session, deadline_ms } => {
+        Event::StepDispatched {
+            step,
+            attempt,
+            token,
+            worker_id,
+            worker_session,
+            deadline_ms,
+        } => {
             let u = s.units.entry(step.clone()).or_default();
             u.status = Some(UnitStatus::Dispatched);
             u.attempt = *attempt;
@@ -367,7 +471,11 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             u.deadline_ms = *deadline_ms;
             u.dispatch_count += 1;
         }
-        Event::StepSucceeded { step, attempt, output } => {
+        Event::StepSucceeded {
+            step,
+            attempt,
+            output,
+        } => {
             let u = s.units.entry(step.clone()).or_default();
             u.status = Some(UnitStatus::Succeeded);
             u.attempt = *attempt;
@@ -388,7 +496,12 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             u.status = Some(UnitStatus::Uncertain);
             u.token = None;
         }
-        Event::RetryScheduled { step, next_attempt, fire_at_ms, .. } => {
+        Event::RetryScheduled {
+            step,
+            next_attempt,
+            fire_at_ms,
+            ..
+        } => {
             let u = s.units.entry(step.clone()).or_default();
             u.status = Some(UnitStatus::RetryWait);
             u.attempt = *next_attempt;
@@ -401,7 +514,12 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             u.finished_at_ms = Some(ts);
             u.token = None;
             if s.abort.is_none() && !step.starts_with("compensate:") {
-                s.abort = Some(AbortReason::Failed { error: TaskError { message: format!("step `{step}` failed: {}", error.message), ..error.clone() } });
+                s.abort = Some(AbortReason::Failed {
+                    error: TaskError {
+                        message: format!("step `{step}` failed: {}", error.message),
+                        ..error.clone()
+                    },
+                });
             }
         }
         Event::StepCancelled { step } => {
@@ -428,7 +546,9 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
         Event::StaleResultIgnored { .. } => {}
         Event::CancelRequested { reason } => {
             if s.abort.is_none() {
-                s.abort = Some(AbortReason::Cancelled { reason: reason.clone() });
+                s.abort = Some(AbortReason::Cancelled {
+                    reason: reason.clone(),
+                });
             }
         }
         Event::WorkflowTimeoutReached {} => {
@@ -450,7 +570,10 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             s.output = Some(output.clone());
             s.finished_at_ms = Some(ts);
         }
-        Event::WorkflowFailed { error, compensation } => {
+        Event::WorkflowFailed {
+            error,
+            compensation,
+        } => {
             s.status = WorkflowStatus::Failed;
             s.error = Some(error.clone());
             s.compensation = Some(*compensation);

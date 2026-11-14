@@ -44,11 +44,17 @@ impl Diagnostic {
     }
 
     pub fn warning(code: &'static str, message: impl Into<String>, span: Span) -> Self {
-        Diagnostic { severity: Severity::Warning, ..Diagnostic::error(code, message, span) }
+        Diagnostic {
+            severity: Severity::Warning,
+            ..Diagnostic::error(code, message, span)
+        }
     }
 
     pub fn with_label(mut self, span: Span, message: impl Into<String>) -> Self {
-        self.labels.push(Label { span, message: message.into() });
+        self.labels.push(Label {
+            span,
+            message: message.into(),
+        });
         self
     }
 
@@ -79,7 +85,11 @@ impl Diagnostic {
             Severity::Warning => "warning",
         };
         let mut out = String::new();
-        let _ = writeln!(out, "{bold}{sev_color}{sev}[{}]{reset}{bold}: {}{reset}", self.code, self.message);
+        let _ = writeln!(
+            out,
+            "{bold}{sev_color}{sev}[{}]{reset}{bold}: {}{reset}",
+            self.code, self.message
+        );
         let loc = sources.location(self.span);
         let file = sources.file(self.span.file);
         let gutter = loc.line.to_string().len().max(
@@ -99,13 +109,21 @@ impl Diagnostic {
         for (span, msg, primary) in snippets {
             if span.file != self.span.file {
                 let l = sources.location(span);
-                let _ = writeln!(out, "{pad} {blue}={reset} note: {} ({l})", msg.unwrap_or(""));
+                let _ = writeln!(
+                    out,
+                    "{pad} {blue}={reset} note: {} ({l})",
+                    msg.unwrap_or("")
+                );
                 continue;
             }
             let (line, col) = file.line_col(span.start as usize);
             let (end_line, end_col) = file.line_col(span.end as usize);
             let text = file.line_text(line);
-            let width = if end_line == line { (end_col.saturating_sub(col)).max(1) } else { text.chars().count().saturating_sub(col - 1).max(1) };
+            let width = if end_line == line {
+                (end_col.saturating_sub(col)).max(1)
+            } else {
+                text.chars().count().saturating_sub(col - 1).max(1)
+            };
             let marker = if primary { "^" } else { "-" };
             let c = if primary { sev_color } else { blue };
             let _ = writeln!(out, "{blue}{:>gutter$} |{reset} {text}", line);
@@ -128,7 +146,9 @@ impl Diagnostic {
 
     /// Machine-readable form, used by `orbit check --format json` and editors.
     pub fn to_json(&self, sources: &SourceMap) -> JsonDiagnostic {
-        let end = sources.file(self.span.file).line_col(self.span.end as usize);
+        let end = sources
+            .file(self.span.file)
+            .line_col(self.span.end as usize);
         JsonDiagnostic {
             severity: self.severity,
             code: self.code,
@@ -139,7 +159,10 @@ impl Diagnostic {
             labels: self
                 .labels
                 .iter()
-                .map(|l| JsonLabel { location: sources.location(l.span), message: l.message.clone() })
+                .map(|l| JsonLabel {
+                    location: sources.location(l.span),
+                    message: l.message.clone(),
+                })
                 .collect(),
             notes: self.notes.clone(),
             help: self.help.clone(),

@@ -19,12 +19,21 @@ fn compile(body: &str) -> Compilation {
 
 fn ok(body: &str) -> WorkflowIr {
     let c = compile(body);
-    assert!(!c.has_errors(), "unexpected errors:\n{}", c.render_diagnostics(false));
+    assert!(
+        !c.has_errors(),
+        "unexpected errors:\n{}",
+        c.render_diagnostics(false)
+    );
     c.workflows.into_iter().next().expect("one workflow")
 }
 
 fn codes(body: &str) -> Vec<&'static str> {
-    compile(body).diagnostics.iter().filter(|d| d.is_error()).map(|d| d.code).collect()
+    compile(body)
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| d.code)
+        .collect()
 }
 
 fn errors(body: &str) -> String {
@@ -55,8 +64,13 @@ fn every_example_compiles() {
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "orbit") {
-            let c = compile_files(&[path.clone()]);
-            assert!(!c.has_errors(), "{}:\n{}", path.display(), c.render_diagnostics(false));
+            let c = compile_files(std::slice::from_ref(&path));
+            assert!(
+                !c.has_errors(),
+                "{}:\n{}",
+                path.display(),
+                c.render_diagnostics(false)
+            );
         }
     }
 }
@@ -84,21 +98,34 @@ fn deterministic_ir() {
     assert_eq!(ids, vec!["b", "a", "c"]);
     // Default from the schema is carried in the IR.
     let charge = &wf.contracts["payments.charge"];
-    assert_eq!(charge.input.field("currency").unwrap().default, Some(serde_json::json!("USD")));
+    assert_eq!(
+        charge.input.field("currency").unwrap().default,
+        Some(serde_json::json!("USD"))
+    );
 }
 
 #[test]
 fn unknown_worker_is_reported_with_suggestion() {
-    let msg = errors(r#"workflow W { version "1.0.0" step a { worker "orders.validat" with { order_id: "x" } } }"#);
-    assert!(msg.contains("error[E0300]: unknown worker task `orders.validat`"), "{msg}");
+    let msg = errors(
+        r#"workflow W { version "1.0.0" step a { worker "orders.validat" with { order_id: "x" } } }"#,
+    );
+    assert!(
+        msg.contains("error[E0300]: unknown worker task `orders.validat`"),
+        "{msg}"
+    );
     assert!(msg.contains("did you mean `orders.validate`?"), "{msg}");
-    assert!(msg.contains("test.orbit:"), "diagnostics carry locations: {msg}");
+    assert!(
+        msg.contains("test.orbit:"),
+        "diagnostics carry locations: {msg}"
+    );
 }
 
 #[test]
 fn unknown_dependency() {
     assert_eq!(
-        codes(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" after nope with { amount: 1 } } }"#),
+        codes(
+            r#"workflow W { version "1.0.0" step a { worker "risk.analyze" after nope with { amount: 1 } } }"#
+        ),
         vec!["E0303"]
     );
 }
@@ -119,7 +146,9 @@ fn circular_dependencies_are_rejected() {
 #[test]
 fn self_dependency() {
     assert_eq!(
-        codes(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: a.score } } }"#),
+        codes(
+            r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: a.score } } }"#
+        ),
         vec!["E0305"]
     );
 }
@@ -127,22 +156,43 @@ fn self_dependency() {
 #[test]
 fn invalid_types_are_rejected() {
     // Wrong field type.
-    let msg = errors(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: "ten" } } }"#);
-    assert!(msg.contains("E0400") && msg.contains("expected `Float`, found `String`"), "{msg}");
+    let msg = errors(
+        r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: "ten" } } }"#,
+    );
+    assert!(
+        msg.contains("E0400") && msg.contains("expected `Float`, found `String`"),
+        "{msg}"
+    );
     // Missing required field.
-    assert_eq!(codes(r#"workflow W { version "1.0.0" step a { worker "payments.charge" with { order_id: "x" } } }"#), vec!["E0403"]);
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" step a { worker "payments.charge" with { order_id: "x" } } }"#
+        ),
+        vec!["E0403"]
+    );
     // Unknown field with suggestion.
-    let msg = errors(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amout: 1.0 } } }"#);
-    assert!(msg.contains("E0404") && msg.contains("did you mean `amount`?"), "{msg}");
+    let msg = errors(
+        r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amout: 1.0 } } }"#,
+    );
+    assert!(
+        msg.contains("E0404") && msg.contains("did you mean `amount`?"),
+        "{msg}"
+    );
     // Unknown type.
     let msg = errors(r#"workflow W { version "1.0.0" input { x: Strng } }"#);
-    assert!(msg.contains("E0201") && msg.contains("did you mean `String`?"), "{msg}");
+    assert!(
+        msg.contains("E0201") && msg.contains("did you mean `String`?"),
+        "{msg}"
+    );
     // Bad field reference on a step output.
     let msg = errors(
         r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: 1.0 } }
            step b { worker "risk.analyze" with { amount: a.scor } } }"#,
     );
-    assert!(msg.contains("E0402") && msg.contains("did you mean `score`?"), "{msg}");
+    assert!(
+        msg.contains("E0402") && msg.contains("did you mean `score`?"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -159,22 +209,30 @@ fn optional_values_need_handling() {
 
 #[test]
 fn int_widens_to_float_and_defaults_apply() {
-    let wf = ok(r#"workflow W { version "1.0.0" step a { worker "payments.charge" with { order_id: "x", amount: 10 } } }"#);
+    let wf = ok(
+        r#"workflow W { version "1.0.0" step a { worker "payments.charge" with { order_id: "x", amount: 10 } } }"#,
+    );
     assert_eq!(wf.steps[0].id, "a");
 }
 
 #[test]
 fn conditions_must_be_bool() {
     assert_eq!(
-        codes(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" when 1 + 1 with { amount: 1.0 } } }"#),
+        codes(
+            r#"workflow W { version "1.0.0" step a { worker "risk.analyze" when 1 + 1 with { amount: 1.0 } } }"#
+        ),
         vec!["E0408"]
     );
 }
 
 #[test]
 fn operators_are_type_checked() {
-    let msg = errors(r#"workflow W { version "1.0.0" input { n: Int } return { x: "a" + input.n } }"#);
-    assert!(msg.contains("E0406") && msg.contains("string(value)"), "{msg}");
+    let msg =
+        errors(r#"workflow W { version "1.0.0" input { n: Int } return { x: "a" + input.n } }"#);
+    assert!(
+        msg.contains("E0406") && msg.contains("string(value)"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -183,7 +241,10 @@ fn return_must_match_output() {
         codes(r#"workflow W { version "1.0.0" output { total: Int } return { total: "x" } }"#),
         vec!["E0400"]
     );
-    assert_eq!(codes(r#"workflow W { version "1.0.0" output { total: Int } }"#), vec!["E0501"]);
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" output { total: Int } }"#),
+        vec!["E0501"]
+    );
 }
 
 #[test]
@@ -204,26 +265,39 @@ fn compensation_scope() {
 
 #[test]
 fn retry_policy_validation() {
-    let wf = ok(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: 1.0 }
-        retry { attempts: 4, backoff: exponential, initial_delay: 200ms, max_delay: 1s, non_retryable: ["BAD"] } } }"#);
-    let Action::Task(inv) = &wf.steps[0].action else { panic!() };
+    let wf = ok(
+        r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: 1.0 }
+        retry { attempts: 4, backoff: exponential, initial_delay: 200ms, max_delay: 1s, non_retryable: ["BAD"] } } }"#,
+    );
+    let Action::Task(inv) = &wf.steps[0].action else {
+        panic!()
+    };
     assert_eq!(inv.retry.max_attempts, 4);
     assert_eq!(inv.retry.delay_before(2), 200);
     assert_eq!(inv.retry.delay_before(3), 400);
     assert_eq!(inv.retry.delay_before(5), 1000);
-    let msg = errors(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: 1.0 } retry { atempts: 3 } } }"#);
+    let msg = errors(
+        r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: 1.0 } retry { atempts: 3 } } }"#,
+    );
     assert!(msg.contains("did you mean `attempts`?"), "{msg}");
     assert_eq!(
-        codes(r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: 1.0 } retry { attempts: 0 } } }"#),
+        codes(
+            r#"workflow W { version "1.0.0" step a { worker "risk.analyze" with { amount: 1.0 } retry { attempts: 0 } } }"#
+        ),
         vec!["E0410"]
     );
 }
 
 #[test]
 fn sleep_steps() {
-    let wf = ok(r#"workflow W { version "1.0.0" step wait { sleep 2s } step a { worker "risk.analyze" after wait with { amount: 1.0 } } }"#);
+    let wf = ok(
+        r#"workflow W { version "1.0.0" step wait { sleep 2s } step a { worker "risk.analyze" after wait with { amount: 1.0 } } }"#,
+    );
     assert_eq!(wf.steps[0].action, Action::Sleep { duration_ms: 2000 });
-    assert_eq!(codes(r#"workflow W { version "1.0.0" step wait { sleep 2s retry { attempts: 2 } } }"#), vec!["E0307"]);
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" step wait { sleep 2s retry { attempts: 2 } } }"#),
+        vec!["E0307"]
+    );
 }
 
 #[test]
@@ -233,7 +307,10 @@ fn missing_version_and_duplicates() {
         codes(r#"workflow W { version "1.0.0" step a { sleep 1s } step a { sleep 1s } }"#),
         vec!["E0302"]
     );
-    assert_eq!(codes(r#"workflow W { version "1.0.0" step input { sleep 1s } }"#), vec!["E0306"]);
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" step input { sleep 1s } }"#),
+        vec!["E0306"]
+    );
 }
 
 #[test]
@@ -261,8 +338,10 @@ fn ir_roundtrip_and_validation() {
 
 #[test]
 fn http_adapter_is_in_prelude() {
-    ok(r#"workflow W { version "1.0.0" step get { worker "orbit.http.request" with { url: "https://example.com" } }
-        return { status: get.status } }"#);
+    ok(
+        r#"workflow W { version "1.0.0" step get { worker "orbit.http.request" with { url: "https://example.com" } }
+        return { status: get.status } }"#,
+    );
     assert_eq!(codes(r#"task "orbit.mine" { }"#), vec!["E0200"]);
 }
 

@@ -68,7 +68,10 @@ impl TypeExpr {
     pub fn span(&self) -> Span {
         match self {
             TypeExpr::Named(i) => i.span,
-            TypeExpr::List(_, s) | TypeExpr::Map(_, _, s) | TypeExpr::Optional(_, s) | TypeExpr::Record(_, s) => *s,
+            TypeExpr::List(_, s)
+            | TypeExpr::Map(_, _, s)
+            | TypeExpr::Optional(_, s)
+            | TypeExpr::Record(_, s) => *s,
         }
     }
 }
@@ -223,7 +226,9 @@ impl Expr {
                 a.walk_paths(f);
                 b.walk_paths(f);
             }
-            Expr::Call(_, args, _) | Expr::List(args, _) => args.iter().for_each(|a| a.walk_paths(f)),
+            Expr::Call(_, args, _) | Expr::List(args, _) => {
+                args.iter().for_each(|a| a.walk_paths(f))
+            }
             Expr::Object(fields, _) => fields.iter().for_each(|(_, e)| e.walk_paths(f)),
             Expr::Unary(_, e, _) => e.walk_paths(f),
             Expr::If(c, a, b, _) => {

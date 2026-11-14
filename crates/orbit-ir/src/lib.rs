@@ -4,6 +4,9 @@
 //! it). Contains resolved types with payload validation, the pure expression
 //! language with its evaluator, and the workflow document with invariant checks.
 
+// `Action::Task` is the common case; boxing it would penalise every access.
+#![allow(clippy::large_enum_variant)]
+
 pub mod expr;
 pub mod types;
 pub mod workflow;
