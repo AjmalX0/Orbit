@@ -1,0 +1,60 @@
+// Shared worker contracts. A `task` declares the typed interface a worker
+// implements; the compiler checks every step against it.
+
+schema LineItem {
+    sku: String
+    quantity: Int
+}
+
+task "orders.validate" {
+    version "1.0.0"
+    input { order_id: String, amount: Float, items: List<LineItem> }
+    output { valid: Bool }
+}
+
+task "risk.analyze" {
+    version "1.0.0"
+    input { customer_id: String, amount: Float }
+    output { score: Float, reasons: List<String> }
+}
+
+task "inventory.reserve" {
+    version "1.0.0"
+    input { order_id: String, items: List<LineItem> }
+    output { reservation_id: String }
+}
+
+task "inventory.release" {
+    version "1.0.0"
+    input { reservation_id: String }
+    output { released: Bool }
+}
+
+schema PaymentRequest {
+    order_id: String
+    amount: Float
+    currency: String
+}
+
+schema PaymentResult {
+    transaction_id: String
+    status: String
+}
+
+task "payments.charge" {
+    version "1.0.0"
+    input PaymentRequest
+    output PaymentResult
+}
+
+task "payments.refund" {
+    version "1.0.0"
+    input { transaction_id: String, amount: Float }
+    output { refunded: Bool }
+}
+
+task "notifications.send" {
+    version "1.0.0"
+    input { customer_id: String, message: String }
+    output { delivered: Bool }
+}

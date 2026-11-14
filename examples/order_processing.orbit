@@ -1,0 +1,94 @@
+// ORBIT RFC-0001 reference workflow: a polyglot order pipeline.
+//
+// Workers for these tasks live in examples/workers/ (TypeScript and Python).
+// Contracts (task declarations) are shared in contracts.orbit.
+
+import "contracts.orbit"
+
+workflow OrderProcessing {
+    version "1.0.0"
+    description "Validate, risk-score, reserve, charge and notify for one order"
+    timeout 5m
+
+    input {
+        order_id: String
+        customer_id: String
+        amount: Float
+        currency: String = "USD"
+        items: List<LineItem>
+    }
+
+    output {
+        status: String
+        transaction_id: String?
+        risk_score: Float
+    }
+
+    step validate_order {
+        worker "orders.validate"
+        using typescript
+        with { order_id: input.order_id, amount: input.amount, items: input.items }
+        timeout 10s
+    }
+
+    step analyze_risk {
+        worker "risk.analyze"
+        using python
+        with { customer_id: input.customer_id, amount: input.amount }
+        retry {
+            attempts: 3
+            backoff: exponential
+            initial_delay: 1s
+            max_delay: 30s
+        }
+    }
+
+    step reserve_inventory {
+        worker "inventory.reserve"
+        using typescript
+        after validate_order
+        with { order_id: input.order_id, items: input.items }
+        compensate {
+            worker "inventory.release"
+            with { reservation_id: reserve_inventory.reservation_id }
+        }
+    }
+
+    step process_payment {
+        worker "payments.charge"
+        using python
+        after reserve_inventory
+        when analyze_risk.score < 0.8
+        with {
+            order_id: input.order_id
+            amount: input.amount
+            currency: input.currency
+        }
+        idempotency_key: "charge-" + input.order_id
+        timeout 30s
+        retry { attempts: 5, backoff: exponential, initial_delay: 500ms, max_delay: 10s }
+        compensate {
+            worker "payments.refund"
+            with { transaction_id: process_payment.transaction_id, amount: input.amount }
+            idempotency_key: "refund-" + input.order_id
+        }
+    }
+
+    step send_notification {
+        worker "notifications.send"
+        using typescript
+        after process_payment
+        with {
+            customer_id: input.customer_id
+            message: if process_payment.transaction_id == null
+                     then "Order " + input.order_id + " is held for review"
+                     else "Order " + input.order_id + " confirmed"
+        }
+    }
+
+    return {
+        status: if process_payment.transaction_id == null then "held_for_review" else "completed"
+        transaction_id: process_payment.transaction_id
+        risk_score: analyze_risk.score
+    }
+}
