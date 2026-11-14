@@ -1,0 +1,91 @@
+(* ORBIT v0.1 grammar — the language accepted by orbit-syntax 0.1.0.
+   Notation: ISO EBNF. { x } = zero or more, [ x ] = optional.
+
+   Lexical notes
+   - Keywords are contextual: every word lexes as IDENTIFIER and the parser
+     treats it as a keyword only in keyword position. `input`, `version`,
+     `status` ... remain valid field names. Only true/false/null are reserved.
+   - Whitespace and newlines are insignificant, with one rule: an infix
+     operator (and a postfix `[`, `.` or `(`) must be on the same line as its
+     left operand. `{ a: 1  b: -2 }` therefore has two fields.
+   - Separators `,` and `;` between members, fields and list items are optional.
+   - Member keywords may be followed by an optional `:`
+     (`timeout 5s` == `timeout: 5s`). *)
+
+program          = { declaration } ;
+declaration      = workflow_decl | schema_decl | task_decl | import_decl ;
+
+import_decl      = "import" , STRING ;                     (* path relative to the importing file *)
+
+schema_decl      = "schema" , IDENTIFIER , record_body ;
+record_body      = "{" , { field , [ sep ] } , "}" ;
+field            = IDENTIFIER , ":" , type , [ "=" , expression ] ;   (* default must be constant *)
+
+task_decl        = "task" , STRING , "{" , { task_member , [ sep ] } , "}" ;
+task_member      = "version" , [ ":" ] , STRING
+                 | "description" , [ ":" ] , STRING
+                 | "input" , [ ":" ] , type
+                 | "output" , [ ":" ] , type ;
+
+workflow_decl    = "workflow" , IDENTIFIER , "{" , { workflow_member , [ sep ] } , "}" ;
+workflow_member  = "version" , [ ":" ] , STRING
+                 | "description" , [ ":" ] , STRING
+                 | "timeout" , [ ":" ] , DURATION
+                 | "input" , record_body
+                 | "output" , record_body
+                 | step_decl
+                 | "return" , expression
+                 | "on" , IDENTIFIER , [ STRING ] , block ;      (* reserved; rejected in v0.1 (E0105) *)
+
+step_decl        = "step" , IDENTIFIER , "{" , { step_member , [ sep ] } , "}" ;
+step_member      = action
+                 | "using" , [ ":" ] , IDENTIFIER
+                 | "after" , [ ":" ] , IDENTIFIER , { "," , IDENTIFIER }
+                 | "with" , [ ":" ] , expression
+                 | "timeout" , [ ":" ] , DURATION                (* per attempt, start-to-close *)
+                 | "queue_timeout" , [ ":" ] , DURATION          (* time allowed waiting for a worker *)
+                 | "retry" , "{" , { IDENTIFIER , ":" , expression , [ sep ] } , "}"
+                 | "idempotency_key" , [ ":" ] , expression
+                 | "when" , [ ":" ] , expression
+                 | "compensate" , "{" , { step_member , [ sep ] } , "}" ;
+action           = "worker" , [ ":" ] , STRING
+                 | "sleep" , [ ":" ] , DURATION ;
+
+(* retry settings: attempts: INTEGER, backoff: fixed | exponential,
+   initial_delay: DURATION, max_delay: DURATION, non_retryable: [STRING, ...] *)
+
+type             = base_type , { "?" } ;
+base_type        = "List" , "<" , type , ">"
+                 | "Map" , "<" , type , "," , type , ">"       (* key must be String *)
+                 | record_body                                  (* anonymous record *)
+                 | IDENTIFIER ;                                 (* primitive or schema name *)
+(* primitives: String Int Float Bool Bytes Duration Timestamp UUID JSON *)
+
+expression       = or_expr ;
+or_expr          = and_expr , { "||" , and_expr } ;
+and_expr         = eq_expr , { "&&" , eq_expr } ;
+eq_expr          = cmp_expr , { ( "==" | "!=" ) , cmp_expr } ;
+cmp_expr         = add_expr , { ( "<" | "<=" | ">" | ">=" ) , add_expr } ;
+add_expr         = mul_expr , { ( "+" | "-" ) , mul_expr } ;
+mul_expr         = unary , { ( "*" | "/" | "%" ) , unary } ;
+unary            = ( "!" | "-" ) , unary | postfix ;
+postfix          = primary , { "." , IDENTIFIER | "[" , expression , "]" } ;
+primary          = literal
+                 | IDENTIFIER , "(" , [ expression , { "," , expression } ] , ")"   (* built-in call *)
+                 | IDENTIFIER                                    (* path root: input | execution | step *)
+                 | "{" , { ( IDENTIFIER | STRING ) , ":" , expression , [ sep ] } , "}"
+                 | "[" , [ expression , { sep , expression } ] , "]"
+                 | "if" , expression , "then" , expression , "else" , expression
+                 | "(" , expression , ")" ;
+literal          = STRING | INTEGER | FLOAT | DURATION | "true" | "false" | "null" ;
+block            = "{" , { ANY_TOKEN | block } , "}" ;
+sep              = "," | ";" ;
+
+(* Tokens *)
+IDENTIFIER       = ( letter | "_" ) , { letter | digit | "_" } ;
+INTEGER          = digit , { digit | "_" } ;                    (* signed 64-bit *)
+FLOAT            = digit , { digit | "_" } , "." , digit , { digit | "_" } ;
+DURATION         = ( INTEGER | FLOAT ) , ( "ms" | "s" | "m" | "h" | "d" ) ;
+STRING           = '"' , { char | escape } , '"' ;              (* single line *)
+escape           = "\n" | "\t" | "\r" | '\"' | "\\" | "\u{" , hex , { hex } , "}" ;
+(* comments: // to end of line, and nestable /* ... */ *)
