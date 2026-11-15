@@ -43,6 +43,7 @@ fn start_runtime() -> String {
                     addr,
                     auth_token: Some("admin".into()),
                     worker_token: Some("worker".into()),
+                    identities: Default::default(),
                     tls: None,
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(20),

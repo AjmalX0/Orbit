@@ -31,13 +31,22 @@ class Client:
         token: Optional[str] = None,
         timeout: float = 70.0,
         ca_cert: Optional[str] = None,
+        client_cert: Optional[str] = None,
+        client_key: Optional[str] = None,
     ):
         self.server = (server or os.environ.get("ORBIT_SERVER") or DEFAULT_SERVER).rstrip("/")
         # Workers should be given the restricted worker credential when the runtime has one.
         self.token = token if token is not None else (os.environ.get("ORBIT_WORKER_TOKEN") or os.environ.get("ORBIT_TOKEN"))
         self.timeout = timeout
         ca = ca_cert or os.environ.get("ORBIT_CA_CERT")
-        self._ssl = ssl.create_default_context(cafile=ca) if ca else None
+        # Mutual TLS: a client certificate identifies the worker to the runtime.
+        cert = client_cert or os.environ.get("ORBIT_CLIENT_CERT")
+        key = client_key or os.environ.get("ORBIT_CLIENT_KEY")
+        self._ssl = None
+        if ca or cert:
+            self._ssl = ssl.create_default_context(cafile=ca)
+            if cert:
+                self._ssl.load_cert_chain(cert, key)
 
     def request(self, method: str, path: str, body: Any = None) -> Tuple[int, Any]:
         data = None if body is None else json.dumps(body).encode()

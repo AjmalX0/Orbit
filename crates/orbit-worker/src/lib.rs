@@ -182,12 +182,18 @@ pub struct WorkerBuilder {
     server: String,
     token: Option<String>,
     ca_pem: Option<Vec<u8>>,
+    identity: Option<(Vec<u8>, Vec<u8>)>,
     concurrency: usize,
     runtime: String,
     poll_wait_ms: u64,
 }
 
 impl WorkerBuilder {
+    /// Mutual TLS: present this PEM certificate chain and private key.
+    pub fn client_identity(mut self, cert_pem: Vec<u8>, key_pem: Vec<u8>) -> Self {
+        self.identity = Some((cert_pem, key_pem));
+        self
+    }
     pub fn server(mut self, url: &str) -> Self {
         self.server = url.trim_end_matches('/').to_string();
         self
@@ -218,19 +224,32 @@ impl WorkerBuilder {
         let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_millis(self.poll_wait_ms + 15_000)));
-        if let Some(pem) = &self.ca_pem {
-            use ureq::tls::{PemItem, RootCerts, TlsConfig};
-            let certs: Vec<_> = ureq::tls::parse_pem(pem)
-                .filter_map(|i| match i {
-                    Ok(PemItem::Certificate(c)) => Some(c),
-                    _ => None,
-                })
-                .collect();
-            config = config.tls_config(
-                TlsConfig::builder()
-                    .root_certs(RootCerts::new_with_certs(&certs))
-                    .build(),
-            );
+        if self.ca_pem.is_some() || self.identity.is_some() {
+            use ureq::tls::{ClientCert, PemItem, PrivateKey, RootCerts, TlsConfig};
+            let certs_of = |pem: &[u8]| -> Vec<_> {
+                ureq::tls::parse_pem(pem)
+                    .filter_map(|i| match i {
+                        Ok(PemItem::Certificate(c)) => Some(c),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let mut tls = TlsConfig::builder();
+            if let Some(pem) = &self.ca_pem {
+                tls = tls.root_certs(RootCerts::new_with_certs(&certs_of(pem)));
+            }
+            if let Some((cert, key)) = &self.identity {
+                match PrivateKey::from_pem(key) {
+                    Ok(k) => {
+                        tls = tls.client_cert(Some(ClientCert::new_with_certs(
+                            &certs_of(cert),
+                            k.to_owned(),
+                        )))
+                    }
+                    Err(e) => eprintln!("[orbit] invalid client key: {e}"),
+                }
+            }
+            config = config.tls_config(tls.build());
         }
         Worker {
             inner: Arc::new(Inner {
@@ -285,6 +304,9 @@ impl Worker {
                 .to_string(),
             token: env("ORBIT_WORKER_TOKEN").or_else(|| env("ORBIT_TOKEN")),
             ca_pem: env("ORBIT_CA_CERT").and_then(|p| std::fs::read(p).ok()),
+            identity: env("ORBIT_CLIENT_CERT")
+                .zip(env("ORBIT_CLIENT_KEY"))
+                .and_then(|(c, k)| Some((std::fs::read(c).ok()?, std::fs::read(k).ok()?))),
             concurrency: 4,
             runtime: "rust".into(),
             poll_wait_ms: 20_000,

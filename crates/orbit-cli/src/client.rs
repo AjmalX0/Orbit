@@ -29,23 +29,46 @@ impl std::fmt::Display for ApiError {
 pub type Result<T> = std::result::Result<T, ApiError>;
 
 impl Client {
-    pub fn new(base: &str, token: Option<String>, ca_pem: Option<Vec<u8>>) -> Self {
+    pub fn new(
+        base: &str,
+        token: Option<String>,
+        ca_pem: Option<Vec<u8>>,
+        identity: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> Self {
+        use ureq::tls::{Certificate, ClientCert, PemItem, PrivateKey, RootCerts, TlsConfig};
         let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(330)));
-        if let Some(pem) = ca_pem {
-            use ureq::tls::{Certificate, RootCerts, TlsConfig};
-            let certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(&pem)
-                .filter_map(|item| match item {
-                    Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
-                    _ => None,
-                })
-                .collect();
-            config = config.tls_config(
-                TlsConfig::builder()
-                    .root_certs(RootCerts::new_with_certs(&certs))
-                    .build(),
-            );
+        if ca_pem.is_some() || identity.is_some() {
+            let mut tls = TlsConfig::builder();
+            if let Some(pem) = ca_pem {
+                let certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(&pem)
+                    .filter_map(|item| match item {
+                        Ok(PemItem::Certificate(c)) => Some(c),
+                        _ => None,
+                    })
+                    .collect();
+                tls = tls.root_certs(RootCerts::new_with_certs(&certs));
+            }
+            if let Some((cert_pem, key_pem)) = identity {
+                let chain: Vec<Certificate<'static>> = ureq::tls::parse_pem(&cert_pem)
+                    .filter_map(|item| match item {
+                        Ok(PemItem::Certificate(c)) => Some(c),
+                        _ => None,
+                    })
+                    .collect();
+                match PrivateKey::from_pem(&key_pem) {
+                    Ok(key) => {
+                        tls = tls
+                            .client_cert(Some(ClientCert::new_with_certs(&chain, key.to_owned())))
+                    }
+                    Err(e) => {
+                        eprintln!("error: invalid client key: {e}");
+                        std::process::exit(2)
+                    }
+                }
+            }
+            config = config.tls_config(tls.build());
         }
         let agent: ureq::Agent = config.build().into();
         Client {
