@@ -328,6 +328,9 @@ error: compatibility check failed: 2 error(s), 0 warning(s)</code></pre>
       <div><h3>Handlers</h3><p><code>on event</code> runs steps every time a signal arrives. <code>on failure</code>, <code>on cancel</code> and <code>on timeout</code> run after compensation, with a typed <code>failure</code> value.</p></div>
       <div><h3>Limits and permissions</h3><p>Caps on running executions, fan-out, history and payload size, per server or per workflow, and client identities limited to the workflows and actions they need.</p></div>
       <div><h3>Tests in the language</h3><p>Mocks, signals and expectations in <code>test</code> blocks, type-checked against the workflow and run with <code>orbit test</code> in milliseconds.</p></div>
+      <div><h3><a href="docs/runtime/web-ui.html">Web UI</a></h3><p>Built into the server: executions with their history and step graph, workflows, workers and schedules, with queries, signals and cancellation.</p></div>
+      <div><h3><a href="docs/runtime/schedules.html">Schedules and long runs</a></h3><p>Cron and interval schedules that start each occurrence exactly once, even across servers, and <code>continue_as_new</code> for workflows that run for months.</p></div>
+      <div><h3><a href="docs/tooling/policy.html">Process as code</a></h3><p>Diagrams, reference docs, JSON Schema and process diffs generated from the definition, and organisation policies checked in CI.</p></div>
       <div><h3>Safe evolution</h3><p>Immutable versions, content hashes, and <code>orbit compat</code> to catch breaking changes to inputs, outputs, signals and queries.</p></div>
     </div>
   </div>

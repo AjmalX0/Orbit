@@ -5,6 +5,66 @@ All notable changes are listed here. The project follows
 and the worker protocol (`orbit.worker.v1`) are versioned separately, as
 described in RFC-0001 §17.
 
+## [0.5.0] — 2026-11-15
+
+### Language
+- **Continue-as-new.** `continue_as_new [when <cond>] with <input>` ends a
+  run when its steps are done and starts the next run of the same execution
+  with a new input and an empty history; the input is type-checked against
+  the workflow's input. Each run's history is kept (`?run=N`,
+  `orbit logs --run`). New diagnostics E0323, E0324, W0607, E0712, E0713.
+- **Condition narrowing.** A step whose `when` contains every conjunct of a
+  conditional dependency's `when`, or `!is_null(dep)`, reads that dependency
+  as non-optional, so guarded steps no longer need `coalesce`.
+- A line that starts with a binary operator (other than `-`) continues the
+  expression, so long conditions can span lines.
+- `///` doc comments on workflows, steps, tasks and fields are rendered by
+  `orbit docs` (they do not change the definition hash).
+
+### Tooling
+- `orbit graph`: Mermaid, Graphviz DOT, SVG and sequence diagrams of a
+  workflow, including compensations, handlers, `on event` blocks and signals.
+- `orbit docs`: reference pages for workflows and task contracts, in Markdown
+  or self-contained HTML, with diagrams and optional JSON Schema.
+- `orbit schema`: JSON Schema (draft 2020-12) for every workflow input,
+  output, signal and query, and every task input and output.
+- `orbit diff`: a business-process diff between two versions (steps,
+  dependencies, conditions, retries, compensation, handlers, signals,
+  queries, limits) in text, Markdown or JSON, with the compatibility verdict.
+- `orbit check|compile|deploy --policy`: organisation rules in TOML
+  (`require_compensation`, `require_approval` above a threshold,
+  `require_retry`, `max_attempts`, `require_timeout`, `require_handler`,
+  `allow_tasks`, `forbid_tasks`, `max_fan_out`, `require_limits`,
+  `require_signal_timeout`), with exemptions and inline waivers. Diagnostics
+  P0001-P0111.
+- `orbit test`: list expectations match element by element with partial
+  records; `expect runs N` for continue-as-new.
+- `orbit schedule create|update|list|get|pause|resume|trigger|delete`.
+- Diagnostics print each source line once, with every marker underneath.
+- The language server shows a step's condition, contract, retry, timeouts
+  and compensation on hover.
+
+### Runtime
+- **Web UI.** `orbit server` serves an operations UI at `/ui/`: overview,
+  executions (steps, history timeline, step graph, runs), workflows, workers
+  and schedules, with queries, signals and cancellation. Client identities
+  see only what they may; strict Content-Security-Policy; `--no-ui` turns it
+  off.
+- **Schedules.** Durable cron (5-field, time zones) and interval schedules
+  with overlap (`skip`, `allow`, `cancel_previous`) and catch-up policies,
+  pause, start and end times and jitter. Each occurrence starts exactly one
+  execution, on one server, in standby or shared clusters. `/v1/schedules`,
+  a new client action `schedule`, and metrics.
+- Shared mode: a cancel forwarded to the owning server answers with the
+  state after the cancellation's decisions, as a single server does.
+
+### Examples and guides
+- New examples with tests: `onboarding` (KYC), `expense` (multi-level
+  approval), `agent` (AI agent with guardrails), `subscription`
+  (continue-as-new); policy files `kyc.toml` and `fintech.toml`.
+- New guides: typed business process contracts, human approvals, AI agents
+  with guardrails; pages "Why ORBIT" and "About the project".
+
 ## [0.4.0] — 2026-11-15
 
 ### Language

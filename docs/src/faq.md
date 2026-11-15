@@ -310,21 +310,23 @@ Both record workflow history durably, recover by replaying it, deliver work
 to workers at least once, and support workers in several languages. The main
 differences:
 
-| | ORBIT 0.4 | Temporal |
+| | ORBIT 0.5 | Temporal |
 |---|---|---|
 | Workflow definition | A declarative `.orbit` file, compiled and type-checked against task contracts before deployment | Code in an SDK language, with determinism rules enforced at replay |
 | Business logic | Workers, one handler per task contract; small deterministic transformations as `compute` steps | Activities, called from workflow code |
 | Control flow | Dependencies, conditions, fan-out, child workflows, sleep, waiting for signals and compensation, declared in the language | Anything the host language can express |
 | Signals and queries | Declared in the workflow with typed payloads and results; every `await`, every use of a payload field and every query expression is type-checked at compile time, and the runtime validates each payload against its declaration | Defined in workflow code through SDK handlers |
-| Static checks | Type checking plus warnings for missing compensations, constant conditions, unused signals and unbounded waits (`orbit check --strict`) | The host language's type checker and tooling |
+| Static checks | Type checking plus warnings for missing compensations, constant conditions, unused signals and unbounded waits (`orbit check --strict`), and organisation [policies](tooling/policy.md) (`orbit check --policy`) | The host language's type checker and tooling |
 | Changing a workflow | A new immutable `name@version`; running executions keep their definition; `orbit compat` reports breaking changes | Versioning APIs and worker build IDs |
 | Failure handling | Compensation per step, then `on failure`, `on cancel` and `on timeout` handler steps | Code in the workflow, such as `try`/`catch` and cancellation scopes |
 | Recurring messages | `on event <signal>` blocks run once per arriving signal, alongside the main steps | Signal handlers in workflow code |
 | Recurring starts | [Schedules](runtime/schedules.md): cron expressions (with a time zone) or fixed intervals, with overlap and catch-up policies, managed with `/v1/schedules` and `orbit schedule` | Schedules |
 | Long-running workflows | [`continue_as_new`](language/continue-as-new.md), declared in the workflow and type-checked against its input; each run has its own history | Continue-As-New, called from workflow code |
 | Testing | `test` declarations run by `orbit test` with mocked tasks and simulated time; `orbit simulate` and `orbit replay` | SDK test frameworks with time skipping, and replay testing |
+| Operations | A [web UI](runtime/web-ui.md) built into the server, the CLI, Prometheus metrics and OpenTelemetry traces | The Temporal Web UI, CLI, metrics and tracing |
+| Process documentation | `orbit graph`, `orbit docs`, `orbit schema` and `orbit diff` generate diagrams, reference pages, JSON Schema and process diffs from the definition | Not built in |
 | Deployment | One binary with SQLite or PostgreSQL; one server, active/standby servers, or several active servers sharing the work on PostgreSQL | A multi-service cluster with several supported databases |
-| Features not yet in ORBIT | | Updates, a web UI |
+| Features not yet in ORBIT | | Updates, Nexus, multi-region replication, a managed cloud |
 
 ORBIT suits processes that you want to read, review and check as a whole,
 across services in different languages. Temporal is a mature platform that
@@ -366,9 +368,13 @@ and the full event history. See [Storage](runtime/storage.md).
 
 ### Is there a web UI?
 
-No. Use `orbit ps`, `orbit status`, `orbit logs`, `orbit inspect` and
-`orbit workers list`, Prometheus metrics at `/v1/metrics`, and OpenTelemetry
-traces. See [Observability](runtime/observability.md).
+Yes. `orbit server` serves one at `/ui/`: executions with their steps,
+history and graph, workflows, workers and schedules, and actions to run
+queries, send signals and cancel executions. Disable it with `--no-ui`. See
+[Web UI](runtime/web-ui.md). The CLI (`orbit ps`, `status`, `logs`,
+`inspect`, `workers list`), Prometheus metrics at `/v1/metrics` and
+OpenTelemetry traces are also available; see
+[Observability](runtime/observability.md).
 
 ### Does ORBIT run on Windows and macOS?
 

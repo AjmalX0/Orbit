@@ -194,17 +194,29 @@ with `non_retryable` codes, attempt, queue and workflow timeouts, idempotency
 keys, durable `sleep`, compensation (Saga), fan-out (`for item in list`,
 `max_parallel`), child workflows (`workflow "Name"`), typed signals and queries
 for people and external systems in the loop (`signal`, `await`, `query`), and
-deterministic `compute` steps with `map`/`filter`/`sum`. Errors come with
-stable codes, source locations and suggestions.
+deterministic `compute` steps with `map`/`filter`/`sum`, and `continue_as_new`
+for long-running workflows. Steps that share a condition read each other
+without `coalesce`. Errors come with stable codes, source locations and
+suggestions.
 
 **Checked before it runs:** beyond type-checking every step against its
 worker's contract, the compiler finds missing compensations (`compensated_by`
 on contracts), steps that can never run, signals nothing waits for and waits
 without a timeout; `orbit check --strict` makes them build failures.
 `orbit compat old.orbit new.orbit` reports breaking changes to inputs, outputs,
-signals and queries, and the version bump they require.
+signals and queries, and the version bump they require. Organisation rules
+("payments need an approval above 10000", "every provider call has a
+deadline") are TOML policies checked by `orbit check --policy`.
 
-**Runtime:** event-sourced and crash-safe. SQLite or PostgreSQL storage, and
+**Process as code:** `orbit graph` draws a workflow (Mermaid, Graphviz, SVG),
+`orbit docs` writes reference pages for workflows and contracts, `orbit schema`
+exports JSON Schema for every payload, and `orbit diff` shows what changed in a
+process between two versions, ready to paste into a pull request.
+
+**Runtime:** event-sourced and crash-safe, with a built-in web UI at `/ui/`
+(executions, history, step graphs, workers, schedules; queries, signals and
+cancellation) and durable cron and interval schedules. SQLite or PostgreSQL
+storage, and
 clusters on PostgreSQL (`--cluster`): active/standby with automatic failover,
 or shared mode with every server active and executions taken over when a
 server stops. Measured throughput is on the
@@ -281,7 +293,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status and license
 
-Version 0.4. Next: grouping the commits of several executions into one
+Version 0.5. Next: grouping the commits of several executions into one
 transaction for higher durable throughput
 ([RFC-0001 Appendix A.5](specification/RFC-0001.md#a5-known-gaps)).
 
