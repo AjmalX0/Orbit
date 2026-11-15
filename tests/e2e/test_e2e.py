@@ -1390,8 +1390,15 @@ class Schedules(unittest.TestCase):
         ids = self.scheduled("crash")
         self.assertEqual(s["fired"], len(ids), (s, ids))
         first, last = (time.strptime(i.split(":", 1)[1], "%Y-%m-%dT%H:%M:%SZ") for i in (ids[0], ids[-1]))
-        # Every occurrence between the first and the last was started or counted as skipped.
-        self.assertEqual(calendar.timegm(last) - calendar.timegm(first) + 1, s["fired"] + s["skipped"], (s, ids))
+        # Each occurrence started at most once ...
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        # ... and every occurrence between the first and the last started
+        # execution was started or counted as skipped. Skips can also come
+        # before the first execution: a 1s occurrence whose tick runs more
+        # than a second late (a loaded machine) is counted as missed.
+        span = calendar.timegm(last) - calendar.timegm(first) + 1
+        self.assertGreaterEqual(s["fired"] + s["skipped"], span, (s, ids))
+        self.assertLessEqual(s["fired"], span, (s, ids))
         for ex in ids:
             self.assertEqual(self.c.wait(ex, timeout=60)["status"], "COMPLETED")
         with urllib.request.urlopen(self.c.url + "/v1/metrics", timeout=5) as r:

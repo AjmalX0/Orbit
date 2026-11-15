@@ -37,7 +37,7 @@ import (
 )
 
 // Version of this SDK.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 const defaultServer = "http://127.0.0.1:7233"
 

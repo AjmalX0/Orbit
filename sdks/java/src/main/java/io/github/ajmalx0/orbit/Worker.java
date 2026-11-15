@@ -60,7 +60,7 @@ import javax.net.ssl.SSLContext;
  */
 public final class Worker {
     /** Version of this SDK. */
-    public static final String VERSION = "0.4.0";
+    public static final String VERSION = "0.5.0";
     /** The runtime address used when neither the builder nor {@code ORBIT_SERVER} sets one. */
     public static final String DEFAULT_SERVER = "http://127.0.0.1:7233";
 
