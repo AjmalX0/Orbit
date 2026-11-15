@@ -192,11 +192,19 @@ without a timeout; `orbit check --strict` makes them build failures.
 `orbit compat old.orbit new.orbit` reports breaking changes to inputs, outputs,
 signals and queries, and the version bump they require.
 
-**Runtime:** event-sourced and crash-safe. SQLite or PostgreSQL storage.
+**Runtime:** event-sourced and crash-safe. SQLite or PostgreSQL storage, and
+active/standby clusters on PostgreSQL with automatic failover (`--cluster`).
+Outcome handlers (`on failure`, `on cancel`, `on timeout`), resource limits and
+client identities limited to workflows and actions.
 At-least-once delivery with reconciliation of uncertain attempts. The worker
 protocol is served over HTTP/JSON and gRPC. Admin, shared-worker and per-worker
 credentials, TLS and mutual TLS. OpenTelemetry traces, Prometheus metrics,
 structured logs, and an opt-in HTTP adapter.
+
+**Testing:** `test` blocks in ORBIT with mocks, signals and expectations,
+run in-process by `orbit test` with time fast-forwarded; `orbit simulate` to
+explore a workflow locally; `orbit replay` to check a recorded execution
+against the current runtime.
 
 **Tooling:** the `orbit` CLI, a comment-preserving formatter (`orbit fmt`), a
 language server (`orbit lsp`) with a VS Code extension, a Mermaid/Graphviz step
@@ -213,7 +221,7 @@ against the real runtime, including over mutual TLS.
 | Compiler | `crates/orbit-compiler` | imports, name resolution, type checker, dependency graph, child-workflow ordering, IR lowering |
 | IR | `crates/orbit-ir` | `orbit-ir/1`: types, payload validation, pure expression evaluator, invariants, definition hash |
 | Runtime | `crates/orbit-runtime` | engine and pure decider, SQLite/PostgreSQL, dispatch, fan-out, children, recovery, HTTP API, gRPC, identities, TLS/mTLS, OpenTelemetry |
-| CLI | `crates/orbit-cli` (crate `orbit-lang`) | `init check validate compile fmt compat graph server deploy run status inspect logs signal query cancel ps workers token lsp` |
+| CLI | `crates/orbit-cli` (crate `orbit-lang`) | `init check validate compile fmt compat test simulate replay graph server deploy run status inspect logs signal query cancel ps workers token lsp` |
 | SDKs | `sdks/python`, `sdks/typescript`, `sdks/go`, `sdks/java`, `sdks/csharp`, `crates/orbit-worker` | one per language |
 | Worker protocol | `protocol/` | canonical `.proto`; HTTP/JSON and gRPC bindings |
 | Specification | `specification/` | RFC-0001 with the implementation record, EBNF grammar |
@@ -257,8 +265,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status and license
 
-Version 0.2: a single-node runtime. Next: multi-node execution sharing
-PostgreSQL, and `orbit test` / `replay` / `simulate`
-([RFC-0001 Appendix A.4](specification/RFC-0001.md#a4-known-gaps)).
+Version 0.3. Next: horizontal scaling across several active servers, and
+per-execution resource limits declared in the workflow
+([RFC-0001 Appendix A.5](specification/RFC-0001.md#a5-known-gaps)).
 
 Licensed under the [Apache License 2.0](LICENSE).

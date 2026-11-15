@@ -5,6 +5,50 @@ All notable changes are listed here. The project follows
 and the worker protocol (`orbit.worker.v1`) are versioned separately, as
 described in RFC-0001 §17.
 
+## [0.3.0] — 2026-11-15
+
+### Language
+- **Outcome handlers.** `on failure`, `on cancel` and `on timeout` blocks hold
+  steps that run after compensation, before the execution's terminal status,
+  with a typed `failure` value (`reason`, `code`, `message`). A failed handler
+  step is recorded but does not change the outcome. New diagnostic E0319.
+- **Tests in the language.** `test "..." { ... }` declarations with mocked
+  task results (`returns`, `fails`, `hangs`, `times N then ...`), signals and
+  expectations on status, output, error, steps (including handler steps) and
+  compensations. Tests are type-checked by every command and never reach the
+  IR. New diagnostics E0700–E0711 and W0701.
+
+### Tooling
+- `orbit test`: runs test declarations in-process against the real engine,
+  with no server or workers; durable time is fast-forwarded. `--filter`,
+  `--format json`.
+- `orbit simulate`: runs a workflow locally with mocks or generated sample
+  results, `--fail task=CODE` and `--signal`, and prints the timeline.
+- `orbit replay`: re-runs a recorded history through the current runtime and
+  reports any decision it would make differently; `--at <seq>` shows the state
+  at any point. Works against a server or offline files.
+
+### Runtime
+- **Several servers.** `orbit server --cluster` runs active/standby on a
+  shared PostgreSQL database: leader election with fencing, automatic failover
+  (about a second after the active server dies), read-only standbys,
+  `GET /v1/ready` for load balancers, `503 NOT_LEADER` with the leader's
+  address. The CLI follows the leader automatically.
+- **Resource limits.** `--max-active-executions` (429 `RESOURCE_EXHAUSTED`),
+  `--max-fan-out`, `--max-history-events` (the execution fails with
+  `LIMIT_EXCEEDED`; compensation and handlers still run) and
+  `--max-payload-bytes` (413 `PAYLOAD_TOO_LARGE`).
+- **Client identities.** `[[client]]` entries in the workers file give an
+  application the execution API for some workflows and actions only (start,
+  signal, query, read, cancel).
+
+### Changed
+- `sum()` over a `Float` list returns `0.0` for an empty list. Workflows that
+  call `sum` on a decimal list compile to a new definition hash: give them a
+  new version when you redeploy.
+- Durations print as `2d`, `1d6h`, `2h15m`; `orbit inspect` lists signals,
+  queries and handlers.
+
 ## [0.2.0] — 2026-11-15
 
 ### Language

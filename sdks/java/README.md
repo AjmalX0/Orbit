@@ -7,7 +7,7 @@ and Jackson only.
 <dependency>
   <groupId>io.github.ajmalx0</groupId>
   <artifactId>orbit-sdk</artifactId>
-  <version>0.2.0</version>
+  <version>0.3.0</version>
 </dependency>
 ```
 

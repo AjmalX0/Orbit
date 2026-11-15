@@ -17,7 +17,7 @@
  * and redeliveries, to make side effects idempotent.
  */
 
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.3.0";
 const DEFAULT_SERVER = "http://127.0.0.1:7233";
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };

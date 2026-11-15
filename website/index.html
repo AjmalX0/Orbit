@@ -35,7 +35,7 @@
 <section class="hero">
   <div class="wrap hero-grid">
     <div class="hero-copy">
-      <p class="eyebrow">Version 0.2.0 &middot; Apache-2.0</p>
+      <p class="eyebrow">Version 0.3.0 &middot; Apache-2.0</p>
       <h1>Write the workflow once. Run it reliably, in every language.</h1>
       <p class="lede">ORBIT is a declarative language and durable runtime for work that spans services. You describe the steps, their order and what happens when they fail. The compiler checks every step against its worker's contract before anything runs, and the runtime carries it through retries, timeouts, crashes and compensation.</p>
 
@@ -212,6 +212,46 @@ error: compatibility check failed: 2 error(s), 0 warning(s)</code></pre>
 </section>
 
 <section class="band">
+  <div class="wrap split">
+    <div>
+      <h2 class="section-title">Test workflows without infrastructure</h2>
+      <p>Tests are written in ORBIT next to the workflow: mock what each task returns or how it fails, send signals, and state the outcome you expect. <code>orbit test</code> runs them in-process against the real runtime, with no server and no workers, and fast-forwards durable time, so a two-day timeout takes milliseconds.</p>
+      <p><code>orbit simulate</code> explores a workflow the same way from the command line, and <code>orbit replay</code> re-runs a recorded execution against the current runtime to show any decision it would now make differently. <a href="docs/tooling/testing.html">Testing workflows</a></p>
+    </div>
+    <figure class="code-card" aria-label="A workflow test">
+      <figcaption><span>approval.test.orbit</span></figcaption>
+<pre><code><span class="k">test</span> <span class="s">"large orders wait for approval"</span> {
+    <span class="k">workflow</span> OrderApproval
+    <span class="k">input</span> { order_id: <span class="s">"T1"</span>, customer_id: <span class="s">"c-1"</span>, amount: <span class="n">2500.0</span> }
+    <span class="k">mock</span> <span class="s">"payments.charge"</span> <span class="k">returns</span> { transaction_id: <span class="s">"tx-"</span> + input.order_id, status: <span class="s">"captured"</span> }
+    <span class="k">mock</span> <span class="s">"notifications.send"</span> <span class="k">returns</span> { delivered: <span class="n">true</span> }
+    <span class="k">signal</span> review { approved: <span class="n">true</span>, reviewer: <span class="s">"dana"</span> }
+    <span class="k">expect</span> status COMPLETED
+    <span class="k">expect</span> output { status: <span class="s">"charged"</span>, transaction_id: <span class="s">"tx-T1"</span> }
+    <span class="k">expect</span> step decision SUCCEEDED
+}</code></pre>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <div>
+      <h2 class="section-title">Keep running when a server does not</h2>
+      <p>Run several <code>orbit server --cluster</code> processes on one PostgreSQL database. One is active; the others stand by and take over about a second after it stops, fenced so that a deposed server can never write. A load balancer reaches the active one through <code>/v1/ready</code>, and in-flight work is redelivered, not lost.</p>
+      <p>Resource limits cap running executions, fan-out, history length and payload size, and client identities give each application only the workflows and actions it needs. <a href="docs/runtime/cluster.html">Running several servers</a></p>
+    </div>
+<pre class="terminal wrap-lines"><code><span class="dim"># node-1, the leader, is killed with SIGKILL at 13:55:46.19</span>
+<span class="dim"># node-2, standby until now:</span>
+13:55:46.810072Z INFO orbit_runtime::cluster: elected leader; recovering executions from history node_id=node-2 term=2
+13:55:46.859078Z INFO orbit_runtime::engine: recovered active executions from history executions=1 in_flight=1
+13:55:46.860022Z INFO orbit_runtime::cluster: leader is serving node_id=node-2 term=2 active_executions=1 recovery_ms=49
+13:55:46.886881Z INFO orbit_runtime::engine: worker registered worker_id=orders-python runtime=python tasks=5
+13:55:46.966959Z INFO orbit_runtime::engine: worker registered worker_id=orders-typescript runtime=typescript tasks=4</code></pre>
+  </div>
+</section>
+
+<section class="band">
   <div class="wrap">
     <h2 class="section-title">What the language covers</h2>
     <div class="features">
@@ -223,6 +263,9 @@ error: compatibility check failed: 2 error(s), 0 warning(s)</code></pre>
       <div><h3>Durable timers</h3><p><code>sleep 24h</code> survives restarts and needs no worker. Conditions decide at run time whether a step runs.</p></div>
       <div><h3>Signals and queries</h3><p>Typed messages a workflow waits for, and typed read-only views of its state, declared in the workflow itself.</p></div>
       <div><h3>Compute steps</h3><p>Small deterministic transformations with <code>map</code>, <code>filter</code> and <code>sum</code>, evaluated by the runtime and type-checked like everything else.</p></div>
+      <div><h3>Outcome handlers</h3><p><code>on failure</code>, <code>on cancel</code> and <code>on timeout</code> run steps after compensation, with a typed <code>failure</code> value, to notify people or record what happened.</p></div>
+      <div><h3>Limits and permissions</h3><p>Caps on running executions, fan-out, history and payload size, and client identities limited to the workflows and actions they need.</p></div>
+      <div><h3>Tests in the language</h3><p>Mocks, signals and expectations in <code>test</code> blocks, type-checked against the workflow and run with <code>orbit test</code> in milliseconds.</p></div>
       <div><h3>Safe evolution</h3><p>Immutable versions, content hashes, and <code>orbit compat</code> to catch breaking changes to inputs, outputs, signals and queries.</p></div>
     </div>
   </div>

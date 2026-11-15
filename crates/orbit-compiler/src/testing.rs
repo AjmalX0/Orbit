@@ -315,7 +315,7 @@ fn lower_test(
                         None
                     }
                     (None, _) => None,
-                    (Some(step), StepExpectation::Status(id)) => {
+                    (Some(_), StepExpectation::Status(id)) => {
                         status_name(id, TEST_STEP_STATUSES, "step status", diags).map(|status| {
                             Expectation::StepStatus {
                                 step: name.name.clone(),
@@ -333,7 +333,7 @@ fn lower_test(
                         step: name.name.clone(),
                         expected,
                     }),
-                    (Some(step), StepExpectation::Attempts(n, span)) => {
+                    (Some(_), StepExpectation::Attempts(n, span)) => {
                         if *n < 0 || *n > u32::MAX as i64 {
                             diags.push(Diagnostic::error(
                                 "E0711",
