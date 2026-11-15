@@ -82,7 +82,7 @@ class Client:
         return r["execution_id"]
 
     def wait(self, execution_id: str, timeout_ms: int = 30000) -> Any:
-        return self.get(f"/v1/executions/{execution_id}/wait?timeout_ms={timeout_ms}")
+        return self.get(f"/v1/executions/{urllib.parse.quote(execution_id, safe='')}/wait?timeout_ms={int(timeout_ms)}")
 
     def signal(self, execution_id: str, name: str, payload: Any = None) -> int:
         """Send a typed signal declared with `signal <name> { ... }` in the workflow.

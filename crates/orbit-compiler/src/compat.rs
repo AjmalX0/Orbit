@@ -355,7 +355,9 @@ fn compare_workflows(o: &WorkflowIr, n: &WorkflowIr, r: &mut Report) {
     for (sig, old_ty) in &o.signals {
         let path = format!("signal {sig}");
         match n.signals.get(sig) {
-            Some(new_ty) => walk(old_ty, new_ty, Flow::Accept, true, &path, &mut deltas),
+            // Signal payloads are validated leniently (extra fields are kept),
+            // so removing a field does not break senders.
+            Some(new_ty) => walk(old_ty, new_ty, Flow::Accept, false, &path, &mut deltas),
             None => push(
                 &mut deltas,
                 &path,

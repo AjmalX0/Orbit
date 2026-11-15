@@ -178,7 +178,7 @@ error: compatibility check failed: 1 error(s), 0 warning(s)
 | Signal removed | breaking: senders get `UNKNOWN_SIGNAL` |
 | Signal payload field added as optional (`T?`) or with a default | compatible |
 | Signal payload field added as required, without a default | breaking |
-| Signal payload field removed | breaking (the check applies the strict rule it uses for workflow inputs) |
+| Signal payload field removed | compatible: the runtime accepts and keeps fields a signal does not declare, so old senders keep working |
 | Signal payload field widened or narrowed | as for an input field: widening is compatible, narrowing or an unrelated type is breaking |
 | Query removed | breaking: readers get `UNKNOWN_QUERY` |
 | Query result changed | as for an output: a field added or a type narrowed is compatible; a field removed, a type made optional, widened or changed is breaking |

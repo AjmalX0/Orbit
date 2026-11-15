@@ -239,9 +239,9 @@ workflow Batch {
 ```console
 $ orbit run batch.orbit --id batch-1 --no-wait
 $ orbit signal batch-1 item --data '{"sku": "A-1"}'
-signal `item` delivered to batch-1 (history #4)
+signal `item` recorded for batch-1 (history #4); the next `await item` step takes it
 $ orbit signal batch-1 item --data '{"sku": "B-2", "quantity": 3}'
-signal `item` delivered to batch-1 (history #5)
+signal `item` recorded for batch-1 (history #5); the next `await item` step takes it
 $ orbit status batch-1
 COMPLETED batch-1  Batch@1.0.0
   elapsed: 2.0s
@@ -269,7 +269,7 @@ $ orbit logs batch-1
 `first` received the first signal and `second` the second one. The default
 `quantity: Int = 1` was applied to the first payload.
 
-`orbit signal` reports success (`signal ... delivered to <id>`) as soon as the
+`orbit signal` reports success (`signal ... recorded for <id>`) as soon as the
 runtime has recorded and buffered the signal, whether or not a step is waiting
 for it. The `SignalDelivered` event shows when a step took it.
 
@@ -380,7 +380,7 @@ On success the command prints the history sequence number of the recorded
 
 ```console
 $ orbit signal order-A-100 review --data '{"approved": true, "reviewer": "dana"}'
-signal `review` delivered to order-A-100 (history #5)
+signal `review` recorded for order-A-100 (history #5); the next `await review` step takes it
 $ orbit signal order-A-100 review --data @review.json
 ```
 
@@ -627,7 +627,7 @@ Send the decision:
 
 ```console
 $ orbit signal order-A-100 review --data '{"approved": true, "reviewer": "dana", "comment": "verified by phone"}'
-signal `review` delivered to order-A-100 (history #5)
+signal `review` recorded for order-A-100 (history #5); the next `await review` step takes it
 $ orbit status order-A-100
 COMPLETED order-A-100  OrderApproval@1.0.0
   elapsed: 569ms
@@ -677,7 +677,7 @@ A rejection skips the charge:
 ```console
 $ orbit run OrderApproval --id order-A-101 --input '{"order_id": "A-101", "customer_id": "c-8", "amount": 4000.0}' --no-wait
 $ orbit signal order-A-101 review --data '{"approved": false, "reviewer": "lee", "comment": "customer could not be reached"}'
-signal `review` delivered to order-A-101 (history #5)
+signal `review` recorded for order-A-101 (history #5); the next `await review` step takes it
 $ orbit status order-A-101
 COMPLETED order-A-101  OrderApproval@1.0.0
   elapsed: 328ms

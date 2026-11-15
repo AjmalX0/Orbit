@@ -677,7 +677,7 @@ fn run(cmd: Command) -> Res {
                 )
                 .map_err(|e| e.to_string())?;
             println!(
-                "signal `{name}` delivered to {execution_id} (history #{})",
+                "signal `{name}` recorded for {execution_id} (history #{}); the next `await {name}` step takes it",
                 r["seq"]
             );
             Ok(ExitCode::SUCCESS)

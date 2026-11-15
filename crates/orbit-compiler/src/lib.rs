@@ -927,6 +927,12 @@ fn lower_workflow(
             }
             Some(StepAction::Compute(e, _)) => {
                 reject_members(&s.body, "a `compute` step", false, ck.diags);
+                if let Some((_, span)) = s.body.max_parallel {
+                    ck.diags.push(
+                        Diagnostic::error("E0307", "`max_parallel` is not allowed in a `compute` step", span)
+                            .with_note("compute elements are evaluated by the runtime in one pass; there is nothing to limit"),
+                    );
+                }
                 let (t, l) = ck.check(e, None);
                 computed_type = Some(t);
                 Some(Action::Compute { expr: l })

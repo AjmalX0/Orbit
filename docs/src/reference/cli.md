@@ -629,7 +629,7 @@ error: SIGNAL_PAYLOAD_INVALID (422): payload for signal `review` is invalid at $
 $ orbit signal order-A-100 review --data 'x'
 error: --data is not valid JSON: expected value at line 1 column 1
 $ orbit signal order-A-100 review --data '{"approved": true, "reviewer": "dana", "comment": "verified by phone"}'
-signal `review` delivered to order-A-100 (history #5)
+signal `review` recorded for order-A-100 (history #5); the next `await review` step takes it
 $ orbit signal order-A-100 review --data @review.json
 error: EXECUTION_FINISHED (409): execution is already COMPLETED
 ```
