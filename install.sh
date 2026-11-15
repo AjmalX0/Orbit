@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the orbit binary from the latest GitHub release.
 #
-#   curl -fsSL https://raw.githubusercontent.com/AjmalX0/Orbit/main/install.sh | sh
+#   curl -fsSL https://github.com/AjmalX0/Orbit/releases/latest/download/install.sh | sh
 #
 # Environment: ORBIT_VERSION (default: latest), ORBIT_INSTALL_DIR (default:
 # ~/.local/bin, or /usr/local/bin when run as root), ORBIT_DOWNLOAD_URL (a

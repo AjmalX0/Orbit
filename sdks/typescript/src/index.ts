@@ -2,7 +2,7 @@
  * ORBIT worker SDK for TypeScript / JavaScript.
  *
  * ```ts
- * import { Worker, TaskError } from "@orbit-lang/sdk";
+ * import { Worker, TaskError } from "orbit-lang";
  *
  * const worker = new Worker({ workerId: "orders-worker" });
  * worker.task<{ order_id: string }, { valid: boolean }>("orders.validate", { version: "1.0.0" }, async (input, ctx) => {

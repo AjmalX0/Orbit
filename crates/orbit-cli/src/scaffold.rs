@@ -68,7 +68,7 @@ const TS_WORKER: &str = r#"// TypeScript worker for the Hello workflow.
 //
 // Run:  (cd workers/typescript && npm install) && node workers/typescript/worker.ts
 //       Node.js 22.18+ runs TypeScript directly.
-import { Worker } from "@orbit-lang/sdk";
+import { Worker } from "orbit-lang";
 
 const worker = new Worker({ workerId: "hello-typescript" });
 
@@ -116,7 +116,7 @@ diagnostics, hover, go to definition and completion as you type.
   "private": true,
   "type": "module",
   "dependencies": {
-    "@orbit-lang/sdk": "^0.1.0"
+    "orbit-lang": "^0.1.0"
   }
 }
 "#;

@@ -1,5 +1,5 @@
 {
-  "name": "@orbit-lang/sdk",
+  "name": "orbit-lang",
   "version": "0.1.0",
   "description": "TypeScript/JavaScript worker SDK for the ORBIT orchestration runtime",
   "license": "Apache-2.0",
