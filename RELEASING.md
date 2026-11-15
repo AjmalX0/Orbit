@@ -14,7 +14,7 @@ The tag produces:
 
 | Artifact | Where | Needs |
 |---|---|---|
-| `orbit` binaries (Linux x86_64/arm64, Windows x86_64, and macOS x86_64/arm64 when macOS runners are available to the repository) + `SHA256SUMS`, `install.sh`, the VS Code `.vsix` | GitHub Release | nothing |
+| `orbit` binaries (Linux x86_64/arm64, Windows x86_64, and macOS x86_64/arm64 when the repository variable `MACOS_BUILDS` is `true`) + `SHA256SUMS`, `install.sh`, the VS Code `.vsix` | GitHub Release | nothing |
 | Container image `ghcr.io/<owner>/orbit:vX.Y.Z` and `:latest` (linux/amd64) | GitHub Packages | nothing |
 | Go module tag `sdks/go/vX.Y.Z` | the repository | nothing |
 | Crates `orbit-syntax`, `orbit-ir`, `orbit-compiler`, `orbit-runtime`, `orbit-worker`, `orbit-lang` | crates.io | secret `CARGO_REGISTRY_TOKEN` |
