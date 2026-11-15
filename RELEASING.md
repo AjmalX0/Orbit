@@ -10,7 +10,9 @@ builds and checks everything on every push, and publishes only for tags.
    `editors/vscode/package.json`, the SDK version constants
    (`SDK_VERSION` / `Version` / `sdk` strings) and `CHANGELOG.md`.
 2. Run `./scripts/check.sh`.
-3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. Or, from the browser:
+   **Actions → release → Run workflow**, enter `X.Y.Z`; the workflow tags the
+   selected commit itself.
 
 The tag produces:
 

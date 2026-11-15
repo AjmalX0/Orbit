@@ -11,18 +11,25 @@ on:
     branches-ignore: ["dependabot/**"]
     tags: ["v*"]
   pull_request:
+  # Actions -> release -> Run workflow: tags the selected commit vX.Y.Z and publishes.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the v (e.g. 0.1.0)"
+        required: true
 
 concurrency:
   # A newer push supersedes older runs on the same branch or pull request.
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
 jobs:
   binaries:
@@ -92,7 +99,7 @@ jobs:
           load: ${{ env.PUBLISH != 'true' }}
           push: ${{ env.PUBLISH == 'true' }}
           tags: |
-            ${{ steps.image.outputs.name }}:${{ env.PUBLISH == 'true' && github.ref_name || 'dev' }}
+            ${{ steps.image.outputs.name }}:${{ env.PUBLISH == 'true' && env.RELEASE_TAG || 'dev' }}
             ${{ env.PUBLISH == 'true' && format('{0}:latest', steps.image.outputs.name) || format('{0}:ci', steps.image.outputs.name) }}
       - name: Smoke test the image
         if: env.PUBLISH != 'true'
@@ -138,7 +145,7 @@ jobs:
             sdks/java/target/*.jar
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [binaries, container, packages]
     runs-on: ubuntu-latest
     permissions:
@@ -155,17 +162,20 @@ jobs:
           cd assets && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ORBIT ${{ env.RELEASE_TAG }}
           files: assets/*
           generate_release_notes: true
       - name: Tag the Go module (sdks/go/vX.Y.Z)
         run: |
-          tag="sdks/go/${GITHUB_REF_NAME}"
+          tag="sdks/go/${RELEASE_TAG}"
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then echo "$tag already exists"; exit 0; fi
           git tag "$tag"
           git push origin "$tag"
 
   publish-crates:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: release
     runs-on: ubuntu-latest
     env: { CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}" }
@@ -176,7 +186,7 @@ jobs:
         run: cargo publish --workspace --locked
 
   publish-pypi:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: release
     runs-on: ubuntu-latest
     environment: pypi
@@ -198,7 +208,7 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
   publish-npm:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -212,7 +222,7 @@ jobs:
         run: cd sdks/typescript && npm publish --provenance --access public
 
   publish-nuget:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: release
     runs-on: ubuntu-latest
     env: { NUGET_API_KEY: "${{ secrets.NUGET_API_KEY }}" }
@@ -226,7 +236,7 @@ jobs:
           dotnet nuget push "out/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   publish-maven:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: release
     runs-on: ubuntu-latest
     env:
@@ -248,7 +258,7 @@ jobs:
         run: cd sdks/java && mvn -B -Prelease deploy
 
   publish-vscode:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: release
     runs-on: ubuntu-latest
     env:
