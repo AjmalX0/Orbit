@@ -42,7 +42,13 @@ struct Db {
 
 impl Db {
     fn create(test: &str) -> Option<Db> {
-        let admin = std::env::var("ORBIT_TEST_POSTGRES_URL").ok()?;
+        let full = std::env::var("ORBIT_TEST_POSTGRES_URL").ok()?;
+        // Keep query parameters such as `?sslmode=require` for the engine's URL;
+        // the fixture's own admin connection does not need them.
+        let (admin, query) = match full.split_once('?') {
+            Some((a, q)) => (a.to_string(), format!("?{q}")),
+            None => (full.clone(), String::new()),
+        };
         let name = format!("orbit_test_{}_{test}", std::process::id());
         let mut c = postgres::Client::connect(&admin, postgres::NoTls)
             .expect("connect to ORBIT_TEST_POSTGRES_URL");
@@ -50,7 +56,7 @@ impl Db {
             .unwrap();
         c.batch_execute(&format!("CREATE DATABASE {name}")).unwrap();
         let base = admin.rsplit_once('/').map(|(b, _)| b).unwrap_or(&admin);
-        let url = format!("{base}/{name}");
+        let url = format!("{base}/{name}{query}");
         Some(Db { admin, name, url })
     }
 }
