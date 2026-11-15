@@ -37,6 +37,13 @@ pub enum Origin {
     Divergent,
 }
 
+/// The origin of one recorded event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EventOrigin {
+    pub seq: u64,
+    pub origin: Origin,
+}
+
 /// A recorded decision the current decider does not reproduce.
 #[derive(Debug, Clone, Serialize)]
 pub struct Divergence {
@@ -54,7 +61,7 @@ pub struct ReplayReport {
     pub decided: usize,
     pub divergences: Vec<Divergence>,
     /// The origin of every event, by position in the history.
-    pub origins: Vec<(u64, Origin)>,
+    pub origins: Vec<EventOrigin>,
     /// Set when the history was recorded against a different definition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub definition_mismatch: Option<(String, String)>,
@@ -221,7 +228,7 @@ pub fn replay(
             Origin::Decided => report.decided += 1,
             Origin::Divergent => {}
         }
-        report.origins.push((h.seq, origin));
+        report.origins.push(EventOrigin { seq: h.seq, origin });
         apply(&mut state, h);
         prev_ts = h.timestamp_ms;
         if stop_at == Some(h.seq) {
@@ -327,7 +334,7 @@ workflow Order {
         // Worker results for task steps are external; compute results are decided.
         let origin_of = |pred: &dyn Fn(&Event) -> bool| {
             let h = history.iter().find(|h| pred(&h.event)).unwrap();
-            r.origins.iter().find(|(s, _)| *s == h.seq).unwrap().1
+            r.origins.iter().find(|o| o.seq == h.seq).unwrap().origin
         };
         assert_eq!(
             origin_of(&|e| matches!(e, Event::StepSucceeded { step, .. } if step == "assess")),

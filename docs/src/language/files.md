@@ -15,9 +15,16 @@ contains any number of top-level declarations, in any order:
 | `task "name" { ... }` | A worker contract | [Task contracts](tasks.md) |
 | `workflow Name { ... }` | A workflow definition | [Workflows](workflows.md) |
 | `import "path.orbit"` | Include another file in the compilation | [Imports](#imports) |
+| `test "name" { ... }` | A test of a workflow, run by `orbit test` | [Testing workflows](../tooling/testing.md) |
 
 Declaration order does not matter. A workflow can use a schema or task that is
 declared further down the same file, or in a file that is imported later.
+
+Test declarations are type-checked with the rest of the compilation, so
+`orbit check` reports their errors, but they never become part of the compiled
+output: `orbit compile`, `orbit deploy` and `orbit run` ignore them. A common
+convention is to keep a workflow's tests in a separate `<name>.test.orbit` file
+that imports the workflow file.
 
 Anything else at the top level is a syntax error, `E0104`:
 
@@ -35,7 +42,7 @@ error[E0104]: expected a declaration, found `step`
   |
 5 | step orphan { sleep 1s }
   | ^^^^
-  = note: top-level declarations are `workflow`, `schema`, `task` and `import`
+  = note: top-level declarations are `workflow`, `schema`, `task`, `import` and `test`
 
 error: compilation failed: 1 error(s), 0 warning(s)
 ```
@@ -174,5 +181,6 @@ reserved in specific positions.
 - [Project layout](../getting-started/project.md)
 - [Schemas](schemas.md)
 - [Task contracts](tasks.md)
+- [Testing workflows](../tooling/testing.md)
 - [Grammar](grammar.md)
 - [Compiler diagnostics](../reference/diagnostics.md)

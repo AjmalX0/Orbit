@@ -58,6 +58,9 @@
 
 - [Formatter](tooling/fmt.md)
 - [Compatibility checks](tooling/compat.md)
+- [Testing workflows](tooling/testing.md)
+- [Simulation](tooling/simulate.md)
+- [Replay](tooling/replay.md)
 - [Editor support](tooling/editors.md)
 - [Workflow graphs](tooling/graph.md)
 

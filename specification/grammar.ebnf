@@ -13,7 +13,7 @@
      (`timeout 5s` == `timeout: 5s`). *)
 
 program          = { declaration } ;
-declaration      = workflow_decl | schema_decl | task_decl | import_decl ;
+declaration      = workflow_decl | schema_decl | task_decl | import_decl | test_decl ;
 
 import_decl      = "import" , STRING ;                     (* path relative to the importing file *)
 
@@ -106,3 +106,24 @@ DURATION         = ( INTEGER | FLOAT ) , ( "ms" | "s" | "m" | "h" | "d" ) ;
 STRING           = '"' , { char | escape } , '"' ;              (* single line *)
 escape           = "\n" | "\t" | "\r" | '\"' | "\\" | "\u{" , hex , { hex } , "}" ;
 (* comments: // to end of line, and nestable /* ... */ *)
+
+(* Tests, run by `orbit test` and never compiled into workflow IR.
+   Values in `input`, `signal` and `expect ... output` must be constants;
+   in `returns`, `input` is the mocked task's input. *)
+test_decl        = "test" , STRING , "{" , { test_member , [ sep ] } , "}" ;
+test_member      = "workflow" , [ ":" ] , IDENTIFIER
+                 | "version" , [ ":" ] , STRING
+                 | "input" , [ ":" ] , expression
+                 | "mock" , STRING , mock_behaviour , { "times" , INTEGER , "then" , mock_behaviour }
+                 | "signal" , IDENTIFIER , [ expression ]         (* object payload on the same line; default {} *)
+                 | "expect" , expectation ;
+mock_behaviour   = "returns" , expression
+                 | "fails" , STRING , [ STRING ] , [ "retryable" ]   (* code, message *)
+                 | "hangs" ;                                      (* never answers *)
+expectation      = "status" , IDENTIFIER                          (* COMPLETED FAILED CANCELLED TIMED_OUT *)
+                 | "output" , expression
+                 | "error" , STRING
+                 | "step" , IDENTIFIER , ( IDENTIFIER             (* a unit status, e.g. SKIPPED *)
+                                         | "output" , expression
+                                         | "attempts" , INTEGER )
+                 | "compensated" , IDENTIFIER ;

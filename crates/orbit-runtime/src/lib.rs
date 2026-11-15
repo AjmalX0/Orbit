@@ -5,6 +5,8 @@
 //! * [`store`]  — SQLite persistence (event history is authoritative)
 //! * [`engine`] — dispatch, worker registry, reconciliation and recovery
 //! * [`server`] — HTTP API and the HTTP/JSON worker protocol binding
+//! * [`testing`] — in-process simulation for `orbit test` and `orbit simulate`
+//! * [`replay`] — re-run a recorded history through the current decider
 
 // TaskError is returned by value on cold paths; boxing would only add noise.
 #![allow(clippy::result_large_err)]
