@@ -8,6 +8,7 @@
 #![allow(clippy::large_enum_variant)]
 
 pub mod expr;
+pub mod testing;
 pub mod types;
 pub mod workflow;
 

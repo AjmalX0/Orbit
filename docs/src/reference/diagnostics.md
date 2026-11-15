@@ -48,6 +48,7 @@ The first line has the severity, the code and the message. The `-->` line gives 
 | [E04xx](#expressions-e04xx) | Expressions, types of values, retry and timeout settings. |
 | [E05xx](#workflows-e05xx) | Workflow-level rules. |
 | [W06xx](#static-safety-w06xx) | Static safety checks: compensations, constant conditions, signals and waits. |
+| [E07xx, W07xx](#tests-e07xx-w07xx) | `test` declarations: workflows, mocks, signals and expectations. |
 
 ## Lexical (E00xx)
 
@@ -316,10 +317,67 @@ No step awaits a declared signal. Message: ``signal `escalate` is declared but n
 
 An `await` step has no `timeout`, and the workflow has no `timeout`. Message: ``step `decision` waits for signal `review` with no timeout``, with help ``add `timeout 7d` to the step (or a workflow `timeout`) so the execution cannot wait forever``.
 
+## Tests (E07xx, W07xx)
+
+These diagnostics come from `test` declarations. They are reported by every command that compiles the file, including `orbit check`, and a file with test errors cannot be deployed. Values in a test are also checked with the expression rules above: a missing required `input` field is `E0403`, a mock result of the wrong type is `E0400`, and reading `input` in a test `input` or `expect` value is `E0401`. [Testing workflows](../tooling/testing.md) describes the declarations.
+
+### E0700: unknown workflow in a test
+
+The test's `workflow` is not defined in, or imported into, the compilation. Message: ``unknown workflow `OrderAproval` ``, with help ``did you mean `OrderApproval`?``, or help ``import the file that defines it, e.g. `import "orders.orbit"` `` when no name is close.
+
+### E0701: test without a workflow
+
+Message: ``test `no workflow` does not name a workflow``, with help ``add `workflow <Name>` to the test``.
+
+### E0702: test version does not match
+
+The test names a `version` other than the one the sources define. Message: ``test expects `OrderApproval` version 2.0.0, but the sources define version 1.0.0``. Update the version, or remove it to test whatever version is compiled.
+
+### E0703: mocked task is not called by the workflow
+
+A `mock` names a task that the workflow does not call in a step, a compensation or one of its child workflows. Message: ``` `OrderApproval` does not call task `payments.charg` ```, with a suggestion, or a note listing the tasks it can call.
+
+### E0704: task mocked twice
+
+Message: ``task `payments.charge` is mocked more than once``, with help ``chain behaviours instead: `fails "X" times 1 then returns { ... }` ``.
+
+### E0705: unknown signal in a test
+
+A `signal` names a signal the workflow does not declare. Message: ``` `OrderApproval` declares no signal `reveiw` ```, with help ``did you mean `review`?``.
+
+### E0706: unknown step in an expectation
+
+Message: ``` `OrderApproval` has no step `chrge` ```, with help ``did you mean `charge`?``, or a note listing the steps.
+
+### E0707: unknown status
+
+`expect status` accepts `COMPLETED`, `FAILED`, `CANCELLED` and `TIMED_OUT`. `expect step <name> <STATUS>` accepts the unit statuses `PENDING`, `RUNNING`, `SCHEDULED`, `DISPATCHED`, `ATTEMPT_FAILED`, `UNCERTAIN`, `RETRY_WAIT`, `WAITING`, `SUCCEEDED`, `SKIPPED`, `FAILED` and `CANCELLED`. Message: ``` `COMPLETE` is not a workflow status ```, with help ``did you mean `COMPLETED`?``; a lower-case status gets the help ``statuses are upper case: `COMPLETED` ``.
+
+### E0708: expected compensation of a step without one
+
+`expect compensated` names a step without a `compensate` block. Message: ``step `notify` has no `compensate` block``.
+
+### E0709: duplicate test name
+
+Message: ``test `errors` is declared more than once``, with a label at the first declaration. Test names are unique across the compilation, so `--filter` and reports identify a test unambiguously.
+
+### E0710: test value cannot be evaluated
+
+A constant in `input`, a `signal` payload or an expected output type-checks but fails to evaluate, for example a division by zero. Message: ``cannot evaluate a test input: <reason>``.
+
+### E0711: invalid count
+
+`times` must be at least 1, and `attempts` must be a non-negative number. Message: ``` `times 0` must be at least 1 ```.
+
+### W0701: test checks nothing
+
+The test has no `expect`. Message: ``test `nothing` checks nothing``, with help ``add an expectation such as `expect status COMPLETED` ``. Such a test still fails if the execution cannot finish, for example because a task is not mocked.
+
 ## See also
 
 - [CLI: orbit check](cli.md#orbit-check)
 - [Static safety checks](../language/safety.md)
+- [Testing workflows](../tooling/testing.md)
 - [Editor support](../tooling/editors.md)
 - [Grammar](../language/grammar.md)
 - [Expressions](../language/expressions.md)

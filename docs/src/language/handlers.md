@@ -10,6 +10,8 @@ steps can read, the order of events, and the rules the compiler enforces.
 
 ## Syntax
 
+The complete example is [`examples/checkout.orbit`](https://github.com/AjmalX0/Orbit/blob/main/examples/checkout.orbit), with a test in `examples/checkout.test.orbit` ([Testing workflows](../tooling/testing.md)).
+
 ```orbit
 import "contracts.orbit"
 
@@ -148,3 +150,4 @@ Workflows that declare handlers compile to `orbit-ir/2`; see
 - [Retries and timeouts](retries-timeouts.md)
 - [Executions and history](../runtime/executions.md)
 - [Compiler diagnostics](../reference/diagnostics.md)
+- [Testing workflows](../tooling/testing.md)

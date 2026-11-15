@@ -1,0 +1,71 @@
+// Tests for the OrderProcessing workflow (order_processing.orbit).
+//
+// Run them with `orbit test examples/order_processing.test.orbit`.
+
+import "order_processing.orbit"
+
+test "a low-risk order is charged" {
+    workflow OrderProcessing
+    input { order_id: "A1", customer_id: "c-1", amount: 42.0, items: [{ sku: "BOOK", quantity: 1 }] }
+    mock "orders.validate" returns { valid: true }
+    mock "risk.analyze" returns { score: 0.1, reasons: [] }
+    mock "inventory.reserve" returns { reservation_id: "r-" + input.order_id }
+    mock "payments.charge" returns { transaction_id: "tx-" + input.order_id, status: "captured" }
+    mock "notifications.send" returns { delivered: true }
+    expect status COMPLETED
+    expect output { status: "completed", transaction_id: "tx-A1", risk_score: 0.1 }
+    expect step process_payment SUCCEEDED
+}
+
+test "a risky order is held for review" {
+    workflow OrderProcessing
+    input { order_id: "A2", customer_id: "c-2", amount: 9000.0, items: [{ sku: "TV", quantity: 3 }] }
+    mock "orders.validate" returns { valid: true }
+    mock "risk.analyze" returns { score: 0.95, reasons: ["velocity"] }
+    mock "inventory.reserve" returns { reservation_id: "r-A2" }
+    mock "notifications.send" returns { delivered: true }
+    expect status COMPLETED
+    expect output { status: "held_for_review", transaction_id: null }
+    expect step process_payment SKIPPED
+}
+
+test "risk scoring is retried after temporary failures" {
+    workflow OrderProcessing
+    input { order_id: "A3", customer_id: "c-3", amount: 10.0, items: [] }
+    mock "orders.validate" returns { valid: true }
+    mock "risk.analyze" fails "TEMPORARY" retryable times 2 then returns { score: 0.2, reasons: [] }
+    mock "inventory.reserve" returns { reservation_id: "r-A3" }
+    mock "payments.charge" returns { transaction_id: "tx-A3", status: "captured" }
+    mock "notifications.send" returns { delivered: true }
+    expect status COMPLETED
+    expect step analyze_risk attempts 3
+}
+
+test "a declined card releases the reserved inventory" {
+    workflow OrderProcessing
+    input { order_id: "A4", customer_id: "c-4", amount: 75.0, items: [{ sku: "MUG", quantity: 2 }] }
+    mock "orders.validate" returns { valid: true }
+    mock "risk.analyze" returns { score: 0.3, reasons: [] }
+    mock "inventory.reserve" returns { reservation_id: "r-A4" }
+    mock "inventory.release" returns { released: true }
+    mock "payments.charge" fails "CARD_DECLINED" "insufficient funds"
+    expect status FAILED
+    expect error "CARD_DECLINED"
+    expect step process_payment FAILED
+    expect step process_payment attempts 1
+    expect compensated reserve_inventory
+}
+
+test "a payment provider that never answers exhausts the retries" {
+    workflow OrderProcessing
+    input { order_id: "A5", customer_id: "c-5", amount: 20.0, items: [] }
+    mock "orders.validate" returns { valid: true }
+    mock "risk.analyze" returns { score: 0.1, reasons: [] }
+    mock "inventory.reserve" returns { reservation_id: "r-A5" }
+    mock "inventory.release" returns { released: true }
+    mock "payments.charge" hangs
+    expect status FAILED
+    expect error "TIMEOUT"
+    expect step process_payment attempts 5
+    expect compensated reserve_inventory
+}

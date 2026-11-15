@@ -7,6 +7,7 @@
 pub mod check;
 pub mod compat;
 pub mod prelude;
+mod testing;
 pub mod types;
 
 use check::{Checker, Env};
@@ -33,6 +34,9 @@ pub struct Compilation {
     pub contracts: BTreeMap<String, TaskContract>,
     /// Which file each workflow came from.
     pub workflow_files: Vec<FileId>,
+    /// `test` declarations, checked against `workflows` (empty on errors).
+    /// They are run by `orbit test` and never deployed or compiled to IR files.
+    pub tests: Vec<orbit_ir::testing::TestCase>,
 }
 
 impl Compilation {
@@ -145,10 +149,12 @@ pub fn compile_with(paths: &[PathBuf], loader: &dyn Loader) -> Compilation {
         workflows: vec![],
         contracts: BTreeMap::new(),
         workflow_files: vec![],
+        tests: vec![],
     };
     analyze(&mut comp, prelude_id, &programs);
     if comp.has_errors() {
         comp.workflows.clear();
+        comp.tests.clear();
     }
     comp.diagnostics
         .sort_by_key(|d| (d.span.file, d.span.start, d.severity));
@@ -235,7 +241,7 @@ fn analyze(comp: &mut Compilation, prelude_id: FileId, programs: &[(FileId, ast:
                         workflows.push((file, w));
                     }
                 }
-                Declaration::Import(_) => {}
+                Declaration::Import(_) | Declaration::Test(_) => {}
             }
         }
     }
@@ -412,6 +418,7 @@ fn analyze(comp: &mut Compilation, prelude_id: FileId, programs: &[(FileId, ast:
         }
     }
     comp.contracts = contracts;
+    comp.tests = testing::lower_tests(programs, &comp.workflows, &names, &comp.sources, diags);
 }
 
 pub fn is_semver(v: &str) -> bool {

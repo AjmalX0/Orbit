@@ -14,6 +14,9 @@ cargo test
 step "ORBIT sources are formatted"
 cargo run -q -- fmt --check examples/*.orbit
 
+step "ORBIT example tests"
+cargo run -q -- test examples/*.test.orbit
+
 step "Python SDK"
 PYTHONPATH=sdks/python python3 -m unittest discover -s sdks/python/tests
 

@@ -6,6 +6,8 @@
 //! * [`engine`] — dispatch, worker registry, reconciliation and recovery
 //! * [`server`] — HTTP API and the HTTP/JSON worker protocol binding
 //! * [`cluster`] — active/standby operation of several servers on PostgreSQL
+//! * [`testing`] — in-process simulation for `orbit test` and `orbit simulate`
+//! * [`replay`] — re-run a recorded history through the current decider
 
 // TaskError is returned by value on cold paths; boxing would only add noise.
 #![allow(clippy::result_large_err)]
@@ -18,9 +20,11 @@ pub mod http_adapter;
 pub mod identity;
 pub mod metrics;
 pub mod model;
+pub mod replay;
 pub mod server;
 pub mod store;
 pub mod telemetry;
+pub mod testing;
 
 pub use engine::{Engine, EngineConfig, EngineError};
 pub use store::Store;

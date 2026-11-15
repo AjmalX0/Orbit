@@ -26,6 +26,9 @@ Commands:
   ps        List recent executions
   token     Generate a random bearer token and the workers-file entry for it
   workers   Worker commands
+  test      Run the `test` declarations in .orbit files, without a server or workers
+  simulate  Run a workflow locally with mocked or generated task results
+  replay    Re-run a recorded history through the current decider and report divergences
   help      Print this message or the help of the given subcommand(s)
 ```
 
@@ -316,6 +319,126 @@ $ orbit compat v1.orbit major.orbit
 info    workflow Invoice 1.4.0 → 2.0.0: input.amount: Float → Int: incompatible type: expected `Int`, found `Float`; breaking for callers, allowed by the major version bump
 info    workflow Invoice 1.4.0 → 2.0.0: input.currency: (added) → String: required field added without a default; breaking for callers, allowed by the major version bump
 ok      workflow Invoice 1.4.0 → 2.0.0: output.total: Float → Int: narrowed; still accepted where the old type is expected
+```
+
+## orbit test
+
+Run the `test` declarations in `.orbit` files, without a server or workers. See [Testing workflows](../tooling/testing.md).
+
+```text
+Run the `test` declarations in .orbit files, without a server or workers
+
+Usage: orbit test [OPTIONS] [FILES]...
+
+Arguments:
+  [FILES]...  Files with `test` declarations (and the workflows they import)
+
+Options:
+      --format <FORMAT>  `human` prints one line per test; `json` prints a single report object [default: human] [possible values: human, json]
+      --filter <FILTER>  Only run tests whose name contains this text
+  -h, --help             Print help
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `[FILES]...` | paths | required | Files to compile. Every test in them and in the files they import runs. |
+| `--format <FORMAT>` | `human` or `json` | `human` | `human` prints one line per test, failure details with the execution timeline, and a summary. `json` prints one report object on stdout; see [JSON format](../tooling/testing.md#json-format). |
+| `--filter <FILTER>` | string | none | Run only tests whose name contains this text. |
+
+Exit codes: `0` when every selected test passed, or no test was selected; `1` when a test failed or the files do not compile.
+
+```console
+$ orbit test examples/*.test.orbit --filter retried
+running 1 test
+ok      risk scoring is retried after temporary failures (3.0s simulated)
+
+test result: ok. 1 passed, 0 failed, 9 filtered out (0.01s)
+```
+
+## orbit simulate
+
+Run one execution of a workflow locally, with mocked or generated task results. See [Simulation](../tooling/simulate.md).
+
+```text
+Run a workflow locally with mocked or generated task results
+
+Usage: orbit simulate [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>  A `.orbit` file or compiled IR `.json`
+
+Options:
+      --workflow <WORKFLOW>      Workflow to run when the file defines several
+  -i, --input <INPUT>            Workflow input as JSON
+      --input-file <INPUT_FILE>  Read the workflow input from a JSON file
+      --mocks <MOCKS>            JSON file mapping task names to the results they return
+      --fail <TASK=CODE>         Make a task fail permanently: `<task>=<ERROR_CODE>` (repeatable)
+      --signal <NAME=JSON>       Send a signal once the execution waits for it: `<name>='<json>'` (repeatable, in order)
+      --json                     Print the final state, history and child executions as JSON
+  -h, --help                     Print help
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `<FILE>` | path | required | A `.orbit` file or a compiled IR `.json` file. |
+| `--workflow <WORKFLOW>` | string | see [orbit graph](#orbit-graph) | Workflow to run when the file defines several. |
+| `-i`, `--input <INPUT>` | JSON | `{}` | The execution input. |
+| `--input-file <INPUT_FILE>` | path | none | Read the input from a JSON file. |
+| `--mocks <MOCKS>` | path | none | A JSON object mapping task names to results. Tasks not listed get a [generated result](../tooling/simulate.md#generated-results). |
+| `--fail <TASK=CODE>` | string | none | Fail every attempt of the task with this code (not retryable). Repeatable. |
+| `--signal <NAME=JSON>` | string | none | Send this signal once the execution waits for it. `NAME=@file.json` reads the payload from a file. Repeatable, sent in order. |
+| `--json` | flag | off | Print the result, state, history and child executions as one JSON object. |
+
+Exit codes: `0` when the execution ends `COMPLETED`; `1` when it ends otherwise, cannot finish, or the file does not compile.
+
+```console
+$ orbit simulate examples/approval.orbit --input '{"order_id":"T1","customer_id":"c-1","amount":10}' --fail notifications.send=MAILBOX_FULL --json | jq -c '{status, error: .error.code, sampled_tasks}'
+{"status":"FAILED","error":"MAILBOX_FULL","sampled_tasks":["payments.charge","payments.refund"]}
+```
+
+## orbit replay
+
+Re-run a recorded history through the current decider and report every recorded decision it does not reproduce; with `--at`, show the execution's state after any event. See [Replay](../tooling/replay.md).
+
+```text
+Re-run a recorded history through the current decider and report divergences
+
+Usage: orbit replay [OPTIONS] [EXECUTION_ID]
+
+Arguments:
+  [EXECUTION_ID]  Execution to replay; its history and definition are fetched from the runtime
+
+Options:
+      --history <HISTORY>          Replay a history file instead (`GET /v1/executions/{id}/history` output)
+      --definition <DEFINITION>    The definition to replay against: compiled IR `.json` or `.orbit` source (required with --history; overrides the runtime's copy otherwise)
+      --workflow <WORKFLOW>        Workflow to use when --definition defines several (default: the one the history ran)
+      --at <SEQ>                   Print the reconstructed execution state right after this event
+      --json                       Print the report as JSON
+      --server <SERVER>            Runtime API address [env: ORBIT_SERVER=] [default: http://127.0.0.1:7233]
+      --token <TOKEN>              Bearer token for the runtime API [env: ORBIT_TOKEN]
+      --ca-cert <CA_CERT>          Extra PEM CA certificate to trust (for a runtime with a private certificate) [env: ORBIT_CA_CERT=]
+      --client-cert <CLIENT_CERT>  PEM client certificate for mutual TLS (with --client-key) [env: ORBIT_CLIENT_CERT=]
+      --client-key <CLIENT_KEY>    PEM private key for --client-cert [env: ORBIT_CLIENT_KEY=]
+  -h, --help                       Print help
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `[EXECUTION_ID]` | string | none | Replay this execution: its history and the definition it ran are fetched from the runtime. |
+| `--history <HISTORY>` | path | none | Replay a history file instead of an execution id. |
+| `--definition <DEFINITION>` | path | the runtime's copy | Compiled IR `.json` or `.orbit` source to replay against. Required with `--history`. |
+| `--workflow <WORKFLOW>` | string | from the history | Workflow to use when `--definition` defines several. |
+| `--at <SEQ>` | integer | none | Stop after this event and print the reconstructed state. |
+| `--json` | flag | off | Print the report as one JSON object; see [JSON report](../tooling/replay.md#json-report). |
+| runtime connection options | | | See [Runtime connection options](#runtime-connection-options). Used only with an execution id. |
+
+Exit codes: `0` when every recorded decision is reproduced; `1` on a divergence, an API or connection error, or a history or definition that cannot be loaded; `2` when both an execution id and `--history` are given.
+
+```console
+$ orbit replay rem-1
+replayed 9 events of rem-1 against Reminder@1.0.0 with the current decider
+  6 decided, 3 external
+consistent: every recorded decision is reproduced
 ```
 
 ## orbit server
@@ -763,3 +886,6 @@ ts-1                         typescript   offline  0  orders.validate@1.0.0, inv
 - [Executions and history](../runtime/executions.md)
 - [Formatter](../tooling/fmt.md)
 - [Compatibility checks](../tooling/compat.md)
+- [Testing workflows](../tooling/testing.md)
+- [Simulation](../tooling/simulate.md)
+- [Replay](../tooling/replay.md)

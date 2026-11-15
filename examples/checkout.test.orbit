@@ -1,0 +1,14 @@
+import "checkout.orbit"
+
+test "a declined card releases inventory, then tells the customer" {
+    workflow Checkout
+    input { order_id: "T-1", customer_id: "c-1", amount: 9000.0, items: [{ sku: "A", quantity: 1 }] }
+    mock "inventory.reserve" returns { reservation_id: "r-1" }
+    mock "inventory.release" returns { released: true }
+    mock "payments.charge" fails "CARD_DECLINED" "declined"
+    mock "notifications.send" returns { delivered: true }
+    expect status FAILED
+    expect error "CARD_DECLINED"
+    expect compensated reserve
+    expect step on_failure: summary SUCCEEDED
+}

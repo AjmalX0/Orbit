@@ -3,7 +3,9 @@
 mod client;
 mod compat;
 mod lsp;
+mod replay;
 mod scaffold;
+mod testing;
 mod view;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -256,6 +258,66 @@ enum Command {
     Workers {
         #[command(subcommand)]
         command: WorkersCommand,
+    },
+    /// Run the `test` declarations in .orbit files, without a server or workers.
+    Test {
+        /// Files with `test` declarations (and the workflows they import).
+        files: Vec<PathBuf>,
+        /// `human` prints one line per test; `json` prints a single report object.
+        #[arg(long, value_enum, default_value = "human")]
+        format: DiagFormat,
+        /// Only run tests whose name contains this text.
+        #[arg(long)]
+        filter: Option<String>,
+    },
+    /// Run a workflow locally with mocked or generated task results.
+    Simulate {
+        /// A `.orbit` file or compiled IR `.json`.
+        file: PathBuf,
+        /// Workflow to run when the file defines several.
+        #[arg(long)]
+        workflow: Option<String>,
+        /// Workflow input as JSON.
+        #[arg(short, long)]
+        input: Option<String>,
+        /// Read the workflow input from a JSON file.
+        #[arg(long)]
+        input_file: Option<PathBuf>,
+        /// JSON file mapping task names to the results they return.
+        #[arg(long)]
+        mocks: Option<PathBuf>,
+        /// Make a task fail permanently: `<task>=<ERROR_CODE>` (repeatable).
+        #[arg(long, value_name = "TASK=CODE")]
+        fail: Vec<String>,
+        /// Send a signal once the execution waits for it: `<name>='<json>'` (repeatable, in order).
+        #[arg(long, value_name = "NAME=JSON")]
+        signal: Vec<String>,
+        /// Print the final state, history and child executions as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-run a recorded history through the current decider and report divergences.
+    Replay {
+        /// Execution to replay; its history and definition are fetched from the runtime.
+        execution_id: Option<String>,
+        /// Replay a history file instead (`GET /v1/executions/{id}/history` output).
+        #[arg(long, conflicts_with = "execution_id")]
+        history: Option<PathBuf>,
+        /// The definition to replay against: compiled IR `.json` or `.orbit` source
+        /// (required with --history; overrides the runtime's copy otherwise).
+        #[arg(long)]
+        definition: Option<PathBuf>,
+        /// Workflow to use when --definition defines several (default: the one the history ran).
+        #[arg(long)]
+        workflow: Option<String>,
+        /// Print the reconstructed execution state right after this event.
+        #[arg(long, value_name = "SEQ")]
+        at: Option<u64>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        remote: Remote,
     },
 }
 
@@ -807,6 +869,52 @@ fn run(cmd: Command) -> Res {
             );
             Ok(ExitCode::SUCCESS)
         }
+        Command::Test {
+            files,
+            format,
+            filter,
+        } => testing::test(&files, format, filter.as_deref(), tty),
+        Command::Simulate {
+            file,
+            workflow,
+            input,
+            input_file,
+            mocks,
+            fail,
+            signal,
+            json,
+        } => testing::simulate_cmd(
+            testing::SimulateArgs {
+                file: &file,
+                workflow: workflow.as_deref(),
+                input: parse_input(input, input_file)?,
+                mocks: mocks.as_deref(),
+                fail: &fail,
+                signal: &signal,
+                json,
+            },
+            tty,
+        ),
+        Command::Replay {
+            execution_id,
+            history,
+            definition,
+            workflow,
+            at,
+            json,
+            remote,
+        } => replay::run(
+            replay::ReplayArgs {
+                execution_id,
+                history,
+                definition,
+                workflow,
+                at,
+                json,
+                remote,
+            },
+            tty,
+        ),
         Command::Workers {
             command: WorkersCommand::List { remote },
         } => {
@@ -817,6 +925,22 @@ fn run(cmd: Command) -> Res {
             print!("{}", view::workers(&r, tty));
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// `--input '<json>'` or `--input-file <path>`; `{}` when neither is given.
+fn parse_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<Value, String> {
+    match (input, input_file) {
+        (Some(s), _) => {
+            serde_json::from_str(&s).map_err(|e| format!("--input is not valid JSON: {e}"))
+        }
+        (None, Some(p)) => {
+            let text = std::fs::read_to_string(&p)
+                .map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+            serde_json::from_str(&text)
+                .map_err(|e| format!("{} is not valid JSON: {e}", p.display()))
+        }
+        (None, None) => Ok(json!({})),
     }
 }
 

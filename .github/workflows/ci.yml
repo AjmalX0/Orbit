@@ -61,6 +61,8 @@ jobs:
         run: cargo test
       - name: ORBIT examples are formatted
         run: cargo run -q -- fmt --check examples/*.orbit
+      - name: ORBIT example tests
+        run: cargo run -q -- test examples/*.test.orbit
       - name: Python SDK tests
         run: PYTHONPATH=sdks/python python3 -m unittest discover -s sdks/python/tests
       - name: TypeScript SDK typecheck and tests

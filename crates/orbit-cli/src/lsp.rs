@@ -192,6 +192,7 @@ fn analyze(path: &Path, docs: &HashMap<PathBuf, String>) -> Analysis {
                 Declaration::Schema(s) => push(&s.name.name, "schema", s.name.span, s.span, None),
                 Declaration::Task(t) => push(&t.name, "task", t.name_span, t.span, None),
                 Declaration::Import(_) => {}
+                Declaration::Test(t) => push(&t.name, "test", t.name_span, t.span, None),
             }
         }
     }
@@ -595,6 +596,7 @@ fn symbols(a: &Analysis, path: &Path, text: &str) -> Value {
             }
             "schema" => out.push(sym(s, 23, vec![])),
             "task" => out.push(sym(s, 11, vec![])),
+            "test" => out.push(sym(s, 6, vec![])),
             _ => {}
         }
     }

@@ -21,8 +21,8 @@ The source of this grammar is `specification/grammar.ebnf` in the repository.
 
 ### Programs and declarations
 
-A program is a sequence of declarations: `workflow`, `schema`, `task` and
-`import`, in any order. Separators (`,` or `;`) between declarations are
+A program is a sequence of declarations: `workflow`, `schema`, `task`,
+`import` and `test`, in any order. Separators (`,` or `;`) between declarations are
 allowed and ignored. Anything else at the top level is `E0104`. See
 [Files and imports](files.md).
 
@@ -58,6 +58,14 @@ A step has an identifier name and members. `action` is one of `worker`,
 restrictions listed under
 [Restrictions after parsing](#restrictions-after-parsing). See
 [Steps](steps.md).
+
+### Tests
+
+A `test` declaration has a string name and members: `workflow` (an
+identifier), `version`, `input`, any number of `mock`, `signal` and `expect`
+members. A `mock` chains behaviours with `times N then`. Tests are checked by
+the compiler but never compiled into workflow IR. See
+[Testing workflows](../tooling/testing.md).
 
 ### Retry blocks
 
@@ -162,13 +170,14 @@ or `timeout` can be field names.
 
 | Position | Words with special meaning |
 |----------|----------------------------|
-| top level | `workflow`, `schema`, `task`, `import` |
+| top level | `workflow`, `schema`, `task`, `import`, `test` |
 | task body | `version`, `description`, `input`, `output`, `compensated_by` |
 | workflow body | `version`, `description`, `timeout`, `input`, `output`, `step`, `signal`, `query`, `return`, `on` |
 | step body | `worker`, `workflow`, `sleep`, `await`, `compute`, `using`, `after`, `with`, `timeout`, `queue_timeout`, `retry`, `idempotency_key`, `when`, `for`, `in`, `max_parallel`, `compensate` |
 | type | `List`, `Map`, and the primitive type names |
 | expression | `if`, `then`, `else`; `input` and `execution` as path roots |
 | `retry` values | `fixed`, `exponential` |
+| test body | `workflow`, `version`, `input`, `mock`, `returns`, `fails`, `retryable`, `hangs`, `times`, `then`, `signal`, `expect`, `status`, `output`, `error`, `step`, `attempts`, `compensated` |
 
 This workflow is valid, because each word is used outside its keyword
 positions:

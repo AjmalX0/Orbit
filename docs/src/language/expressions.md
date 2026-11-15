@@ -364,7 +364,7 @@ error[E0104]: expected a declaration, found `}`
   |
 8 | }
   | ^
-  = note: top-level declarations are `workflow`, `schema`, `task` and `import`
+  = note: top-level declarations are `workflow`, `schema`, `task`, `import` and `test`
 
 error: compilation failed: 3 error(s), 0 warning(s)
 ```
