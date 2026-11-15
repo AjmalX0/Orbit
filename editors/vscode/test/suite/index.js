@@ -65,7 +65,15 @@ exports.run = async function run() {
     const e = await vscode.commands.executeCommand("vscode.executeFormatDocumentProvider", messyUri, { tabSize: 4, insertSpaces: true });
     return e && e.length ? e : undefined;
   });
-  assert.match(edits[0].newText, /^workflow Messy \{\n    version "1\.0\.0"\n    input \{ n: Int \}\n/);
+  // VS Code turns the server's edit into minimal edits; apply them and compare.
+  const we = new vscode.WorkspaceEdit();
+  for (const e of edits) we.replace(messyUri, e.range, e.newText);
+  assert.ok(await vscode.workspace.applyEdit(we), "formatting edits applied");
+  assert.equal(
+    messy.getText(),
+    'workflow Messy {\n    version "1.0.0"\n    input { n: Int }\n    return { doubled: input.n * 2 }\n}\n',
+  );
+  await vscode.commands.executeCommand("workbench.action.files.revert");
 
   // Commands are registered.
   const commands = await vscode.commands.getCommands(true);
