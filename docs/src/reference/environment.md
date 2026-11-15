@@ -22,6 +22,9 @@ Read by `orbit server`.
 | `OTEL_SERVICE_NAME` | | `orbit-runtime` | Value of the `service.name` resource attribute on exported spans. |
 | `ORBIT_LOG` | | `info` | Log filter in [`tracing-subscriber` `EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax, for example `debug` or `info,orbit_runtime=debug`. Setting it replaces the default `info` filter entirely. |
 | `ORBIT_DB_CA_CERT` | | unset | PEM CA bundle trusted for PostgreSQL TLS, in addition to the public web PKI roots. |
+| `ORBIT_CLUSTER` | `--cluster` | unset | `true` to run as one of several servers on one PostgreSQL database. |
+| `ORBIT_NODE_ID` | `--node-id` | host name | This server's name in the cluster. |
+| `ORBIT_ADVERTISE_ADDR` | `--advertise-addr` | derived from `--addr` | URL handed out for this server while it leads. |
 
 The flags `--insecure`, `--enable-http-adapter`, `--session-timeout`, `--max-body` and `--log-format` have no environment variable.
 

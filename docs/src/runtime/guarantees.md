@@ -117,7 +117,7 @@ The decider is a pure function of the history, the definition and the current ti
 - **Stopping external work.** Cancellation and timeouts are cooperative. The worker is told through the heartbeat `cancel` list, but the runtime cannot stop an operation that is already running in another system.
 - **Ordering between independent steps.** Steps without a dependency between them may run in any order or concurrently. Among queued tasks, a worker receives the oldest matching one, but this is not a fairness guarantee across executions.
 - **Timing precision.** Timers, retries and timeouts are checked every 100 ms and fire after their due time, not exactly at it. During an outage they fire when the runtime is back.
-- **High availability.** The runtime is a single node. While it is down, no steps are scheduled and no results are accepted; workers retry. See [Storage](storage.md#single-node).
+- **High availability.** A single server is a single node: while it is down, no steps are scheduled and no results are accepted; workers retry. With PostgreSQL, run several servers with `--cluster` so a standby takes over within seconds; one leader still does all the work. See [Running several servers](cluster.md).
 - **Exactly-once compensation.** Compensations are tasks with the same at-least-once delivery, and need idempotent workers too.
 - **Telemetry delivery.** Spans are exported on a best-effort basis; they are dropped if the collector is unreachable or the queue is full. Metrics are in-memory counters that reset when the runtime restarts.
 - **Capability-based permissions beyond task patterns, and per-execution resource limits.** These are not implemented.

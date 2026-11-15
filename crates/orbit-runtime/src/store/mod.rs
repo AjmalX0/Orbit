@@ -20,7 +20,8 @@ use orbit_ir::WorkflowIr;
 use serde::Serialize;
 use std::path::Path;
 
-pub use self::postgres::PgStore;
+pub(crate) use self::postgres::{session_client, CLUSTER_SCHEMA};
+pub use self::postgres::{PgMode, PgStore};
 pub use self::sqlite::SqliteStore;
 
 #[derive(Debug)]

@@ -70,7 +70,7 @@ The commands that talk to a runtime (`deploy`, `run`, `status`, `inspect`, `logs
 | `--client-cert <CLIENT_CERT>` | path | none | `ORBIT_CLIENT_CERT` | PEM client certificate for mutual TLS. Requires `--client-key`. |
 | `--client-key <CLIENT_KEY>` | path | none | `ORBIT_CLIENT_KEY` | PEM private key for `--client-cert`. Requires `--client-cert`. |
 
-The client waits at most 330 seconds for any single request. A runtime that cannot be reached produces:
+The client waits at most 330 seconds for any single request. When `--server` points at a cluster standby, which answers `503 NOT_LEADER` with the leader's address, the client repeats the request once against that address. See [Running several servers](../runtime/cluster.md#clients-and-workers). A runtime that cannot be reached produces:
 
 ```text
 error: cannot reach the ORBIT runtime at http://127.0.0.1:7233: io: Connection refused (os error 111)
@@ -343,6 +343,9 @@ orbit server [OPTIONS]
 | `--session-timeout <SESSION_TIMEOUT>` | integer, seconds | `30` | | Seconds without contact after which a worker is considered lost. |
 | `--max-body <MAX_BODY>` | integer, bytes | `4194304` | | Maximum request body size. |
 | `--log-format <LOG_FORMAT>` | `text` or `json` | `text` | | Log format. Logs go to stderr. |
+| `--cluster` | flag | off | `ORBIT_CLUSTER` | Run as one of several servers on the same PostgreSQL database; one leader serves, the others stand by and take over if it fails. Requires a PostgreSQL `--db`. See [Running several servers](../runtime/cluster.md). |
+| `--node-id <NODE_ID>` | string | the host name | `ORBIT_NODE_ID` | This server's name in the cluster. Requires `--cluster`. |
+| `--advertise-addr <ADVERTISE_ADDR>` | URL | derived from `--addr` unless it is a wildcard address | `ORBIT_ADVERTISE_ADDR` | URL other servers give out to reach this one while it leads. Requires `--cluster`. |
 
 The server reads `ORBIT_LOG` (log filter) and `ORBIT_DB_CA_CERT` (extra CA for PostgreSQL) from the environment. See [Environment variables](environment.md).
 
@@ -361,6 +364,8 @@ $ orbit server --workers-file workers.toml
 error: --workers-file requires --token: without an admin token administrative endpoints would be open
 $ orbit server --token t --tls-cert server.pem --tls-key server.key --tls-client-ca ca.pem
 error: --tls-client-ca needs --workers-file entries with `client_cert` to map certificates to workers
+$ orbit server --cluster --db orbit.db
+error: --cluster requires a PostgreSQL database (--db postgres://...): the servers share it for leader election and history
 ```
 
 ## orbit deploy

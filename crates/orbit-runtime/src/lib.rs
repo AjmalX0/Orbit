@@ -5,10 +5,12 @@
 //! * [`store`]  — SQLite persistence (event history is authoritative)
 //! * [`engine`] — dispatch, worker registry, reconciliation and recovery
 //! * [`server`] — HTTP API and the HTTP/JSON worker protocol binding
+//! * [`cluster`] — active/standby operation of several servers on PostgreSQL
 
 // TaskError is returned by value on cold paths; boxing would only add noise.
 #![allow(clippy::result_large_err)]
 
+pub mod cluster;
 pub mod decide;
 pub mod engine;
 pub mod grpc;

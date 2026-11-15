@@ -3,7 +3,8 @@
 Covers RFC-0001 §15.5 acceptance criteria that need separate processes:
 polyglot execution, conditions, compensation after a failure, retries,
 inspection through the CLI, and crash recovery (the runtime is killed with
-SIGKILL while a task is in flight and restarted).
+SIGKILL while a task is in flight and restarted), and failover between two
+servers in cluster mode (with ORBIT_E2E_POSTGRES_URL).
 
     cargo build && python3 -I tests/e2e/test_e2e.py
 """
@@ -17,6 +18,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -570,6 +572,260 @@ tasks = ["risk.analyze"]
         # Allowed registration still works for the rogue's own identity.
         status, body = self.rogue("/v1/workers/register", {"worker_id": "rogue", "runtime": "go", "contracts": contract("risk.analyze")})
         self.assertEqual(status, 200, body)
+
+
+class ReadyProxy:
+    """A minimal TCP load balancer: every new connection goes to the backend
+    whose /v1/ready answers 200, probed every 200ms. When the ready backend
+    changes, connections to the previous one are closed (like HAProxy's
+    `on-marked-down shutdown-sessions`)."""
+
+    def __init__(self, backends):
+        self.backends = backends
+        self.active = None
+        self.conns = {b: set() for b in backends}
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(128)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._probe, daemon=True).start()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _ready(self, backend):
+        try:
+            with urllib.request.urlopen(f"http://{backend[0]}:{backend[1]}/v1/ready", timeout=0.5) as r:
+                return r.status == 200
+        except OSError:  # 503 (HTTPError), refused, timeout
+            return False
+
+    def _probe(self):
+        while not self.stopped.is_set():
+            ready = next((b for b in self.backends if self._ready(b)), None)
+            with self.lock:
+                previous, self.active = self.active, ready
+                stale = list(self.conns[previous]) if previous and previous != ready else []
+            for s in stale:
+                self._close(s)
+            time.sleep(0.2)
+
+    @staticmethod
+    def _close(s):
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        s.close()
+
+    def _accept(self):
+        while not self.stopped.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        with self.lock:
+            backend = self.active
+        if backend is None:
+            return self._close(conn)
+        try:
+            up = socket.create_connection(backend, timeout=2)
+        except OSError:
+            return self._close(conn)
+        up.settimeout(None)
+        with self.lock:
+            self.conns[backend].update((conn, up))
+
+        def pipe(src, dst):
+            try:
+                while True:
+                    data = src.recv(65536)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except OSError:
+                pass
+            finally:
+                self._close(src)
+                self._close(dst)
+                with self.lock:
+                    self.conns[backend].discard(src)
+                    self.conns[backend].discard(dst)
+
+        threading.Thread(target=pipe, args=(up, conn), daemon=True).start()
+        pipe(conn, up)
+
+    def stop(self):
+        self.stopped.set()
+        self.sock.close()
+
+
+@unittest.skipUnless(os.environ.get("ORBIT_E2E_POSTGRES_URL"), "set ORBIT_E2E_POSTGRES_URL to run the multi-server tests")
+class HighAvailability(unittest.TestCase):
+    """Two `orbit server --cluster` nodes on one PostgreSQL database behind a
+    readiness-checking proxy; the leader is killed with SIGKILL mid-execution."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.c = Cluster()
+        cls.ports = {"node-1": free_port(), "node-2": free_port()}
+        cls.nodes = {}
+        cls.start_node("node-1")
+        cls.wait_leader()
+        cls.start_node("node-2")
+        cls.proxy = ReadyProxy([("127.0.0.1", p) for p in cls.ports.values()])
+        cls.c.url = f"http://127.0.0.1:{cls.proxy.port}"
+        cls.c.env["ORBIT_SERVER"] = cls.c.url
+        cls.c.start_workers()
+        cls.c.cli("deploy", WORKFLOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.c.stop()
+        for p in cls.nodes.values():
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=10)
+        cls.proxy.stop()
+        print(f"\nlogs: {cls.c.dir}")
+
+    @classmethod
+    def node_url(cls, name):
+        return f"http://127.0.0.1:{cls.ports[name]}"
+
+    @classmethod
+    def start_node(cls, name):
+        cls.nodes[name] = subprocess.Popen(
+            [ORBIT, "server", "--cluster", "--db", cls.c.db, "--addr", f"127.0.0.1:{cls.ports[name]}",
+             "--node-id", name, "--session-timeout", "3"],
+            stdout=cls.c.log(name), stderr=subprocess.STDOUT, env=cls.c.env,
+        )
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(cls.node_url(name) + "/v1/health", timeout=1).read()
+                return
+            except OSError:
+                time.sleep(0.1)
+        raise RuntimeError(f"{name} did not start; logs in {cls.c.dir}")
+
+    @classmethod
+    def health(cls, name):
+        with urllib.request.urlopen(cls.node_url(name) + "/v1/health", timeout=2) as r:
+            return json.loads(r.read())
+
+    @classmethod
+    def ready(cls, name):
+        try:
+            with urllib.request.urlopen(cls.node_url(name) + "/v1/ready", timeout=1) as r:
+                return r.status == 200
+        except OSError:
+            return False
+
+    @classmethod
+    def wait_leader(cls, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ready = [n for n in cls.nodes if cls.nodes[n].poll() is None and cls.ready(n)]
+            assert len(ready) < 2, "two leaders"
+            if ready:
+                return ready[0]
+            time.sleep(0.05)
+        raise AssertionError(f"no leader within {timeout}s; logs in {cls.c.dir}")
+
+    def start(self, input, execution_id=None):
+        return self.c.post("/v1/executions", {"workflow": "OrderProcessing", "input": input, "execution_id": execution_id})["execution_id"]
+
+    def await_dispatched(self, ex, step="process_payment"):
+        deadline = time.time() + 20
+        while self.c.get(f"/v1/executions/{ex}")["units"].get(step, {}).get("status") != "DISPATCHED":
+            self.assertLess(time.time(), deadline, f"{step} never dispatched")
+            time.sleep(0.05)
+
+    def kill_leader(self):
+        leader = self.wait_leader()
+        self.nodes[leader].send_signal(signal.SIGKILL)
+        self.nodes[leader].wait()
+        return leader, time.time()
+
+    def wait_failover(self, killed, at):
+        """Wait for the new leader, and for the proxy to route to it."""
+        leader = self.wait_leader()
+        took = time.time() - at
+        self.assertNotEqual(leader, killed)
+        self.assertLess(took, 5, f"failover took {took:.1f}s")
+        deadline = time.time() + 5
+        while self.proxy.active != ("127.0.0.1", self.ports[leader]):
+            self.assertLess(time.time(), deadline, "the proxy did not switch to the new leader")
+            time.sleep(0.05)
+        return leader
+
+    def test_a_standby_serves_reads_and_points_at_the_leader(self):
+        leader = self.wait_leader()
+        standby = next(n for n in self.nodes if n != leader)
+        h = self.health(standby)
+        self.assertEqual((h["role"], h["node_id"], h["leader"]["node_id"]), ("standby", standby, leader))
+        self.assertEqual(self.health(leader)["role"], "leader")
+        req = urllib.request.Request(self.node_url(standby) + "/v1/executions", method="POST",
+                                     data=json.dumps({"workflow": "OrderProcessing", "input": order("HA-0")}).encode(),
+                                     headers={"content-type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(e.exception.code, 503)
+        self.assertEqual(e.exception.headers["x-orbit-leader"], self.node_url(leader))
+        self.assertEqual(json.loads(e.exception.read())["error"]["code"], "NOT_LEADER")
+        # The CLI follows NOT_LEADER to the leader; reads are served by the standby.
+        r = subprocess.run([ORBIT, "run", WORKFLOW, "--input", json.dumps(order("HA-1")), "--server", self.node_url(standby)],
+                           capture_output=True, text=True, env=self.c.env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["transaction_id"], "tx-HA-1")
+        ps = subprocess.run([ORBIT, "ps", "--server", self.node_url(standby)], capture_output=True, text=True, env=self.c.env, timeout=30)
+        self.assertIn("COMPLETED", ps.stdout)
+
+    def test_b_failover_mid_execution(self):
+        term = self.health(self.wait_leader())["term"]
+        quick = [self.start(order(f"HA-B{i}")) for i in range(3)]
+        slow = self.start(order("HA-B9", amount=4242))  # the charge takes 3s
+        self.await_dispatched(slow)
+        killed, at = self.kill_leader()
+        leader = self.wait_failover(killed, at)
+        self.assertEqual(self.health(leader)["term"], term + 1)
+        for ex in quick + [slow]:
+            s = self.c.wait(ex, timeout=60)
+            self.assertEqual(s["status"], "COMPLETED", json.dumps(s, indent=2))
+        self.assertEqual(self.c.get(f"/v1/executions/{slow}")["output"]["transaction_id"], "tx-HA-B9")
+        history = self.c.get(f"/v1/executions/{slow}/history")["events"]
+        charges = [e for e in history if e["type"] == "StepSucceeded" and e["step"] == "process_payment"]
+        self.assertEqual(len(charges), 1, "exactly one recorded success for the charge")
+        # The killed node rejoins as a standby.
+        self.start_node(killed)
+        deadline = time.time() + 10
+        while self.health(killed)["role"] != "standby" or self.health(killed)["term"] != term + 1:
+            self.assertLess(time.time(), deadline, "restarted node did not rejoin")
+            time.sleep(0.2)
+
+    def test_c_failover_redelivers_a_lost_attempt(self):
+        # The leader and the worker running the charge die together: the
+        # attempt's outcome is unknown and the new leader redelivers it.
+        slow = self.start(order("HA-C1", amount=4242))
+        self.await_dispatched(slow)
+        python = self.c.workers[0]
+        python.send_signal(signal.SIGKILL)
+        killed, at = self.kill_leader()
+        self.wait_failover(killed, at)
+        self.c.spawn("python-restarted", [sys.executable, os.path.join(ROOT, "examples", "workers", "python", "order_workers.py")])
+        s = self.c.wait(slow, timeout=60)
+        self.assertEqual(s["status"], "COMPLETED", json.dumps(s, indent=2))
+        self.assertEqual(s["output"]["transaction_id"], "tx-HA-C1")
+        history = self.c.get(f"/v1/executions/{slow}/history")["events"]
+        of = lambda t: [e for e in history if e["type"] == t and e.get("step") == "process_payment"]
+        self.assertEqual(len(of("StepAttemptUncertain")), 1, json.dumps(history, indent=1))
+        self.assertEqual(len(of("StepDispatched")), 2, "the charge was redelivered")
+        self.assertEqual(len(of("StepSucceeded")), 1, "exactly one recorded success for the charge")
 
 
 if __name__ == "__main__":

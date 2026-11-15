@@ -325,6 +325,18 @@ struct ServerArgs {
     /// Log format.
     #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     log_format: String,
+    /// Run as one of several servers on the same PostgreSQL database: one
+    /// leader serves, the others stand by and take over if it fails.
+    #[arg(long, env = "ORBIT_CLUSTER")]
+    cluster: bool,
+    /// This server's name in the cluster (default: the host name).
+    #[arg(long, env = "ORBIT_NODE_ID", requires = "cluster")]
+    node_id: Option<String>,
+    /// URL other servers give out to reach this one while it leads, e.g.
+    /// http://orbit-0.orbit:7233 (default: derived from --addr when it is
+    /// not a wildcard address).
+    #[arg(long, env = "ORBIT_ADVERTISE_ADDR", requires = "cluster")]
+    advertise_addr: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -910,8 +922,21 @@ fn server(mut args: ServerArgs) -> Res {
         ));
     }
     let db_label = redact_url(&args.db);
-    let store = orbit_runtime::Store::connect(&args.db)
-        .map_err(|e| format!("cannot open database {db_label}: {e}"))?;
+    let is_postgres = args.db.starts_with("postgres://") || args.db.starts_with("postgresql://");
+    if args.cluster && !is_postgres {
+        return Err("--cluster requires a PostgreSQL database (--db postgres://...): the servers share it for leader election and history".into());
+    }
+    // In cluster mode the node starts as a standby with a read-only store.
+    let store = if args.cluster {
+        orbit_runtime::store::PgStore::connect_with(
+            &args.db,
+            orbit_runtime::store::PgMode::ReadOnly,
+        )
+        .map(orbit_runtime::Store::Postgres)
+    } else {
+        orbit_runtime::Store::connect(&args.db)
+    }
+    .map_err(|e| format!("cannot open database {db_label}: {e}"))?;
     let config = orbit_runtime::EngineConfig {
         session_timeout_ms: args.session_timeout.max(1) * 1000,
         heartbeat_interval_ms: (args.session_timeout.max(1) * 1000 / 6).max(500),
@@ -924,6 +949,39 @@ fn server(mut args: ServerArgs) -> Res {
     if let Some(endpoint) = args.otlp_endpoint.as_deref().filter(|e| !e.is_empty()) {
         engine.enable_telemetry(orbit_runtime::telemetry::TelemetryConfig::new(endpoint));
     }
+    let cluster = args.cluster.then(|| {
+        let scheme = if args.tls_cert.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let mut c = orbit_runtime::cluster::ClusterConfig::new(
+            &args.db,
+            &args
+                .node_id
+                .clone()
+                .unwrap_or_else(orbit_runtime::cluster::default_node_id),
+        );
+        c.advertise_addr = args.advertise_addr.clone().or_else(|| {
+            (!args.addr.ip().is_unspecified()).then(|| format!("{scheme}://{}", args.addr))
+        });
+        let engine_config = engine.config.clone();
+        let otlp = args.otlp_endpoint.clone().filter(|e| !e.is_empty());
+        orbit_runtime::cluster::Node::new(
+            c,
+            Box::new(move |store| {
+                let mut e = orbit_runtime::Engine::open(
+                    store,
+                    engine_config.clone(),
+                    orbit_runtime::engine::system_clock(),
+                )?;
+                if let Some(endpoint) = otlp.as_deref() {
+                    e.enable_telemetry(orbit_runtime::telemetry::TelemetryConfig::new(endpoint));
+                }
+                Ok(e)
+            }),
+        )
+    });
     tracing::info!(db = %db_label, backend = store_backend, http_adapter = args.enable_http_adapter, auth = args.token.is_some(), "starting ORBIT runtime");
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {
@@ -931,7 +989,7 @@ fn server(mut args: ServerArgs) -> Res {
             shutdown_signal().await;
             tracing::info!("shutting down");
         };
-        orbit_runtime::server::serve(
+        orbit_runtime::server::serve_node(
             engine,
             orbit_runtime::server::ServerConfig {
                 addr: args.addr,
@@ -951,6 +1009,7 @@ fn server(mut args: ServerArgs) -> Res {
                 body_limit: args.max_body,
                 tick_interval: std::time::Duration::from_millis(100),
             },
+            cluster,
             shutdown,
         )
         .await

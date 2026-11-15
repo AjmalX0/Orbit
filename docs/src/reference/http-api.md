@@ -13,7 +13,7 @@ The runtime serves one HTTP API on `--addr` (default `127.0.0.1:7233`). It conta
 
 When the server runs without `--token` and without `--workers-file`, every endpoint is open. This is only allowed on a loopback address unless you pass `--insecure`.
 
-When a credential is configured, every endpoint except `GET /v1/health` requires one of:
+When a credential is configured, every endpoint except `GET /v1/health` and `GET /v1/ready` requires one of:
 
 | Caller | How it authenticates | Can call |
 |---|---|---|
@@ -60,7 +60,8 @@ Errors produced by ORBIT have this body:
 | `EXECUTION_FINISHED` | 409 | `POST /v1/executions/{id}/cancel`, `POST /v1/executions/{id}/signals/{name}` | The execution is already terminal. |
 | `SIGNAL_PAYLOAD_INVALID` | 422 | `POST /v1/executions/{id}/signals/{name}` | The payload does not match the signal's declaration. The message names the path, for example `$.approved`. Nothing is recorded. |
 | `QUERY_FAILED` | 422 | `GET /v1/executions/{id}/queries/{name}` | Evaluating the query failed at runtime, for example with a division by zero. |
-| `STORAGE_ERROR` | 500 | any endpoint that reads or writes the database | The database operation failed. The message contains the backend error. Nothing was changed. |
+| `STORAGE_ERROR` | 500 | any endpoint that reads or writes the database | The database operation failed. The message contains the backend error. Nothing was changed. On a cluster leader that was just deposed, the message starts with `fenced:`. |
+| `NOT_LEADER` | 503 | every route except `GET` routes, on a cluster standby | This server is a standby (`--cluster`). The body's `error` object adds `leader_node` and `leader_addr` (either may be `null`), the `x-orbit-leader` header carries the address, and `retry-after: 1` is set. Send the request to the leader, or retry. See [Running several servers](../runtime/cluster.md#standby-behavior). |
 
 Some errors are produced by the HTTP layer before a request reaches ORBIT. They have a plain-text body (`content-type: text/plain`), not the JSON envelope:
 
@@ -79,7 +80,8 @@ A client should check the status first, and parse the JSON error envelope only w
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | [`/v1/health`](#get-v1health) | none | Liveness and versions. |
+| `GET` | [`/v1/health`](#get-v1health) | none | Liveness, versions and cluster role. |
+| `GET` | [`/v1/ready`](#get-v1ready) | none | Readiness: `200` only where writes are served. |
 | `GET` | [`/v1/metrics`](#get-v1metrics) | admin | Prometheus metrics. |
 | `POST` | [`/v1/workflows`](#post-v1workflows) | admin | Register a compiled definition. |
 | `GET` | [`/v1/workflows`](#get-v1workflows) | admin | List definitions. |
@@ -107,7 +109,7 @@ A client should check the status first, and parse the JSON error envelope only w
 
 ### GET /v1/health
 
-Liveness and version information. It never requires authentication. The server binds its listener only after it has opened the database and recovered active executions, so a `200` also means the runtime is ready to serve. Use it for liveness and readiness probes.
+Liveness and version information. It never requires authentication. A single server binds its listener only after it has opened the database and recovered active executions, so a `200` also means the runtime is ready to serve. In cluster mode every server, leader or standby, answers `200`; use [`/v1/ready`](#get-v1ready) to find the leader.
 
 Response `200`:
 
@@ -118,8 +120,18 @@ Response `200`:
   "runtime_version": "0.2.0",
   "ir_versions": ["orbit-ir/1", "orbit-ir/2"],
   "active_executions": 0,
-  "worker_sessions": 0
+  "worker_sessions": 0,
+  "role": "single",
+  "node_id": null,
+  "term": null,
+  "leader": null
 }
+```
+
+A cluster standby:
+
+```json
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0,"role":"standby","node_id":"b","term":1,"leader":{"node_id":"a","addr":"http://127.0.0.1:7301"}}
 ```
 
 | Field | Type | Meaning |
@@ -130,6 +142,28 @@ Response `200`:
 | `ir_versions` | array of strings | IR versions this runtime accepts. ORBIT 0.1 lists only `orbit-ir/1`; workflows that use signals, queries, `await` or `compute` steps, or lambdas need a runtime that lists `orbit-ir/2`. |
 | `active_executions` | integer | Executions not yet terminal, held in memory. |
 | `worker_sessions` | integer | Worker sessions the runtime remembers, including ones that recently went silent. |
+| `role` | string | `single` without `--cluster`; `leader` or `standby` in cluster mode. |
+| `node_id` | string or null | The server's `--node-id`; `null` without `--cluster`. |
+| `term` | integer or null | The leadership term this server last saw; `null` without `--cluster`. |
+| `leader` | object or null | The current leader as `{"node_id": ..., "addr": ...}`, or `null`. |
+
+### GET /v1/ready
+
+Readiness for load balancers and orchestrators. It never requires authentication. It returns `200` on a single server and on a cluster leader, and `503` on a cluster standby, so a load balancer that checks it sends traffic only to the server that accepts writes.
+
+Response `200` (single server):
+
+```json
+{"role":"single","ready":true}
+```
+
+Response `503` (cluster standby):
+
+```json
+{"role":"standby","node_id":"b","term":1,"leader":{"node_id":"a","addr":"http://127.0.0.1:7301"},"ready":false}
+```
+
+A leader that cannot confirm its leadership within its lease (3 seconds) answers `503` until it can. See [Running several servers](../runtime/cluster.md#load-balancer-configuration).
 
 ### GET /v1/metrics
 
@@ -721,6 +755,7 @@ With `--grpc-addr`, the worker protocol is also served over gRPC as `orbit.worke
 | 404 | `NOT_FOUND` |
 | 409 | `FAILED_PRECONDITION` |
 | 500 | `INTERNAL` |
+| 503 (`NOT_LEADER`, cluster standby) | `UNAVAILABLE` |
 
 `PollTask` returns an `ExecuteTaskRequest` with an empty `token` where HTTP returns `204`.
 
