@@ -13,3 +13,7 @@ bin/
 obj/
 sdks/java/target/
 examples/workers/java/target/
+sdks/python/dist/
+sdks/python/build/
+*.egg-info/
+*.tgz

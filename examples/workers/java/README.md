@@ -5,7 +5,7 @@ repository root:
 
 ```bash
 (cd sdks/java && mvn -q install)              # puts orbit-sdk 0.1.0 in ~/.m2
-orbit server &                                # or: cargo run -p orbit-cli -- server
+orbit server &                                # or: cargo run -p orbit-lang -- server
 (cd examples/workers/java && mvn -q compile exec:java)
 orbit run examples/java_hello.orbit --input '{"name": "Ada", "excited": true}'
 # {"message": "Hello, Ada, from Java!", "letters": 3}

@@ -1,5 +1,5 @@
 {
-  "name": "@orbit/sdk",
+  "name": "@orbit-lang/sdk",
   "version": "0.1.0",
   "description": "TypeScript/JavaScript worker SDK for the ORBIT orchestration runtime",
   "license": "Apache-2.0",
@@ -12,11 +12,40 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src"],
-  "engines": { "node": ">=18" },
+  "files": [
+    "dist",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/worker.test.ts"
+    "test": "node --test test/worker.test.ts",
+    "prepack": "tsc -p tsconfig.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AjmalX0/Orbit.git",
+    "directory": "sdks/typescript"
+  },
+  "homepage": "https://github.com/AjmalX0/Orbit/tree/main/sdks/typescript",
+  "bugs": {
+    "url": "https://github.com/AjmalX0/Orbit/issues"
+  },
+  "keywords": [
+    "orbit",
+    "workflow",
+    "orchestration",
+    "durable-execution",
+    "saga",
+    "worker"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

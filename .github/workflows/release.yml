@@ -1,0 +1,253 @@
+name: release
+
+# On every push and pull request this is a dry run: binaries for every
+# platform, the container image and every package are built and checked.
+# Pushing a tag `vX.Y.Z` additionally publishes. Each registry is published to
+# only when its credentials are configured (see RELEASING.md), so a missing
+# account never fails a release.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  binaries:
+    name: binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+      - name: Build
+        run: cargo build --release --locked -p orbit-lang --target ${{ matrix.target }}
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/orbit
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          "$bin" --version
+          "$bin" check examples/order_processing.orbit
+          "$bin" fmt --check examples/*.orbit
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          if [ -f orbit.exe ]; then
+            7z a ../../../dist/orbit-${{ matrix.target }}.zip orbit.exe >/dev/null
+          else
+            tar czf ../../../dist/orbit-${{ matrix.target }}.tar.gz orbit
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+
+  container:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: ${{ env.PUBLISH != 'true' }}
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ env.PUBLISH == 'true' && github.ref_name || 'dev' }}
+            ${{ env.PUBLISH == 'true' && format('{0}:latest', steps.image.outputs.name) || format('{0}:ci', steps.image.outputs.name) }}
+      - name: Smoke test the image
+        if: env.PUBLISH != 'true'
+        run: |
+          docker run --rm ${{ steps.image.outputs.name }}:dev --version
+          # The default command must refuse to listen publicly without a token.
+          if docker run --rm ${{ steps.image.outputs.name }}:dev; then echo "server started without a token" && exit 1; fi
+
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - name: Rust crates (package and verify the whole workspace)
+        run: cargo package --workspace --locked
+      - name: Python wheel and sdist
+        run: |
+          python -m pip install --quiet build twine
+          python -m build sdks/python
+          twine check sdks/python/dist/*
+      - name: npm package
+        run: cd sdks/typescript && npm pack && mkdir -p ../../dist && mv *.tgz ../../dist/
+      - name: NuGet package
+        run: cd sdks/csharp && dotnet pack OrbitLang.Sdk -c Release -o ../../dist
+      - name: Maven artifacts (sources and javadoc; signing only when publishing)
+        run: cd sdks/java && mvn -B -q -Prelease -Dgpg.skip=true package
+      - name: VS Code extension
+        run: cd editors/vscode && npm ci && npx vsce package --out ../../dist/orbit-lang.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            dist/*
+            sdks/python/dist/*
+            sdks/java/target/*.jar
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, container, packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Collect assets and checksums
+        run: |
+          mkdir -p assets
+          find artifacts -type f \( -name 'orbit-*.tar.gz' -o -name 'orbit-*.zip' -o -name '*.vsix' -o -name '*.whl' -o -name '*.nupkg' -o -name '*.tgz' \) -exec cp {} assets/ \;
+          cd assets && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
+      - name: Tag the Go module (sdks/go/vX.Y.Z)
+        run: |
+          git tag "sdks/go/${GITHUB_REF_NAME}"
+          git push origin "sdks/go/${GITHUB_REF_NAME}"
+
+  publish-crates:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    env: { CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - if: env.CARGO_REGISTRY_TOKEN != ''
+        run: cargo publish --workspace --locked
+
+  publish-pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install --quiet build && python -m build sdks/python
+      # Uses PyPI trusted publishing; set PYPI_API_TOKEN to use a token instead.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-npm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance
+    env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", registry-url: "https://registry.npmjs.org" }
+      - if: env.NODE_AUTH_TOKEN != ''
+        run: cd sdks/typescript && npm publish --provenance --access public
+
+  publish-nuget:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    env: { NUGET_API_KEY: "${{ secrets.NUGET_API_KEY }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - if: env.NUGET_API_KEY != ''
+        run: |
+          cd sdks/csharp && dotnet pack OrbitLang.Sdk -c Release -o out
+          dotnet nuget push "out/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+
+  publish-maven:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - if: env.MAVEN_CENTRAL_USERNAME != ''
+        run: cd sdks/java && mvn -B -Prelease deploy
+
+  publish-vscode:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: cd editors/vscode && npm ci
+      - if: env.VSCE_PAT != ''
+        run: cd editors/vscode && npx vsce publish -p "$VSCE_PAT"
+      - if: env.OVSX_PAT != ''
+        run: cd editors/vscode && npx -y ovsx@0.10.1 publish -p "$OVSX_PAT"

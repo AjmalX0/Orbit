@@ -1,8 +1,16 @@
 [package]
 name = "orbit-syntax"
-description = "ORBIT lexer, parser, AST and diagnostics"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "ORBIT lexer, parser, AST, diagnostics and formatter"
+keywords = ["orbit", "workflow", "orchestration", "durable-execution", "saga"]
+categories = ["parser-implementations"]
+readme = "README.md"
 
 [dependencies]
 serde.workspace = true

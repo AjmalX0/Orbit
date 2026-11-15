@@ -2,7 +2,15 @@
 name = "orbit-worker"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
 description = "Rust worker SDK for the ORBIT orchestration runtime"
+keywords = ["orbit", "workflow", "orchestration", "durable-execution", "saga"]
+categories = ["api-bindings"]
+readme = "README.md"
 
 [dependencies]
 serde.workspace = true

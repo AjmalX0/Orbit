@@ -489,8 +489,10 @@ fn formatting_never_changes_meaning() {
                     .entry(p.clone())
                     .or_insert_with(|| std::fs::read_to_string(&p).unwrap_or_default());
             }
-            let c =
-                orbit_compiler::compile_with(std::slice::from_ref(&path), &orbit_compiler::MemLoader(files));
+            let c = orbit_compiler::compile_with(
+                std::slice::from_ref(&path),
+                &orbit_compiler::MemLoader(files),
+            );
             assert!(
                 !c.has_errors(),
                 "{}: {}",

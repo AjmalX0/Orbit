@@ -1,8 +1,16 @@
 [package]
-name = "orbit-cli"
+name = "orbit-lang"
 version.workspace = true
 edition.workspace = true
-description = "The orbit command-line tool: compiler driver, runtime server and client"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "ORBIT: a polyglot orchestration language. The orbit compiler, runtime server, language server and CLI"
+keywords = ["orbit", "workflow", "orchestration", "durable-execution", "saga"]
+categories = ["command-line-utilities"]
+readme = "README.md"
 
 [[bin]]
 name = "orbit"
