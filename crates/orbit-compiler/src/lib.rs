@@ -8,6 +8,7 @@ pub mod check;
 pub mod compat;
 pub mod prelude;
 mod testing;
+pub mod tooling;
 pub mod types;
 
 use check::{Checker, Env};

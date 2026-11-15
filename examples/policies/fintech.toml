@@ -1,0 +1,73 @@
+# Example organisation policy for payment workflows.
+#
+#   orbit check --policy examples/policies/fintech.toml examples/approval.orbit
+#
+# approval.orbit passes (with two warnings); checkout.orbit violates the
+# compensation and approval rules. See docs/src/tooling/policy.md.
+
+[policy]
+name = "fintech"
+description = "Payment workflows must be reversible, approved above a threshold and bounded in time"
+# Rules apply to every workflow unless a rule narrows its own scope.
+workflows = ["*"]
+
+# A charge that is not undone when a later step fails leaves money taken
+# for an order that was never fulfilled.
+[[rule]]
+id = "payments-compensated"
+type = "require_compensation"
+tasks = ["payments.charge", "inventory.reserve"]
+description = "every charge and reservation must be undone on failure"
+
+# Large charges need a reviewer's decision before they run.
+[[rule]]
+id = "large-charge-approval"
+type = "require_approval"
+tasks = ["payments.charge"]
+signals = ["review", "approval"]
+when = "input.amount >= 10000"
+description = "charges of 10000 or more need a recorded approval"
+
+# Payment providers must not be hammered by retries.
+[[rule]]
+id = "payment-retries"
+type = "max_attempts"
+tasks = ["payments.*"]
+max = 3
+
+[[rule]]
+id = "payment-timeout"
+type = "require_timeout"
+tasks = ["payments.*"]
+max = "1m"
+severity = "warning"
+
+# A person who never answers must not keep an execution open forever.
+[[rule]]
+id = "approval-timeout"
+type = "require_signal_timeout"
+signals = ["review", "approval"]
+max = "7d"
+
+[[rule]]
+id = "failure-handler"
+type = "require_handler"
+handlers = ["failure"]
+severity = "warning"
+description = "customers are told when their order fails"
+
+[[rule]]
+id = "no-legacy"
+type = "forbid_tasks"
+tasks = ["legacy.*"]
+
+[[rule]]
+id = "known-services"
+type = "allow_tasks"
+tasks = ["payments.*", "inventory.*", "notifications.*", "orders.*", "risk.*", "shipping.*"]
+
+[[rule]]
+id = "bounded-fan-out"
+type = "max_fan_out"
+max = 500
+require_max_parallel = true

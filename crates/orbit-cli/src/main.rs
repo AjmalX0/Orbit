@@ -6,6 +6,7 @@ mod lsp;
 mod replay;
 mod scaffold;
 mod testing;
+mod tooling;
 mod view;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -92,12 +93,6 @@ enum DiagFormat {
     Json,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum GraphFormat {
-    Mermaid,
-    Dot,
-}
-
 #[derive(Subcommand)]
 enum Command {
     /// Create a new ORBIT project with an example workflow and workers.
@@ -111,6 +106,10 @@ enum Command {
         /// signals, waits without a timeout, ...) as errors.
         #[arg(long)]
         strict: bool,
+        /// Also check the workflows against an organisation policy file
+        /// (TOML; repeatable). Violations are P01xx diagnostics.
+        #[arg(long, value_name = "FILE")]
+        policy: Vec<PathBuf>,
     },
     /// Check workflow files, and validate compiled IR (.json) files.
     Validate { files: Vec<PathBuf> },
@@ -126,6 +125,9 @@ enum Command {
         /// Print the IR to stdout instead of writing files.
         #[arg(long)]
         stdout: bool,
+        /// Check the workflows against a policy file first (repeatable).
+        #[arg(long, value_name = "FILE")]
+        policy: Vec<PathBuf>,
     },
     /// Format .orbit files in place (comments and line breaks are preserved).
     Fmt {
@@ -136,13 +138,67 @@ enum Command {
     },
     /// Run the language server (LSP over stdio), used by editor extensions.
     Lsp,
-    /// Render a workflow's step graph (Mermaid or Graphviz).
+    /// Render a workflow as a diagram (Mermaid, Graphviz DOT or SVG).
     Graph {
+        /// A `.orbit` file or a compiled IR `.json` file.
         file: PathBuf,
+        /// The workflow to render when the file defines several.
         #[arg(long)]
         workflow: Option<String>,
+        /// `mermaid` (flowchart), `dot` (Graphviz) or `svg` (laid out by orbit, no external tools).
         #[arg(long, value_enum, default_value = "mermaid")]
-        format: GraphFormat,
+        format: tooling::GraphFormat,
+        /// Render a Mermaid sequence diagram of the workflow's calls instead of the step graph.
+        #[arg(long)]
+        sequence: bool,
+        /// Write to this file instead of stdout.
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Generate reference documentation for workflows and task contracts.
+    Docs {
+        /// `.orbit` files (imports are followed).
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Output directory: one page per workflow, `contracts` and `index`.
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+        /// `markdown` or `html` (one self-contained file per page).
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: tooling::DocsFormat,
+        /// Also write JSON Schema files to `<DIR>/schemas` and link them from the pages.
+        #[arg(long)]
+        json_schema: bool,
+    },
+    /// Export JSON Schema (draft 2020-12) for workflow inputs, outputs, signals,
+    /// queries and task contracts.
+    Schema {
+        /// `.orbit` files (imports are followed).
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Only this workflow (and the contracts it uses).
+        #[arg(long)]
+        workflow: Option<String>,
+        /// Write one `<name>.schema.json` file per schema into this directory
+        /// instead of printing a single JSON object.
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+    },
+    /// Show what changed in a process between two versions, with the compatibility verdict.
+    Diff {
+        /// The old version: a .orbit file or a compiled IR .json file.
+        old: PathBuf,
+        /// The new version: a .orbit file or a compiled IR .json file.
+        new: PathBuf,
+        /// Only this workflow.
+        #[arg(long)]
+        workflow: Option<String>,
+        /// `text`, `markdown` (for a pull request) or `json`.
+        #[arg(long, value_enum, default_value = "text")]
+        format: tooling::DiffFormat,
+        /// Exit with status 1 when there are changes (0 when there are none).
+        #[arg(long)]
+        exit_code: bool,
     },
     /// Check that new workflow and contract versions are compatible with old ones.
     Compat {
@@ -159,6 +215,9 @@ enum Command {
     /// Compile and register workflow definitions with the runtime.
     Deploy {
         files: Vec<PathBuf>,
+        /// Check the workflows against a policy file before deploying (repeatable).
+        #[arg(long, value_name = "FILE")]
+        policy: Vec<PathBuf>,
         #[command(flatten)]
         remote: Remote,
     },
@@ -461,12 +520,31 @@ fn color_err() -> bool {
     std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
-/// Compile and print diagnostics; `None` when compilation failed.
-fn compile(files: &[PathBuf], format: DiagFormat) -> Result<Compilation, String> {
+/// Compile, check policies (when the compilation succeeded) and print
+/// diagnostics. Policy violations are added to the diagnostics, so
+/// `has_errors()` reports them too.
+fn compile(
+    files: &[PathBuf],
+    format: DiagFormat,
+    policies: &[PathBuf],
+) -> Result<Compilation, String> {
     if files.is_empty() {
         return Err("no input files (expected one or more .orbit files)".into());
     }
-    let c = compile_files(files);
+    let policies = policies
+        .iter()
+        .map(|p| orbit_compiler::tooling::policy::Policy::load(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut c = compile_files(files);
+    if !c.has_errors() && !policies.is_empty() {
+        let r = orbit_compiler::tooling::policy::Policy::check_all(&policies, &c);
+        c.diagnostics.extend(r.diagnostics);
+        for m in r.messages {
+            eprintln!("{} {m}", view::paint("warning:", view::YELLOW, color_err()));
+        }
+        c.diagnostics
+            .sort_by_key(|d| (d.span.file, d.span.start, d.severity));
+    }
     match format {
         DiagFormat::Json => {
             let diags: Vec<_> = c
@@ -491,7 +569,16 @@ fn compile(files: &[PathBuf], format: DiagFormat) -> Result<Compilation, String>
 fn summarize_errors(c: &Compilation) -> String {
     let errors = c.diagnostics.iter().filter(|d| d.is_error()).count();
     let warnings = c.diagnostics.len() - errors;
-    format!("compilation failed: {errors} error(s), {warnings} warning(s)")
+    let policy_only = c
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .all(|d| d.code.starts_with('P'));
+    if policy_only && errors > 0 {
+        format!("policy check failed: {errors} error(s), {warnings} warning(s)")
+    } else {
+        format!("compilation failed: {errors} error(s), {warnings} warning(s)")
+    }
 }
 
 fn load_ir(path: &Path) -> Result<WorkflowIr, String> {
@@ -501,10 +588,23 @@ fn load_ir(path: &Path) -> Result<WorkflowIr, String> {
 }
 
 fn workflows_from(target: &Path) -> Result<Vec<WorkflowIr>, String> {
+    workflows_checked(target, &[])
+}
+
+/// Like [`workflows_from`], checking `.orbit` sources against policies.
+/// Compiled IR files cannot be policy-checked (they have no source to
+/// locate violations or waivers in) and are refused when policies are given.
+fn workflows_checked(target: &Path, policies: &[PathBuf]) -> Result<Vec<WorkflowIr>, String> {
     if target.extension().is_some_and(|e| e == "json") {
+        if !policies.is_empty() {
+            return Err(format!(
+                "{}: --policy needs .orbit sources, not compiled IR",
+                target.display()
+            ));
+        }
         return Ok(vec![load_ir(target)?]);
     }
-    let c = compile(&[target.to_path_buf()], DiagFormat::Human)?;
+    let c = compile(&[target.to_path_buf()], DiagFormat::Human, policies)?;
     if c.has_errors() {
         return Err(summarize_errors(&c));
     }
@@ -519,8 +619,9 @@ fn run(cmd: Command) -> Res {
             files,
             format,
             strict,
+            policy,
         } => {
-            let c = compile(&files, format)?;
+            let c = compile(&files, format, &policy)?;
             if strict && !c.diagnostics.is_empty() && !c.has_errors() {
                 if format == DiagFormat::Human {
                     return Err(format!(
@@ -576,6 +677,7 @@ fn run(cmd: Command) -> Res {
                     files: sources,
                     format: DiagFormat::Human,
                     strict: false,
+                    policy: vec![],
                 });
             }
             Ok(ExitCode::SUCCESS)
@@ -585,8 +687,9 @@ fn run(cmd: Command) -> Res {
             strict,
             out_dir,
             stdout,
+            policy,
         } => {
-            let c = compile(&files, DiagFormat::Human)?;
+            let c = compile(&files, DiagFormat::Human, &policy)?;
             if c.has_errors() {
                 return Err(summarize_errors(&c));
             }
@@ -633,24 +736,49 @@ fn run(cmd: Command) -> Res {
             file,
             workflow,
             format,
-        } => {
-            let wfs = workflows_from(&file)?;
-            let wf = pick(&wfs, workflow.as_deref())?;
-            print!(
-                "{}",
-                match format {
-                    GraphFormat::Mermaid => view::mermaid(wf),
-                    GraphFormat::Dot => view::dot(wf),
-                }
-            );
-            Ok(ExitCode::SUCCESS)
-        }
+            sequence,
+            output,
+        } => tooling::graph(
+            &file,
+            workflow.as_deref(),
+            format,
+            sequence,
+            output.as_deref(),
+        ),
+        Command::Docs {
+            files,
+            output,
+            format,
+            json_schema,
+        } => tooling::docs(&files, &output, format, json_schema),
+        Command::Schema {
+            files,
+            workflow,
+            output,
+        } => tooling::schema_cmd(&files, workflow.as_deref(), output.as_deref()),
+        Command::Diff {
+            old,
+            new,
+            workflow,
+            format,
+            exit_code,
+        } => Ok(tooling::diff_cmd(
+            &old,
+            &new,
+            workflow.as_deref(),
+            format,
+            exit_code,
+        )),
         Command::Compat { old, new, format } => Ok(compat::run(&old, &new, format)),
         Command::Server(args) => server(args),
-        Command::Deploy { files, remote } => {
+        Command::Deploy {
+            files,
+            policy,
+            remote,
+        } => {
             let client = remote.client();
             for f in files {
-                for wf in workflows_from(&f)? {
+                for wf in workflows_checked(&f, &policy)? {
                     deploy(&client, &wf, tty)?;
                 }
             }

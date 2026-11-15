@@ -1,0 +1,23 @@
+digraph "Checkout" {
+  // Checkout@1.0.0
+  // sha256:8e0eda310a1bac4d68d8910cb6103264f436a98cc16535b7c5e95eac2a4a53c3
+  rankdir=TB;
+  node [shape=box, style=rounded, fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=10];
+  "reserve" [label="reserve\ninventory.reserve@1.0.0"];
+  "reserve__undo" [label="undo reserve\ninventory.release@1.0.0", style="rounded,dashed"];
+  "reserve" -> "reserve__undo" [style=dashed, label="compensate"];
+  "charge" [label="charge\npayments.charge@1.0.0"];
+  "reserve" -> "charge";
+  subgraph "cluster_on_failure" {
+    label="on failure";
+    style=dashed;
+    "on_failure__tell_customer" [label="tell_customer\nnotifications.send@1.0.0"];
+    "on_failure__summary" [label="summary\ncompute"];
+  }
+  subgraph "cluster_on_cancel" {
+    label="on cancel";
+    style=dashed;
+    "on_cancel__confirm_cancel" [label="confirm_cancel\nnotifications.send@1.0.0"];
+  }
+}

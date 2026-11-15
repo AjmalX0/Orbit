@@ -69,6 +69,9 @@
 - [Replay](tooling/replay.md)
 - [Editor support](tooling/editors.md)
 - [Workflow graphs](tooling/graph.md)
+- [Documentation generation](tooling/docs-generation.md)
+- [Process diffs](tooling/diff.md)
+- [Policies](tooling/policy.md)
 
 # Guides
 

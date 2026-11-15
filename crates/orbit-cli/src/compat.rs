@@ -15,7 +15,7 @@ fn color(stream_is_tty: bool) -> bool {
     stream_is_tty && std::env::var_os("NO_COLOR").is_none()
 }
 
-fn load(path: &Path) -> Result<Snapshot, String> {
+pub(crate) fn load(path: &Path) -> Result<Snapshot, String> {
     if path.extension().is_some_and(|e| e == "json") {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;

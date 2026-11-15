@@ -431,6 +431,30 @@ fn hover(a: &Analysis, path: &Path, text: &str, at: usize) -> Option<Value> {
             if let Some(f) = &step.for_each {
                 s.push_str(&format!("\n\nfor each `{}`", f.variable));
             }
+            use orbit_compiler::tooling::{pretty, retry_summary, timeout_summary};
+            if let Some(c) = &step.condition {
+                s.push_str(&format!("\n\nwhen `{}`", pretty::expr(c)));
+            }
+            if let Some(i) = step.invocation() {
+                if let Some(c) = wf.contracts.get(&i.task) {
+                    s.push_str(&format!(
+                        "\n\ncontract input: `{}`\n\ncontract output: `{}`",
+                        c.input, c.output
+                    ));
+                }
+                if let Some(r) = retry_summary(&i.retry) {
+                    s.push_str(&format!("\n\nretry: {r}"));
+                }
+            }
+            if let Some(t) = timeout_summary(step) {
+                s.push_str(&format!("\n\n{t}"));
+            }
+            if let Some(c) = &step.compensation {
+                s.push_str(&format!(
+                    "\n\ncompensated by `{}@{}`",
+                    c.task, c.contract_version
+                ));
+            }
             return md(s);
         }
     }
