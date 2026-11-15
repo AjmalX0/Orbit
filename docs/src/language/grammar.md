@@ -46,11 +46,13 @@ A `task` declaration has a string name and up to five members: `version`,
 
 A workflow has an identifier name and members: `version`, `description`,
 `timeout`, `input`, `output`, any number of `step`, `signal` and `query`
-declarations, and `return`. A `signal` has a name and a record body, like
+declarations, `return`, and `on` handlers. A `signal` has a name and a record body, like
 `input`. A `query` has a name, `=` and an expression; the parser also accepts
 `:` or nothing in place of `=`, but `=` is the documented form. See
-[Signals and queries](signals.md). The `on` member is parsed only so that the compiler can reject it
-with a clear message (`E0105`).
+[Signals and queries](signals.md). An `on` member is an outcome handler:
+`on failure`, `on cancel` or `on timeout`, followed by a block of `step`
+declarations. Any other word after `on` is rejected with `E0105`. See
+[Outcome handlers](handlers.md).
 
 A step has an identifier name and members. `action` is one of `worker`,
 `workflow`, `sleep`, `await` (followed by a signal name) or `compute`
@@ -237,7 +239,12 @@ The grammar accepts some programs that the compiler then rejects:
 | Map keys are `String`. | `E0204` |
 | Schemas are not recursive. | `E0202` |
 | The step graph and the workflow call graph are acyclic. | `E0304`, `E0311` |
-| `on` handlers are not supported. | `E0105` |
+| `on` is followed by `failure`, `cancel` or `timeout`. | `E0105` |
+| A workflow has at most one `on` block of each kind. | `E0319` |
+| Handler step names differ from workflow step names, reserved names and `failure`. | `E0302` |
+| `after` in a handler names a step of the same block. | `E0303` |
+| Handler steps take no `await`, child `workflow`, `for` or `max_parallel`, and no `compensate`. | `E0307`, `E0308` |
+| `failure` is read only inside handler steps. | `E0401` |
 
 The full list of codes is in [Compiler diagnostics](../reference/diagnostics.md).
 

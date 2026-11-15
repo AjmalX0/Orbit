@@ -461,8 +461,12 @@ orbit server [OPTIONS]
 | `--tls-cert <TLS_CERT>` | path | none | `ORBIT_TLS_CERT` | PEM certificate chain. With `--tls-key`, serve HTTPS. |
 | `--tls-key <TLS_KEY>` | path | none | `ORBIT_TLS_KEY` | PEM private key for `--tls-cert`. |
 | `--tls-client-ca <TLS_CLIENT_CA>` | path | none | `ORBIT_TLS_CLIENT_CA` | Enable mutual TLS: verify client certificates signed by this PEM CA. Certificates identify workers declared with `client_cert` in `--workers-file`. Requires `--tls-cert`. |
-| `--workers-file <WORKERS_FILE>` | path | none | `ORBIT_WORKERS_FILE` | TOML file declaring per-worker identities. Requires `--token`. |
+| `--workers-file <WORKERS_FILE>` | path | none | `ORBIT_WORKERS_FILE` | TOML file declaring per-worker identities (`[[worker]]`: id, token hash or client certificate name, allowed task patterns) and client identities (`[[client]]`: id, credential, allowed workflows and actions). Requires `--token`. See [Security](../runtime/security.md#client-identities). |
 | `--enable-http-adapter` | flag | off | | Execute `orbit.http.request` steps inside the runtime. |
+| `--max-active-executions <MAX_ACTIVE_EXECUTIONS>` | integer | unlimited | `ORBIT_MAX_ACTIVE_EXECUTIONS` | Maximum running executions; further starts get `429 RESOURCE_EXHAUSTED`. |
+| `--max-fan-out <MAX_FAN_OUT>` | integer | unlimited | `ORBIT_MAX_FAN_OUT` | Maximum elements one `for` step may fan out to; larger lists fail the step with `LIMIT_EXCEEDED`. |
+| `--max-history-events <MAX_HISTORY_EVENTS>` | integer | unlimited | `ORBIT_MAX_HISTORY_EVENTS` | Maximum history events per execution; past it the execution fails with `LIMIT_EXCEEDED`. |
+| `--max-payload-bytes <MAX_PAYLOAD_BYTES>` | integer, bytes | unlimited | `ORBIT_MAX_PAYLOAD_BYTES` | Maximum size in bytes of an execution input, task result or signal payload; larger ones get `413 PAYLOAD_TOO_LARGE`. |
 | `--session-timeout <SESSION_TIMEOUT>` | integer, seconds | `30` | | Seconds without contact after which a worker is considered lost. |
 | `--max-body <MAX_BODY>` | integer, bytes | `4194304` | | Maximum request body size. |
 | `--log-format <LOG_FORMAT>` | `text` or `json` | `text` | | Log format. Logs go to stderr. |
@@ -470,7 +474,7 @@ orbit server [OPTIONS]
 | `--node-id <NODE_ID>` | string | the host name | `ORBIT_NODE_ID` | This server's name in the cluster. Requires `--cluster`. |
 | `--advertise-addr <ADVERTISE_ADDR>` | URL | derived from `--addr` unless it is a wildcard address | `ORBIT_ADVERTISE_ADDR` | URL other servers give out to reach this one while it leads. Requires `--cluster`. |
 
-The server reads `ORBIT_LOG` (log filter) and `ORBIT_DB_CA_CERT` (extra CA for PostgreSQL) from the environment. See [Environment variables](environment.md).
+The server reads `ORBIT_LOG` (log filter) and `ORBIT_DB_CA_CERT` (extra CA for PostgreSQL) from the environment. See [Environment variables](environment.md). The four `--max-*` limits are described in [Running the server: resource limits](../runtime/server.md#resource-limits).
 
 Exit codes: `0` after a graceful shutdown (Ctrl+C or `SIGINT`); `1` when the configuration is refused, the database cannot be opened, or an address cannot be bound; `2` on invalid usage.
 

@@ -48,12 +48,16 @@ Every option can also be set through the environment variable listed, except whe
 | `--grpc-addr` | `ORBIT_GRPC_ADDR` | `ip:port` | off | Also serve the gRPC worker protocol on this address, for example `127.0.0.1:7234`. |
 | `--token` | `ORBIT_TOKEN` | string | none | Admin bearer token, required on every endpoint except `/v1/health`. |
 | `--worker-token` | `ORBIT_WORKER_TOKEN` | string | none | Shared worker credential, accepted only on `/v1/workers/*` and `/v1/tasks/*`. Requires `--token` and must differ from it. |
-| `--workers-file` | `ORBIT_WORKERS_FILE` | path | none | Per-worker identities (TOML). Requires `--token`. |
+| `--workers-file` | `ORBIT_WORKERS_FILE` | path | none | Worker identities (`[[worker]]`) and client identities (`[[client]]`), in TOML. Requires `--token`. See [Security](security.md#per-worker-identities). |
 | `--tls-cert` | `ORBIT_TLS_CERT` | path | none | PEM certificate chain. With `--tls-key`, the HTTP API (and gRPC) serve TLS. |
 | `--tls-key` | `ORBIT_TLS_KEY` | path | none | PEM private key (PKCS#8, PKCS#1 or SEC1). |
 | `--tls-client-ca` | `ORBIT_TLS_CLIENT_CA` | path | none | Enables mutual TLS: client certificates signed by this CA identify workers. Requires `--tls-cert` and a workers file with `client_cert` entries. |
 | `--otlp-endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` | URL | off | Export OpenTelemetry traces over OTLP/HTTP (JSON) to this base URL. |
 | `--enable-http-adapter` | | flag | off | Run `orbit.http.request` steps inside the runtime. |
+| `--max-active-executions` | `ORBIT_MAX_ACTIVE_EXECUTIONS` | integer | unlimited | Maximum running executions. Further starts get `429 RESOURCE_EXHAUSTED`. See [Resource limits](#resource-limits). |
+| `--max-fan-out` | `ORBIT_MAX_FAN_OUT` | integer | unlimited | Maximum elements one `for` step may fan out to. A larger list fails the step with `LIMIT_EXCEEDED`. |
+| `--max-history-events` | `ORBIT_MAX_HISTORY_EVENTS` | integer | unlimited | Maximum history events per execution. Past it the execution fails with `LIMIT_EXCEEDED`. |
+| `--max-payload-bytes` | `ORBIT_MAX_PAYLOAD_BYTES` | bytes | unlimited | Maximum serialized size of an execution input, a task result or a signal payload. Larger ones get `413 PAYLOAD_TOO_LARGE`. |
 | `--session-timeout` | | seconds | `30` | A worker session silent for this long is considered lost, and its in-flight attempts are redelivered. Workers are told to heartbeat every sixth of it (at least every 500 ms). |
 | `--max-body` | | bytes | `4194304` (4 MiB) | Maximum request body size. Larger requests get `413`. |
 | `--log-format` | | `text` or `json` | `text` | Log format. Logs go to stderr. |
@@ -106,7 +110,7 @@ Give `ORBIT_WORKER_TOKEN` to worker hosts, and `ORBIT_TOKEN` only to operators a
 orbit server --addr 0.0.0.0:7233 --token "$ORBIT_TOKEN" --workers-file /etc/orbit/workers.toml
 ```
 
-The file format is described in [Security](security.md#per-worker-identities).
+The same file can declare client identities (`[[client]]`): credentials for applications that may only start, signal, query, read or cancel executions of the workflows you list, without the admin token. The file format is described in [Security](security.md#per-worker-identities) and [Security: client identities](security.md#client-identities).
 
 ### TLS
 
@@ -186,6 +190,127 @@ INFO orbit_runtime::server: ORBIT runtime listening addr=0.0.0.0:7233 tls=false
 ```
 
 The gRPC listener shares the engine, credentials, per-worker identities, TLS and mutual TLS settings with the HTTP API. Only the worker protocol is served over gRPC; the administrative API is HTTP only. The official SDKs use HTTP/JSON. See [Worker protocol](../reference/protocol.md).
+
+## Resource limits
+
+By default the server accepts as many executions, fan-out elements, history events and bytes as the host can hold. Four options cap them, so one workflow or one caller cannot exhaust the runtime. Each limit is off until you set it, and each can be set through its environment variable.
+
+| Option | Limits | When it is reached |
+|---|---|---|
+| `--max-active-executions` | Executions that are not terminal, held in memory. | A new start gets `429 RESOURCE_EXHAUSTED`. Nothing is recorded. |
+| `--max-fan-out` | Elements of one `for` step. | The step fails with `LIMIT_EXCEEDED` (not retried) before any element is scheduled. |
+| `--max-history-events` | Events in one execution's history. | A `LimitExceeded` event is recorded and the execution fails with `LIMIT_EXCEEDED`. |
+| `--max-payload-bytes` | Serialized JSON size of an execution input (after defaults are applied), a task result, or a signal payload. | The request gets `413 PAYLOAD_TOO_LARGE`. Nothing is recorded. |
+
+```bash
+orbit server --token "$ORBIT_TOKEN" \
+  --max-active-executions 10000 --max-fan-out 1000 \
+  --max-history-events 50000 --max-payload-bytes 262144
+```
+
+`--max-payload-bytes` is separate from `--max-body`: `--max-body` limits the whole HTTP request body and is enforced before the request is read, with a plain-text `413`; `--max-payload-bytes` limits the value inside it and answers with the JSON error envelope.
+
+### Active executions
+
+The limit applies to executions started through `POST /v1/executions` (and `orbit run`). Starting an `execution_id` that already exists is still answered with `200` and `"created": false` when the limit is reached, because it starts nothing. Child workflows are never refused, so a running parent can always start its children, but running children count toward the total.
+
+```console
+$ orbit server --token "$ORBIT_TOKEN" --max-active-executions 2
+$ curl -s -H "authorization: Bearer $ORBIT_TOKEN" -H 'content-type: application/json' \
+    -d '{"workflow":"Review","execution_id":"review-2","input":{"order_id":"2"}}' \
+    -w ' %{http_code}\n' http://127.0.0.1:7233/v1/executions
+{"error":{"code":"RESOURCE_EXHAUSTED","message":"2 executions are already running (--max-active-executions)"}} 429
+$ curl -s -H "authorization: Bearer $ORBIT_TOKEN" -H 'content-type: application/json' \
+    -d '{"workflow":"Review","execution_id":"review-1","input":{"order_id":"1"}}' \
+    -w ' %{http_code}\n' http://127.0.0.1:7233/v1/executions
+{"execution_id":"review-1","created":false} 200
+```
+
+Treat `429` as a signal to retry later with backoff, using the same `execution_id` so a retry never starts a second execution.
+
+### Fan-out
+
+```orbit
+task "labels.print" {
+    version "1.0.0"
+    input { sku: String }
+    output { label: String }
+}
+
+workflow PrintLabels {
+    version "1.0.0"
+    input { skus: List<String> }
+
+    step print {
+        for sku in input.skus
+        worker "labels.print"
+        with { sku: sku }
+    }
+
+    on failure {
+        step alert {
+            compute { code: failure.code, message: failure.message }
+        }
+    }
+}
+```
+
+With `--max-fan-out 3`, an execution with four SKUs fails at the `for` step. The failure aborts the execution like any other step failure: compensation and `on failure` handlers run.
+
+```console
+$ orbit logs labels-2
++     0ms   #1  WorkflowCreated           
++     0ms   #2  WorkflowStarted           
++     2ms   #3  StepFailed                step=print error=LIMIT_EXCEEDED `for` over 4 elements exceeds the fan-out limit of 3 (--max-fan-out)
++     2ms   #4  HandlersStarted           kind=failure
++     2ms   #5  StepSucceeded             step=on_failure:alert attempt=1
++     2ms   #6  WorkflowFailed            error=LIMIT_EXCEEDED step `print` failed: `for` over 4 elements exceeds the fan-out limit of 3 (--max-fan-out)
+```
+
+### History events
+
+The runtime checks the limit each time it decides what an execution does next. When the next events would take the history past the limit, it records `LimitExceeded` instead of scheduling more work. The execution then aborts as after a failure: steps that have not started are cancelled, in-flight attempts finish, succeeded steps are compensated, the `on failure` handler runs, and `WorkflowFailed` is recorded with `LIMIT_EXCEEDED`. The events of that shutdown are recorded even though they take the history past the limit, and so are results that workers report while the decision is pending, so a history can end a few events above the limit.
+
+With `--max-history-events 10`, the same workflow with three SKUs:
+
+```console
+$ orbit logs labels-3
++     0ms   #1  WorkflowCreated           
++     0ms   #2  WorkflowStarted           
++     1ms   #3  StepFanOut                step=print
++     1ms   #4  StepScheduled             step=print[0] attempt=1
++     1ms   #5  StepScheduled             step=print[1] attempt=1
++     1ms   #6  StepScheduled             step=print[2] attempt=1
++   2m14s   #7  StepDispatched            step=print[0] attempt=1 worker_id=printer
++   2m15s   #8  StepSucceeded             step=print[0] attempt=1
++   2m15s   #9  StepDispatched            step=print[1] attempt=1 worker_id=printer
++   2m15s  #10  StepSucceeded             step=print[1] attempt=1
++   2m15s  #11  StepDispatched            step=print[2] attempt=1 worker_id=printer
++   2m15s  #12  StepSucceeded             step=print[2] attempt=1
++   2m15s  #13  LimitExceeded             limit=max_history_events
++   2m15s  #14  StepCancelled             step=print
++   2m15s  #15  HandlersStarted           kind=failure
++   2m15s  #16  StepSucceeded             step=on_failure:alert attempt=1
++   2m15s  #17  WorkflowFailed            error=LIMIT_EXCEEDED the execution reached 10 history events (--max-history-events)
+```
+
+The limit protects the runtime from executions that never stop growing, such as a workflow that retries forever. Set it well above the size of your largest legitimate history: about three events per task attempt, plus one per fan-out step, signal and timer.
+
+### Payload size
+
+The size is the length of the value serialized as compact JSON. The check covers execution input, task results reported over HTTP and gRPC, and signal payloads:
+
+```console
+$ orbit server --token "$ORBIT_TOKEN" --max-payload-bytes 200
+$ curl -s ... http://127.0.0.1:7233/v1/executions
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"execution input is 414 bytes; the limit is 200 (--max-payload-bytes)"}} 413
+$ curl -s ... http://127.0.0.1:7233/v1/executions/review-1/signals/decision
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"signal payload is 277 bytes; the limit is 200 (--max-payload-bytes)"}} 413
+$ curl -s ... http://127.0.0.1:7233/v1/tasks/complete
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"task result is 312 bytes; the limit is 200 (--max-payload-bytes)"}} 413
+```
+
+A refused task result is not recorded: the attempt stays in flight, so the worker can report a smaller result or a failure with `POST /v1/tasks/fail` before the attempt's timeout. Over gRPC the same refusal is a status with the `orbit-error-code` metadata `PAYLOAD_TOO_LARGE` (see [HTTP API: gRPC binding](../reference/http-api.md#grpc-binding)). Error details sent with `POST /v1/tasks/fail` are not checked.
 
 ## Startup and recovery
 

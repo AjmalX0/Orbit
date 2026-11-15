@@ -70,7 +70,7 @@ attempt with `OUTPUT_CONTRACT_VIOLATION` if they do not match.
 
 Contracts are versioned independently of workflows. A worker receives a task
 only if it announced exactly that `name@version`. Names that start with
-`orbit.` are reserved for built-in tasks; v0.1 has one, `orbit.http.request`.
+`orbit.` are reserved for built-in tasks; there is one, `orbit.http.request`.
 See [Task contracts](../language/tasks.md).
 
 ## Worker
@@ -237,6 +237,16 @@ timeouts and idempotency keys. They are explicit business logic, such as a
 refund or a release of reserved stock, not a database rollback. See
 [Compensation](../language/compensation.md).
 
+## Outcome handler
+
+An outcome handler is a block of steps that runs once compensation has
+finished, when an execution fails (`on failure`), is cancelled (`on cancel`)
+or times out (`on timeout`), before the terminal status is recorded. Handler
+steps read a `failure` value (`reason`, `code`, `message`) and the outputs of
+the workflow steps that succeeded. Their units are `on_<kind>:<step>`, for
+example `on_failure:tell_customer`. A failing handler step does not change
+the execution's outcome. See [Outcome handlers](../language/handlers.md).
+
 ## Fan-out element
 
 A `for` step (`for item in input.items`) runs its task once per list element.
@@ -266,7 +276,7 @@ the parent cancels its running children. See
 | Workflow | a compilation | `name` and `version` |
 | Definition | the runtime | `name@version` and `definition_hash` |
 | Execution | a definition | execution id |
-| Unit | an execution | unit key (`step`, `step[i]`, `compensate:step`) |
+| Unit | an execution | unit key (`step`, `step[i]`, `compensate:step`, `on_failure:step`) |
 | Signal | an execution's buffer | name, and the sequence number of its `SignalReceived` event |
 | Query | a workflow | name |
 | Attempt | a unit | attempt number |
@@ -279,6 +289,7 @@ the parent cancels its running children. See
 - [Quick start](quickstart.md)
 - [Steps](../language/steps.md)
 - [Signals and queries](../language/signals.md)
+- [Outcome handlers](../language/handlers.md)
 - [Delivery guarantees](../runtime/guarantees.md)
 - [Executions and history](../runtime/executions.md)
 - [Worker protocol](../reference/protocol.md)

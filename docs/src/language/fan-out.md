@@ -150,9 +150,26 @@ is bound to that element. Each element's compensation is a unit keyed
 
 ## Filtering
 
-ORBIT v0.1 has no per-element filter (such as `for x in xs where ...`). To
-process only some elements, compute the filtered list in a previous step and
-iterate over that step's output.
+`for` has no per-element filter clause (such as `for x in xs where ...`). To
+process only some elements, iterate over a filtered list, written with the
+built-in `filter` and a lambda:
+
+```orbit
+import "contracts.orbit"
+
+workflow ReserveInStock {
+    version "1.0.0"
+    input { order_id: String, items: List<LineItem> }
+
+    step reserve {
+        for item in filter(input.items, i => i.quantity > 0)
+        worker "inventory.reserve"
+        with { order_id: input.order_id, items: [item] }
+    }
+}
+```
+
+A lambda makes the workflow compile to `orbit-ir/2` ([Versioning](versioning.md)). See [Built-in functions](functions.md).
 
 ## See also
 

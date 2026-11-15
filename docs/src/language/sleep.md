@@ -84,7 +84,7 @@ error: compilation failed: 1 error(s), 0 warning(s)
 
 ## Waiting until a point in time
 
-ORBIT v0.1 has no "sleep until" form, and expressions cannot read the clock,
+ORBIT has no "sleep until" form, and expressions cannot read the clock,
 so a sleep duration cannot be computed from a timestamp. To run work at a
 specific time, start the execution at that time from an external scheduler.
 

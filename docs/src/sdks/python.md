@@ -263,7 +263,9 @@ the thread.
 ## Starting workflows from Python
 
 `Client` calls the runtime's HTTP API. Starting executions requires the admin
-token, so pass it explicitly when the environment also holds a worker token:
+token or the token of a [client identity](../runtime/security.md#client-identities)
+granted `start` for the workflow. Pass it explicitly when the environment also
+holds a worker token; a client token is passed exactly like the admin token:
 
 ```python
 import os
@@ -283,8 +285,10 @@ execution instead of creating a duplicate.
 ### Signals and queries
 
 `signal` sends a typed signal declared with `signal <name> { ... }` in the
-workflow, and `query` evaluates a declared query. Both need the admin token
-when authentication is enabled.
+workflow, and `query` evaluates a declared query. When authentication is
+enabled, both need the admin token, or a client token granted `signal` or
+`query` for the execution's workflow, and `wait` needs `read`. A refused request raises `ApiError`
+with status `403` and code `FORBIDDEN`.
 
 ```python
 import os

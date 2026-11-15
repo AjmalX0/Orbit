@@ -278,7 +278,8 @@ and for a `for` step it is the output of the element being compensated. See
 
 At runtime each step is one or more *units*. A plain step is one unit, keyed by
 its name. A `for` step has one unit per element, keyed `name[0]`, `name[1]`,
-and so on. A compensation is a unit keyed `compensate:<unit>`. Unit keys appear
+and so on. A compensation is a unit keyed `compensate:<unit>`, and a step of
+an [outcome handler](handlers.md) is keyed `on_<kind>:<step>`. Unit keys appear
 in `orbit status`, `orbit logs`, idempotency keys and child execution ids.
 
 A unit moves through these states:

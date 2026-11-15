@@ -1,6 +1,6 @@
 # Security
 
-The runtime authenticates every caller, separates administrators from workers, and can give each worker its own credential that limits which tasks it may serve. Traffic can be encrypted with TLS, and workers can authenticate with client certificates over mutual TLS. This page describes each mechanism, what each kind of caller can do, and a checklist for production.
+The runtime authenticates every caller, separates administrators from workers, and can give each worker its own credential that limits which tasks it may serve, and each application its own credential that limits which workflows it may start and act on. Traffic can be encrypted with TLS, and workers can authenticate with client certificates over mutual TLS. This page describes each mechanism, what each kind of caller can do, and a checklist for production.
 
 ## Threat model
 
@@ -9,16 +9,20 @@ The runtime owns all workflow state. Workers run your business logic on other ho
 - a compromised worker host cannot start, cancel or read executions, or register workflows;
 - a worker with its own identity cannot impersonate another worker, serve tasks it was not assigned, or report results for tasks issued to someone else;
 - no credential is stored in plain text on the runtime host, apart from the admin and shared worker tokens you pass in;
-- nothing a worker sends can change workflow state except through validated results for tokens issued to it.
+- nothing a worker sends can change workflow state except through validated results for tokens issued to it;
+- an application with a client identity can act only on the workflows it was granted, and cannot deploy workflows or act as a worker;
+- no single caller or workflow can exhaust the runtime, when [resource limits](server.md#resource-limits) are set.
 
 ## Credentials
 
 | Credential | Configured with | Who uses it |
 |---|---|---|
-| Admin token | `--token` / `ORBIT_TOKEN` | Operators, the `orbit` CLI, CI pipelines and applications that deploy workflows and start executions. |
+| Admin token | `--token` / `ORBIT_TOKEN` | Operators, the `orbit` CLI, CI pipelines that deploy workflows, and applications without a client identity. |
 | Shared worker token | `--worker-token` / `ORBIT_WORKER_TOKEN` | Worker hosts, when you do not need per-worker identities. |
 | Per-worker token | a `token_sha256` entry in `--workers-file` | One worker identity. |
 | Client certificate | a `client_cert` entry in `--workers-file`, with `--tls-client-ca` | One worker identity, over mutual TLS. |
+| Client identity token | a `token_sha256` entry of a `[[client]]` table in `--workers-file` | One application, limited to the execution API for some workflows. |
+| Client identity certificate | a `client_cert` entry of a `[[client]]` table, with `--tls-client-ca` | One application, over mutual TLS. |
 
 Tokens are sent as `Authorization: Bearer <token>` (an HTTP header, or gRPC metadata). Comparisons are constant-time.
 
@@ -60,7 +64,7 @@ It requires `--token` (otherwise the administrative endpoints would be open) and
 
 ## Per-worker identities
 
-A workers file gives each worker its own credential and limits:
+A workers file gives each worker its own credential and limits. The same file can also declare [client identities](#client-identities) for applications.
 
 ```toml
 # /etc/orbit/workers.toml
@@ -142,6 +146,92 @@ A per-worker identity (by token or by certificate) can call only `/v1/workers/*`
 
 All of these return `403 FORBIDDEN`.
 
+## Client identities
+
+The admin token can do everything, including deploying workflows and reading every execution. An application that only needs to start and follow some workflows should have a client identity instead: a `[[client]]` entry in the same workers file, with its own credential, the workflows it may act on and the actions it may take.
+
+```toml
+# /etc/orbit/workers.toml
+
+[[client]]
+id = "warehouse-app"
+token_sha256 = "4854f0bb0c1dd54b3884060e1a136550851354eccf27e8d1a5a6307b7f522df1"
+workflows = ["Print*"]
+# actions defaults to ["start", "signal", "query", "read"]
+
+[[client]]
+id = "ops-console"
+client_cert = "ops-console.clients.internal"
+workflows = ["*"]
+actions = ["read", "cancel"]
+```
+
+```bash
+orbit server --token "$ORBIT_TOKEN" --workers-file /etc/orbit/workers.toml
+```
+
+### Client fields
+
+Each `[[client]]` table accepts exactly these fields. Unknown fields are rejected.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `id` | string | yes | Client name, used in error messages. Must not be empty, and must be unique in the file across workers and clients. |
+| `token_sha256` | string | one of `token_sha256` or `client_cert` | Hex SHA-256 of the client's bearer token, 64 characters (case-insensitive). |
+| `client_cert` | string | one of `token_sha256` or `client_cert` | Certificate name for mutual TLS, matched like a worker's `client_cert`. |
+| `workflows` | array of strings | yes, at least one | Workflow name patterns: an exact name (`Refund`), a prefix ending in `*` (`Invoice*` matches `InvoiceMonthly`), or `*` for every workflow. |
+| `actions` | array of strings | no | Granted actions, from `start`, `signal`, `query`, `read` and `cancel`. Default: `start`, `signal`, `query` and `read`. `cancel` must be granted explicitly. |
+
+The server refuses to start when an entry is invalid:
+
+```console
+$ orbit server --token t --workers-file bad.toml
+error: bad.toml: client `app`: unknown action `deploy` (allowed: start, signal, query, read, cancel)
+```
+
+Other messages: ``client `app` needs `token_sha256` or `client_cert` ``, ``client `app`: `token_sha256` must be 64 hex characters (use `orbit token`)``, ``client `app` must list at least one workflow pattern``, ``a client has an empty `id` ``, ``identity `x` is declared twice`` (a client reuses the id of a worker or of another client), and TOML parse errors such as ``missing field `workflows` ``. A workers file requires `--token`, even when it declares only clients.
+
+### Generating a client token
+
+`orbit token` prints a new token on stdout. Give the token to the application and put its SHA-256 in the entry:
+
+```bash
+TOKEN=$(orbit token 2>/dev/null)
+printf %s "$TOKEN" | sha256sum | cut -d' ' -f1
+```
+
+The `token_sha256` line of the `[[worker]]` entry that `orbit token` prints on stderr is the same hash, so you can also copy it into a `[[client]]` table.
+
+### What a client identity may do
+
+A client identity can use only the execution API, for workflows that match one of its `workflows` patterns:
+
+| Request | Needs |
+|---|---|
+| Start an execution (`POST /v1/executions`, `orbit run`) | `start` |
+| Send a signal (`orbit signal`) | `signal` |
+| Evaluate a query (`orbit query`) | `query` |
+| Read an execution, its history, or wait for it (`orbit status`, `logs`, `inspect`, `run` without `--no-wait`); read a workflow definition | `read` |
+| Cancel an execution (`orbit cancel`) | `cancel` |
+| List executions or workflows (`orbit ps`) | nothing; the list shows only workflows it may `read` |
+
+For a request about an existing execution, the workflow is the execution's workflow. Everything else is refused with `403 FORBIDDEN`: deploying workflows, `GET /v1/workers`, `/v1/metrics`, the worker protocol over HTTP (`/v1/workers/*`, `/v1/tasks/*`) and the gRPC binding.
+
+```console
+$ export ORBIT_TOKEN=$WAREHOUSE_TOKEN
+$ orbit run PrintLabels --id labels-9 --no-wait --input '{"skus":["A"]}'
+started execution labels-9
+labels-9
+$ orbit run Review --no-wait --input '{"order_id":"1"}'
+error: FORBIDDEN (403): client `warehouse-app` may not start executions of `Review`
+$ orbit deploy labels.orbit
+error: FORBIDDEN (403): client `warehouse-app` may only use the execution API (start, signal, query, read, cancel)
+$ curl -s -X POST -H "authorization: Bearer $WAREHOUSE_TOKEN" http://127.0.0.1:7233/v1/executions/labels-1/cancel
+{"error":{"code":"FORBIDDEN","message":"client `warehouse-app` may not cancel executions of `PrintLabels`"}}
+```
+
+The SDKs' `Client` classes authenticate with a client token the same way as with the admin token: pass it as the client's token. Workers cannot use a client token; give them a worker identity.
+
 ## TLS
 
 ```bash
@@ -180,7 +270,8 @@ orbit server --token "$ORBIT_TOKEN" \
 
 - Client certificates signed by the CA in `--tls-client-ca` are verified during the TLS handshake.
 - A verified certificate identifies the worker whose `client_cert` matches one of its DNS subject alternative names or subject common names.
-- A verified certificate that matches no worker is refused with `403` on every endpoint, including `/v1/health`: ``the client certificate is valid but matches no worker in the workers file``.
+- A verified certificate that matches no `[[worker]]` entry identifies the `[[client]]` entry whose `client_cert` matches it, if any (worker entries are checked first).
+- A verified certificate that matches neither is refused with `403` on every endpoint, including `/v1/health`: ``the client certificate is valid but matches no worker or client in the workers file``.
 - Client certificates are optional at the TLS layer. A client without a certificate can still connect and authenticate with a token, which is how the admin CLI and health probes connect.
 - When a request carries both a bearer token and a certificate, the token is checked first.
 - `--tls-client-ca` requires a workers file with at least one entry, and `--tls-cert`.
@@ -199,26 +290,39 @@ Every SDK supports client certificates through `ORBIT_CLIENT_CERT` and `ORBIT_CL
 
 ## Permission matrix
 
-| Endpoint | No auth configured | Admin token | Shared worker token | Per-worker identity | No or invalid credential (auth configured) |
-|---|---|---|---|---|---|
-| `GET /v1/health` | yes | yes | yes | yes | yes |
-| `GET /v1/metrics` | yes | yes | 403 | 403 | 401 |
-| `POST`/`GET /v1/workflows...` | yes | yes | 403 | 403 | 401 |
-| `POST`/`GET /v1/executions...`, cancel, history, wait | yes | yes | 403 | 403 | 401 |
-| `GET /v1/workers` | yes | yes | 403 | 403 | 401 |
-| `POST /v1/workers/register` | yes | yes | yes, any id and tasks | own id, allowed tasks, required runtime | 401 |
-| `POST /v1/workers/heartbeat`, `poll`, `unregister` | yes | yes | yes | own sessions only | 401 |
-| `POST /v1/tasks/complete`, `fail` | yes | yes | yes | own tokens only | 401 |
+| Endpoint | No auth configured | Admin token | Shared worker token | Per-worker identity | Client identity | No or invalid credential (auth configured) |
+|---|---|---|---|---|---|---|
+| `GET /v1/health` | yes | yes | yes | yes | yes | yes |
+| `GET /v1/metrics` | yes | yes | 403 | 403 | 403 | 401 |
+| `POST /v1/workflows` | yes | yes | 403 | 403 | 403 | 401 |
+| `GET /v1/workflows` | yes | yes | 403 | 403 | filtered to readable workflows | 401 |
+| `GET /v1/workflows/{name}...` | yes | yes | 403 | 403 | with `read` | 401 |
+| `POST /v1/executions` | yes | yes | 403 | 403 | with `start` | 401 |
+| `GET /v1/executions` | yes | yes | 403 | 403 | filtered to readable workflows | 401 |
+| `GET /v1/executions/{id}`, `history`, `wait` | yes | yes | 403 | 403 | with `read` | 401 |
+| `POST /v1/executions/{id}/signals/{name}` | yes | yes | 403 | 403 | with `signal` | 401 |
+| `GET /v1/executions/{id}/queries/{name}` | yes | yes | 403 | 403 | with `query` | 401 |
+| `POST /v1/executions/{id}/cancel` | yes | yes | 403 | 403 | with `cancel` | 401 |
+| `GET /v1/workers` | yes | yes | 403 | 403 | 403 | 401 |
+| `POST /v1/workers/register` | yes | yes | yes, any id and tasks | own id, allowed tasks, required runtime | 403 | 401 |
+| `POST /v1/workers/heartbeat`, `poll`, `unregister` | yes | yes | yes | own sessions only | 403 | 401 |
+| `POST /v1/tasks/complete`, `fail` | yes | yes | yes | own tokens only | 403 | 401 |
+| gRPC worker protocol | yes | yes | yes | as over HTTP | `PERMISSION_DENIED` | `UNAUTHENTICATED` |
 
-A client certificate that is verified but matches no worker gets `403` everywhere.
+"with `start`" and the like mean: when the workflow matches one of the client's patterns and the action is granted; otherwise `403`. A client certificate that is verified but matches no worker or client gets `403` everywhere.
 
 ## Input validation and limits
 
 - Request bodies are limited to `--max-body` bytes (4 MiB by default); larger requests get `413`.
+- With `--max-payload-bytes`, an execution input, a task result (over HTTP or gRPC) or a signal payload larger than the limit, as compact JSON, is refused with `413 PAYLOAD_TOO_LARGE` and not recorded.
+- With `--max-active-executions`, a start beyond the limit gets `429 RESOURCE_EXHAUSTED`. Restarting an existing `execution_id` and starting child workflows are never refused.
+- With `--max-fan-out`, a `for` step over a longer list fails with `LIMIT_EXCEEDED`; with `--max-history-events`, an execution whose history reaches the limit fails with `LIMIT_EXCEEDED`. Compensation and `on failure` handlers still run.
 - Execution input is validated strictly against the workflow's input type. Step inputs are validated against task input contracts before dispatch, and worker output against task output contracts before it is accepted.
 - Execution ids are limited to 200 characters of letters, digits, `-`, `_`, `.` and `:`.
 - Workers cannot announce built-in tasks (`orbit.*`) or child-workflow contracts (`RESERVED_TASK`).
 - Results are accepted only for tokens the runtime issued; stale and duplicate results are recorded and ignored.
+
+The limits are off by default. Set them on any server that untrusted or many callers can reach. See [Running the server: resource limits](server.md#resource-limits).
 
 ## HTTP adapter
 
@@ -235,13 +339,15 @@ The built-in `orbit.http.request` task is off by default. When enabled with `--e
 
 1. Set `--token` (or `ORBIT_TOKEN`) to a value from `orbit token`, stored in a secret manager.
 2. Give workers per-worker identities (`--workers-file`) with the narrowest `tasks` patterns, or at least a shared `--worker-token`. Never give workers the admin token.
-3. Serve TLS with `--tls-cert` and `--tls-key`. Use mutual TLS (`--tls-client-ca`) for worker identities where your PKI allows it.
-4. Use `sslmode=require` for PostgreSQL, with `ORBIT_DB_CA_CERT` for a private CA.
-5. Keep the HTTP adapter disabled unless you need it.
-6. Do not pass `--insecure`.
-7. Restrict network access to the API port to the hosts that need it. `/v1/metrics` requires the admin token, so give your monitoring system a way to send it, or scrape through a proxy that adds it.
-8. Protect the database and its backups as sensitive data: they contain every input and output.
-9. Rotate a token by changing the server's configuration (or the workers file), restarting the server, and giving the new token to its holders. Requests with the old token get `401`, so restart each worker with its new token.
+3. Give applications that start or follow executions client identities (`[[client]]`) with the narrowest `workflows` patterns and actions, and keep the admin token for operators and deployment pipelines.
+4. Set resource limits (`--max-active-executions`, `--max-fan-out`, `--max-history-events`, `--max-payload-bytes`) that fit your largest legitimate workload.
+5. Serve TLS with `--tls-cert` and `--tls-key`. Use mutual TLS (`--tls-client-ca`) for worker identities where your PKI allows it.
+6. Use `sslmode=require` for PostgreSQL, with `ORBIT_DB_CA_CERT` for a private CA.
+7. Keep the HTTP adapter disabled unless you need it.
+8. Do not pass `--insecure`.
+9. Restrict network access to the API port to the hosts that need it. `/v1/metrics` requires the admin token, so give your monitoring system a way to send it, or scrape through a proxy that adds it.
+10. Protect the database and its backups as sensitive data: they contain every input and output.
+11. Rotate a token by changing the server's configuration (or the workers file), restarting the server, and giving the new token to its holders. Requests with the old token get `401`, so restart each worker with its new token.
 
 To report a vulnerability, follow the [security policy](https://github.com/AjmalX0/Orbit/blob/main/SECURITY.md): use GitHub's private vulnerability reporting, not a public issue.
 
@@ -250,5 +356,6 @@ To report a vulnerability, follow the [security policy](https://github.com/Ajmal
 - [Running the server](server.md)
 - [Deployment](deployment.md)
 - [HTTP API: authentication](../reference/http-api.md#authentication)
+- [Running the server: resource limits](server.md#resource-limits)
 - [Environment variables](../reference/environment.md)
 - [How workers work](../sdks/overview.md)

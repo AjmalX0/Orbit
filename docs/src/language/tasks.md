@@ -181,7 +181,7 @@ receiving the task. See [Versioning](versioning.md).
 
 ## Built-in tasks
 
-Built-in tasks run inside the runtime instead of on a worker. ORBIT v0.1 has
+Built-in tasks run inside the runtime instead of on a worker. There is
 one, `orbit.http.request`, declared in the prelude that every compilation
 includes:
 

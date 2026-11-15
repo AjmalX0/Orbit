@@ -61,7 +61,7 @@ declarations and nothing else.
 
 | Block | Runs when | `failure.reason` |
 |-------|-----------|------------------|
-| `on failure` | A step fails permanently, or a resource limit is reached | `failed` |
+| `on failure` | A step fails permanently, or a [resource limit](../runtime/server.md#resource-limits) is reached (`LIMIT_EXCEEDED`) | `failed` |
 | `on cancel` | The execution is cancelled (`orbit cancel`, the HTTP API, or a cancelled parent) | `cancelled` |
 | `on timeout` | The workflow `timeout` passes | `timed_out` |
 
@@ -74,7 +74,7 @@ directly, after every step has finished; no handler runs in that case.
 
 | Name | Type | Notes |
 |------|------|-------|
-| `failure` | `{ reason: String, code: String, message: String }` | Why the execution is ending. For a failed step, `code` is the step's error code and `message` names the step; a cancellation has code `CANCELLED` and the cancellation reason as message; a timeout has code `WORKFLOW_TIMEOUT`. |
+| `failure` | `{ reason: String, code: String, message: String }` | Why the execution is ending. For a failed step, `code` is the step's error code and `message` names the step (``step `charge` failed: ...``); a history limit has code `LIMIT_EXCEEDED` and the limit's message; a cancellation has code `CANCELLED` and the cancellation reason as message; a timeout has code `WORKFLOW_TIMEOUT` and the message `workflow timed out`. |
 | `input` | the workflow input | Unchanged. |
 | `execution` | `{ id, workflow, version }` | As everywhere else. |
 | a workflow step, e.g. `charge` | that step's type, made optional | A workflow step may not have run, or may have failed: inside handlers every workflow step reads as `null` unless it succeeded. Use `is_null` and `coalesce`. |
@@ -131,6 +131,7 @@ steps still run.
 | `after` may only name steps of the same block | `E0303` |
 | Handler steps run a `worker` task, a `compute` expression or a `sleep`; `await`, child workflows, `for` and `max_parallel` are not allowed | `E0307` |
 | Handler steps cannot declare `compensate` | `E0308` |
+| `failure` is read only inside handler steps | `E0401` |
 
 ```text
 error[E0307]: `await` is not allowed in an `on failure` step
@@ -148,6 +149,7 @@ Workflows that declare handlers compile to `orbit-ir/2`; see
 
 - [Compensation](compensation.md)
 - [Retries and timeouts](retries-timeouts.md)
-- [Executions and history](../runtime/executions.md)
+- [Executions and history](../runtime/executions.md#handler-events)
+- [Running the server: resource limits](../runtime/server.md#resource-limits)
 - [Compiler diagnostics](../reference/diagnostics.md)
 - [Testing workflows](../tooling/testing.md)

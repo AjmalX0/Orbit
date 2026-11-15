@@ -100,7 +100,18 @@ At the top level of a file, only `import`, `schema`, `task` and `workflow` decla
 
 ### E0105: unsupported handler
 
-`on event` and `on failure` handlers are reserved syntax but are not supported in ORBIT v0.1. Use `compensate` blocks and retry policies instead.
+An `on` member names a handler kind other than `failure`, `cancel` or `timeout`. Message: ``` `on success` handlers are not supported ```, with help ``use `on failure`, `on cancel` or `on timeout` ``.
+
+```text
+error[E0105]: `on success` handlers are not supported
+ --> notify.orbit:4:5
+  |
+4 |     on success {
+  |     ^^^^^^^^^^^^
+  = help: use `on failure`, `on cancel` or `on timeout`
+```
+
+To run steps after a successful execution, make them ordinary steps that depend on the others. See [Outcome handlers](../language/handlers.md).
 
 ### E0106: duplicate member
 
@@ -156,15 +167,15 @@ A step has no action. Message: ``step `a` does nothing``, with help ``add `worke
 
 ### E0302: duplicate step name
 
-Two steps in the same workflow have the same name. Message: ``step `a` is defined more than once``.
+Two steps in the same workflow, or in the same handler block, have the same name. Message: ``step `a` is defined more than once``. A handler step that has the name of a workflow step, of a reserved name or `failure` gets ``handler step `a` has the same name as a workflow step or a reserved name``, with help ``give handler steps their own names, e.g. `alert_ops` ``.
 
 ### E0303: unknown step in after
 
-An `after` clause names a step that does not exist. Message: ``` `after` references unknown step `validte` ```.
+An `after` clause names a step that does not exist. Message: ``` `after` references unknown step `validte` ```. Inside an `on failure`, `on cancel` or `on timeout` block, `after` may only name steps of the same block: ``` `after` in an `on cancel` block must name a step of the same block ```, with the note `workflow steps have all finished before a handler runs`.
 
 ### E0304: circular dependency
 
-Steps depend on each other in a cycle, through `after` or through data references. The note prints the cycle. Remove one of the dependencies.
+Steps depend on each other in a cycle, through `after` or through data references. The note prints the cycle. Remove one of the dependencies. Between the steps of a handler block, the message is `circular dependency between handler steps`.
 
 ### E0305: step depends on itself
 
@@ -176,11 +187,11 @@ A step is named `input`, `execution`, `output`, `if`, `then` or `else`. These na
 
 ### E0307: member not allowed here
 
-A member is valid ORBIT but not in this position. Examples: `retry` on a `sleep` step, `when` or `for` inside `compensate`, `retry`, `using`, `idempotency_key` or `queue_timeout` on a `workflow` step, `for` on a `sleep` step, and `max_parallel` without `for` (help: ``add `for item in <list>` to fan the step out``). An `await` step takes only `after`, `when` and `timeout` (``` `retry` is not allowed in an `await` step ```; for `for`, the note ``an `await` step receives one signal``). A `compute` step takes no `with`, `using`, `timeout`, `queue_timeout`, `retry` or `idempotency_key` (``` `timeout` is not allowed in a `compute` step ```). See [Signals and queries](../language/signals.md#members-of-an-await-step) and [Compute steps](../language/compute.md#members).
+A member is valid ORBIT but not in this position. Examples: `retry` on a `sleep` step, `when` or `for` inside `compensate`, `retry`, `using`, `idempotency_key` or `queue_timeout` on a `workflow` step, `for` on a `sleep` step, and `max_parallel` without `for` (help: ``add `for item in <list>` to fan the step out``). An `await` step takes only `after`, `when` and `timeout` (``` `retry` is not allowed in an `await` step ```; for `for`, the note ``an `await` step receives one signal``). A `compute` step takes no `with`, `using`, `timeout`, `queue_timeout`, `retry` or `idempotency_key` (``` `timeout` is not allowed in a `compute` step ```). Handler steps take no `await` (``` `await` is not allowed in an `on timeout` step ```, with the note `handlers run while the execution is finishing; it no longer accepts signals`), no child workflow (``child workflows are not allowed in an `on failure` step``), no `for` and no `max_parallel`. See [Signals and queries](../language/signals.md#members-of-an-await-step), [Compute steps](../language/compute.md#members) and [Outcome handlers](../language/handlers.md#rules).
 
 ### E0308: invalid compensation
 
-A compensation cannot run as written: a `sleep`, `await` or `compute` step has a `compensate` block (``a `compute` step has nothing to compensate``), the block has no `worker` (``` `compensate` block needs a `worker` ```), it calls something other than a worker task (`compensation must call a worker task`), or it reads a step that is not an ancestor of the compensated step.
+A compensation cannot run as written: a `sleep`, `await` or `compute` step has a `compensate` block (``a `compute` step has nothing to compensate``), the block has no `worker` (``` `compensate` block needs a `worker` ```), it calls something other than a worker task (`compensation must call a worker task`), or it reads a step that is not an ancestor of the compensated step. Steps of an `on failure`, `on cancel` or `on timeout` block cannot be compensated: ``handler steps cannot declare `compensate` ``.
 
 ### E0310: task input or output is not a record
 
@@ -221,6 +232,20 @@ A workflow declares two signals with the same name. Message: ``signal `review` i
 
 A workflow declares two queries with the same name. Message: ``query `state` is declared more than once``; a label marks the first declaration.
 
+### E0319: duplicate handler
+
+A workflow declares two `on` blocks of the same kind. Message: ``` `on failure` is declared more than once ```; a label marks the first declaration. Merge the steps into one block.
+
+```text
+error[E0319]: `on failure` is declared more than once
+ --> notify.orbit:7:8
+  |
+7 |     on failure {
+  |        ^^^^^^^
+4 |     on failure {
+  |        ------- first declared here
+```
+
 ### W0301: unknown worker language
 
 A `using` clause names a language ORBIT does not recognize. Message: ``unknown worker language `pyhton` ``. The step still compiles, but it is dispatched only to workers that announce exactly that runtime.
@@ -233,7 +258,7 @@ A value has the wrong type. Message: ``type mismatch: expected `Int`, found `Str
 
 ### E0401: unknown reference
 
-An expression names something that is not `input`, `execution`, a step, or a loop variable in scope. It is also reported when a `for` loop variable is used in the step's `when` condition (``loop variable `item` is not in scope in `when` ``): `when` decides once, before the step fans out, whether the whole step runs.
+An expression names something that is not `input`, `execution`, a step, or a loop variable in scope. `failure` is in scope only in the steps of `on failure`, `on cancel` and `on timeout` blocks; elsewhere it is ``unknown reference `failure` ``. It is also reported when a `for` loop variable is used in the step's `when` condition (``loop variable `item` is not in scope in `when` ``): `when` decides once, before the step fans out, whether the whole step runs.
 
 ### E0402: unknown field
 

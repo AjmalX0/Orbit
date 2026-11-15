@@ -168,7 +168,7 @@ dispatched. Each dispatch issues a new `token`.
 | `execution_id` | string | The workflow execution. |
 | `workflow` | string | Workflow name. |
 | `workflow_version` | string | Workflow version. |
-| `step_id` | string | The unit being executed: `<step>`, `<step>[<i>]` for a fan-out element, or `compensate:<unit>` for a compensation. |
+| `step_id` | string | The unit being executed: `<step>`, `<step>[<i>]` for a fan-out element, `compensate:<unit>` for a compensation, or `on_<kind>:<step>` for a step of an `on failure`, `on cancel` or `on timeout` handler. |
 | `task_name` | string | The task to run. |
 | `contract_version` | string | The task's contract version. |
 | `input` | any JSON value | The task input, already validated against the contract's input schema. |

@@ -88,6 +88,24 @@ protocol. Use the admin token for the CLI. A per-worker identity from
 `--workers-file` is also refused with `403` when it registers under another
 worker's id or announces a task its patterns do not allow.
 
+```text
+error: FORBIDDEN (403): client `warehouse-app` may not start executions of `Review`
+```
+
+The token belongs to a client identity (`[[client]]` in the workers file),
+which may act only on the workflows and actions its entry grants, and never
+deploy workflows or call the worker protocol. Add the workflow or action to
+the entry and restart the server, or use the admin token. See
+[Security: client identities](runtime/security.md#client-identities).
+
+```text
+error: RESOURCE_EXHAUSTED (429): 2 executions are already running (--max-active-executions)
+```
+
+The server runs with `--max-active-executions` and that many executions are
+running. Retry later with the same execution id, or raise the limit. See
+[Resource limits](runtime/server.md#resource-limits).
+
 ### A step stays SCHEDULED: no worker for the task
 
 `orbit run` keeps waiting, and `orbit status` shows the step as `SCHEDULED`
@@ -275,12 +293,16 @@ an API that deduplicates on it. See [Delivery guarantees](runtime/guarantees.md)
 
 ### Can I run several runtime nodes?
 
-Not yet. The runtime is a single process that owns all workflow state.
-You can run any number of workers against it, and store state in PostgreSQL
-instead of SQLite, but run only one `orbit server` per database.
-Multiple runtime nodes sharing PostgreSQL are planned. Until then, run one
-runtime with a restart policy; after a restart it recovers every unfinished
-execution from history. See [Deployment](runtime/deployment.md).
+Yes, for availability, with PostgreSQL. Start every server with `--cluster`
+and the same `--db postgres://...`: one is elected leader and runs the engine,
+the others stand by, serve read-only routes and take over within about a
+second if the leader stops. Only one server executes workflows at a time, so
+cluster mode does not add throughput. Put a load balancer in front that checks
+`GET /v1/ready`. See [Running several servers](runtime/cluster.md).
+
+Without `--cluster`, run only one `orbit server` per database, with a restart
+policy; after a restart it recovers every unfinished execution from history.
+See [Deployment](runtime/deployment.md).
 
 ### How does ORBIT compare with Temporal?
 
@@ -296,8 +318,10 @@ differences:
 | Signals and queries | Declared in the workflow with typed payloads and results; every `await`, every use of a payload field and every query expression is type-checked at compile time, and the runtime validates each payload against its declaration | Defined in workflow code through SDK handlers |
 | Static checks | Type checking plus warnings for missing compensations, constant conditions, unused signals and unbounded waits (`orbit check --strict`) | The host language's type checker and tooling |
 | Changing a workflow | A new immutable `name@version`; running executions keep their definition; `orbit compat` reports breaking changes | Versioning APIs and worker build IDs |
-| Deployment | One binary with SQLite or PostgreSQL; single node | A multi-service cluster with several supported databases |
-| Features not yet in ORBIT | | Updates, schedules, a web UI, multi-node clusters |
+| Failure handling | Compensation per step, then `on failure`, `on cancel` and `on timeout` handler steps | Code in the workflow, such as `try`/`catch` and cancellation scopes |
+| Testing | `test` declarations run by `orbit test` with mocked tasks and simulated time; `orbit simulate` and `orbit replay` | SDK test frameworks with time skipping, and replay testing |
+| Deployment | One binary with SQLite or PostgreSQL; one server, or active/standby servers on PostgreSQL | A multi-service cluster with several supported databases |
+| Features not yet in ORBIT | | Updates, schedules, a web UI, horizontally scaled execution |
 
 ORBIT suits processes that you want to read, review and check as a whole,
 across services in different languages. Temporal is a mature platform that

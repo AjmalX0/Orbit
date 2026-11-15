@@ -38,7 +38,12 @@ workflow_member  = "version" , [ ":" ] , STRING
                  | "signal" , IDENTIFIER , record_body           (* typed message the execution accepts *)
                  | "query" , IDENTIFIER , [ "=" | ":" ] , expression   (* read-only view; written with "=" *)
                  | "return" , expression
-                 | "on" , IDENTIFIER , [ STRING ] , block ;      (* reserved; rejected (E0105) *)
+                 | "on" , ( "failure" | "cancel" | "timeout" ) , "{" , { step_decl , [ sep ] } , "}" ;
+                   (* outcome handler: at most one block per kind (E0319); other
+                      kinds are rejected (E0105). Handler steps take a worker,
+                      compute or sleep action; no await, child workflow, for,
+                      max_parallel or compensate (E0307, E0308); `after` names
+                      steps of the same block (E0303). *)
 
 step_decl        = "step" , IDENTIFIER , "{" , { step_member , [ sep ] } , "}" ;
 step_member      = action

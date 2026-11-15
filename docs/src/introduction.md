@@ -128,12 +128,25 @@ precise rules.
 
 ## Current scope
 
-The runtime runs on a single node. Workflows can wait for typed signals,
-answer typed queries and compute values without a worker; see
-[Signals and queries](language/signals.md) and
-[Compute steps](language/compute.md). Multi-node execution sharing PostgreSQL,
-and `orbit test` / `orbit replay` / `orbit simulate`, are planned for later
-versions.
+Workflows can wait for typed signals, answer typed queries, compute values
+without a worker, and run `on failure`, `on cancel` and `on timeout` handlers
+after compensation; see [Signals and queries](language/signals.md),
+[Compute steps](language/compute.md) and
+[Outcome handlers](language/handlers.md). `orbit test` runs workflow tests
+in-process with mocked tasks and simulated time, `orbit simulate` runs a
+workflow locally with mocked or generated results, and `orbit replay` checks a
+recorded history against the current decider; see
+[Testing workflows](tooling/testing.md), [Simulation](tooling/simulate.md) and
+[Replay](tooling/replay.md).
+
+One server executes workflows at a time. For availability, several servers
+can share one PostgreSQL database in active/standby mode: one leader runs the
+engine, and a standby takes over if it stops. See
+[Running several servers](runtime/cluster.md). The server can cap active
+executions, fan-out, history length and payload sizes, and can give
+applications client identities limited to some workflows; see
+[Running the server](runtime/server.md#resource-limits) and
+[Security](runtime/security.md#client-identities).
 
 ## Next steps
 

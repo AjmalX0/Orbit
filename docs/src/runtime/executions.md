@@ -27,7 +27,7 @@ $ orbit run examples/order_processing.orbit --id order-1001 --no-wait --input-fi
 | `RUNNING` | no | Steps are being scheduled and run. An execution that is being aborted (after a failure, a cancellation or a timeout) stays `RUNNING` while it withdraws queued work and waits for in-flight attempts. |
 | `COMPENSATING` | no | Compensations are running, one at a time, newest first. |
 | `COMPLETED` | yes | Every step finished and the `return` expression produced a valid output. |
-| `FAILED` | yes | A step failed permanently, the `return` expression failed, or the output did not match the workflow's `output` type. |
+| `FAILED` | yes | A step failed permanently, a [resource limit](server.md#resource-limits) was reached, the `return` expression failed, or the output did not match the workflow's `output` type. |
 | `CANCELLED` | yes | Cancellation was requested and the abort finished. |
 | `TIMED_OUT` | yes | The workflow `timeout` passed and the abort finished. |
 
@@ -56,6 +56,7 @@ The runtime schedules units. A unit is one of:
 | `step` | A step. |
 | `step[i]` | Element `i` (from 0) of a `for` step. |
 | `compensate:<unit>` | The compensation of a unit, for example `compensate:reserve_inventory` or `compensate:reserve[2]`. |
+| `on_<kind>:<step>` | A step of an outcome handler, for example `on_failure:tell_customer` or `on_cancel:confirm_cancel`. See [Outcome handlers](../language/handlers.md). |
 
 Each unit has a status, an attempt number, its evaluated input and idempotency key, its output or error, and the times it was scheduled, dispatched and finished. A unit's input and idempotency key are evaluated once, when it is first scheduled, and reused unchanged for retries and redeliveries.
 
@@ -112,6 +113,7 @@ Error objects (`error`) have the fields `code` (string), `message` (string), `re
 | `WorkflowTimeoutReached` | none | The workflow `timeout` passed. The execution starts aborting. |
 | `CancelRequested` | `reason` | Cancellation was requested. The execution starts aborting, unless it is already aborting. |
 | `WorkflowCompleted` | `output` | Terminal: `COMPLETED`. |
+| `LimitExceeded` | `limit`, `message` | A server resource limit was reached; `limit` is `max_history_events`. The execution starts aborting with the error `LIMIT_EXCEEDED` and `message`. See [Resource limits](server.md#resource-limits). |
 | `WorkflowFailed` | `error`, `compensation` | Terminal: `FAILED`. The error message names the failed step. |
 | `WorkflowCancelled` | `compensation` | Terminal: `CANCELLED`. |
 | `WorkflowTimedOut` | `compensation` | Terminal: `TIMED_OUT`. |
@@ -181,6 +183,20 @@ The field is absent for executions that never received a signal.
 
 Compensation units use the step events above with keys such as `compensate:reserve_inventory`.
 
+### Handler events
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `HandlersStarted` | `kind`, `compensation` | Compensation is finished (or there was none) and the steps of the `on <kind>` handler start: `kind` is `failure`, `cancel` or `timeout`. `compensation` (`none`, `completed` or `failed`) is the outcome the terminal event will carry. Recorded only when the workflow declares a handler of that kind. |
+
+Handler steps use the step events above with keys such as `on_failure:tell_customer`. While they run, the execution keeps its status (`RUNNING` or `COMPENSATING`). From `HandlersStarted` on, the execution state (`GET /v1/executions/{id}`) has a `handlers` field, for example `{"kind": "failure", "compensation": "none"}`; it stays after the terminal event and is absent for executions that ran no handler. When every handler step has finished, the terminal event is recorded with the original error. A handler step that fails does not change the execution's outcome. See [Outcome handlers](../language/handlers.md).
+
+```json
+{"seq":13,"timestamp_ms":1794754619132,"type":"LimitExceeded","limit":"max_history_events","message":"the execution reached 10 history events (--max-history-events)"}
+{"seq":15,"timestamp_ms":1794754619132,"type":"HandlersStarted","kind":"failure","compensation":"none"}
+{"seq":17,"timestamp_ms":1794754619132,"type":"WorkflowFailed","error":{"code":"LIMIT_EXCEEDED","message":"the execution reached 10 history events (--max-history-events)","retryable":false},"compensation":"none"}
+```
+
 ### Runtime error codes
 
 Errors that the runtime itself produces use these codes:
@@ -198,6 +214,7 @@ Errors that the runtime itself produces use these codes:
 | `CHILD_NOT_REGISTERED`, `CHILD_START_FAILED`, `CHILD_MISSING` | no | A child workflow could not be started or found. |
 | `CHILD_CANCELLED`, `CHILD_TIMED_OUT` | no | A child workflow ended `CANCELLED` or `TIMED_OUT`. A child that ends `FAILED` passes its own error code up, with the child's id in `details.child_execution_id`. |
 | `CANCELLED` | no | A retry that was waiting when the execution started aborting, with no earlier error to report. |
+| `LIMIT_EXCEEDED` | no | A `for` step's list is longer than `--max-fan-out` (on `StepFailed`), or the history reached `--max-history-events` (on `WorkflowFailed`, after `LimitExceeded`). See [Resource limits](server.md#resource-limits). |
 
 A worker's own error codes are passed through unchanged. Whether a worker error is retried depends on its `retryable` flag and the step's `non_retryable` list; see [Retries and timeouts](../language/retries-timeouts.md).
 
@@ -326,6 +343,8 @@ The workflow timeout is checked only while the execution is `RUNNING` and not al
 
 - [Delivery guarantees](guarantees.md)
 - [Compensation](../language/compensation.md)
+- [Outcome handlers](../language/handlers.md)
+- [Running the server: resource limits](server.md#resource-limits)
 - [Signals and queries](../language/signals.md)
 - [Retries and timeouts](../language/retries-timeouts.md)
 - [HTTP API](../reference/http-api.md)

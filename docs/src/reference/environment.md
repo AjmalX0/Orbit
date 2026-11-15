@@ -13,7 +13,7 @@ Read by `orbit server`.
 | `ORBIT_GRPC_ADDR` | `--grpc-addr` | unset | Also serve the gRPC worker protocol on this address. |
 | `ORBIT_TOKEN` | `--token` | unset | Admin bearer token. Required on every endpoint except `/v1/health` when set. |
 | `ORBIT_WORKER_TOKEN` | `--worker-token` | unset | Shared worker credential, limited to `/v1/workers/*` and `/v1/tasks/*`. |
-| `ORBIT_WORKERS_FILE` | `--workers-file` | unset | Path of the per-worker identities file (TOML). |
+| `ORBIT_WORKERS_FILE` | `--workers-file` | unset | Path of the workers file (TOML): per-worker identities and client identities. |
 | `ORBIT_TLS_CERT` | `--tls-cert` | unset | PEM certificate chain for HTTPS (and TLS on gRPC). |
 | `ORBIT_TLS_KEY` | `--tls-key` | unset | PEM private key for `ORBIT_TLS_CERT`. |
 | `ORBIT_TLS_CLIENT_CA` | `--tls-client-ca` | unset | PEM CA that signs worker client certificates (mutual TLS). |
@@ -22,6 +22,10 @@ Read by `orbit server`.
 | `OTEL_SERVICE_NAME` | | `orbit-runtime` | Value of the `service.name` resource attribute on exported spans. |
 | `ORBIT_LOG` | | `info` | Log filter in [`tracing-subscriber` `EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax, for example `debug` or `info,orbit_runtime=debug`. Setting it replaces the default `info` filter entirely. |
 | `ORBIT_DB_CA_CERT` | | unset | PEM CA bundle trusted for PostgreSQL TLS, in addition to the public web PKI roots. |
+| `ORBIT_MAX_ACTIVE_EXECUTIONS` | `--max-active-executions` | unlimited | Maximum running executions; further starts get `429 RESOURCE_EXHAUSTED`. |
+| `ORBIT_MAX_FAN_OUT` | `--max-fan-out` | unlimited | Maximum elements of one `for` step; larger lists fail the step with `LIMIT_EXCEEDED`. |
+| `ORBIT_MAX_HISTORY_EVENTS` | `--max-history-events` | unlimited | Maximum history events per execution; past it the execution fails with `LIMIT_EXCEEDED`. |
+| `ORBIT_MAX_PAYLOAD_BYTES` | `--max-payload-bytes` | unlimited | Maximum size in bytes of an execution input, task result or signal payload; larger ones get `413 PAYLOAD_TOO_LARGE`. |
 | `ORBIT_CLUSTER` | `--cluster` | unset | `true` to run as one of several servers on one PostgreSQL database. |
 | `ORBIT_NODE_ID` | `--node-id` | host name | This server's name in the cluster. |
 | `ORBIT_ADVERTISE_ADDR` | `--advertise-addr` | derived from `--addr` | URL handed out for this server while it leads. |
@@ -35,7 +39,7 @@ Read by `orbit deploy`, `run`, `status`, `inspect`, `logs`, `cancel`, `ps` and `
 | Variable | Flag | Default | Meaning |
 |---|---|---|---|
 | `ORBIT_SERVER` | `--server` | `http://127.0.0.1:7233` | Runtime API address. |
-| `ORBIT_TOKEN` | `--token` | unset | Bearer token. Use the admin token. |
+| `ORBIT_TOKEN` | `--token` | unset | Bearer token: the admin token, or a client identity's token for the commands its actions allow. |
 | `ORBIT_CA_CERT` | `--ca-cert` | unset | Extra PEM CA certificate to trust. |
 | `ORBIT_CLIENT_CERT` | `--client-cert` | unset | PEM client certificate for mutual TLS. |
 | `ORBIT_CLIENT_KEY` | `--client-key` | unset | PEM private key for the client certificate. |

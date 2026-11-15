@@ -127,7 +127,7 @@ chooses the lowest version that can express the workflow:
 | IR version | Used for |
 |---|---|
 | `orbit-ir/1` | Every workflow that uses none of the features below. |
-| `orbit-ir/2` | A workflow that declares a `signal` or a `query`, has an `await` or `compute` step, or uses a lambda in any expression (`with`, `when`, `for`, `idempotency_key`, `compensate`, `return`). |
+| `orbit-ir/2` | A workflow that declares a `signal` or a `query`, has an `await` or `compute` step, uses a lambda in any expression (`with`, `when`, `for`, `idempotency_key`, `compensate`, `return`), or declares an `on failure`, `on cancel` or `on timeout` handler. |
 
 A workflow that does not use these features compiles exactly as before: it
 keeps `orbit-ir/1` and the same definition hash, so upgrading the compiler
@@ -142,6 +142,8 @@ $ orbit compile --stdout examples/order_processing.orbit | grep ir_version
   "ir_version": "orbit-ir/1",
 $ orbit compile --stdout examples/approval.orbit | grep ir_version
   "ir_version": "orbit-ir/2",
+$ orbit compile --stdout examples/checkout.orbit | grep ir_version
+  "ir_version": "orbit-ir/2",
 ```
 
 The runtime accepts every IR version it supports and rejects any other with
@@ -155,7 +157,7 @@ an `orbit-ir/2` feature. `GET /v1/health` lists the supported versions in
 ```
 
 A runtime that only lists `orbit-ir/1` (ORBIT 0.1) cannot register
-workflows that use signals, queries, `await`, `compute` or lambdas. Upgrade
+workflows that use signals, queries, `await`, `compute`, lambdas or outcome handlers. Upgrade
 the runtime before you deploy them; definitions already registered keep
 working after the upgrade.
 
@@ -180,6 +182,7 @@ working after the upgrade.
 - [Task contracts](tasks.md#changing-a-contract)
 - [Child workflows](child-workflows.md)
 - [Signals and queries](signals.md)
+- [Outcome handlers](handlers.md)
 - [Compatibility checks](../tooling/compat.md)
 - [Executions and history](../runtime/executions.md)
 - [CLI](../reference/cli.md)

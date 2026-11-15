@@ -172,9 +172,9 @@ error[E0401]: loop variable `sku` is not in scope in `when`
 error: compilation failed: 1 error(s), 0 warning(s)
 ```
 
-A skipped `for` step has the output `null`, so its type is `List<T>?`. ORBIT
-v0.1 has no per-element filter; to process only some elements, compute the
-filtered list in a previous step. See [Fan-out](fan-out.md).
+A skipped `for` step has the output `null`, so its type is `List<T>?`. `for`
+has no per-element filter clause; to process only some elements, iterate over
+`filter(list, x => ...)`. See [Fan-out](fan-out.md#filtering).
 
 ## Conditions and compensation
 

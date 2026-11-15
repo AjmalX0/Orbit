@@ -19,15 +19,34 @@ When a credential is configured, every endpoint except `GET /v1/health` and `GET
 |---|---|---|
 | Admin | `Authorization: Bearer <--token>` | Every endpoint. |
 | Shared worker | `Authorization: Bearer <--worker-token>` | `/v1/workers/*` and `/v1/tasks/*` only. No identity restrictions. |
-| Per-worker identity | `Authorization: Bearer <token>` whose SHA-256 is in the workers file, or a client certificate (mutual TLS) matching a `client_cert` entry | `/v1/workers/*` and `/v1/tasks/*` only, restricted to its own worker id, task patterns, sessions and task tokens. |
+| Per-worker identity | `Authorization: Bearer <token>` whose SHA-256 is in a `[[worker]]` entry of the workers file, or a client certificate (mutual TLS) matching its `client_cert` | `/v1/workers/*` and `/v1/tasks/*` only, restricted to its own worker id, task patterns, sessions and task tokens. |
+| Client identity | `Authorization: Bearer <token>` whose SHA-256 is in a `[[client]]` entry of the workers file, or a client certificate matching its `client_cert` | The execution API (`/v1/executions...`, and `GET /v1/workflows...`), for the workflows and actions the entry grants. |
 
-`GET /v1/workers` (the worker list) is an administrative endpoint: the `/v1/workers/*` prefix covers only the paths below it. A request with a valid client certificate that matches no worker in the workers file is refused with `403` on every path, including `/v1/health`. See [Security](../runtime/security.md) for the full model.
+`GET /v1/workers` (the worker list) is an administrative endpoint: the `/v1/workers/*` prefix covers only the paths below it. A request with a valid client certificate that matches no worker or client in the workers file is refused with `403` on every path, including `/v1/health`. See [Security](../runtime/security.md) for the full model.
+
+A client identity is checked per route:
+
+| Route | Needs the action |
+|---|---|
+| `POST /v1/executions` | `start` for the workflow in the body |
+| `POST /v1/executions/{id}/signals/{name}` | `signal` |
+| `GET /v1/executions/{id}/queries/{name}` | `query` |
+| `GET /v1/executions/{id}`, `/history`, `/wait`, `GET /v1/workflows/{name}...` | `read` |
+| `POST /v1/executions/{id}/cancel` | `cancel` |
+| `GET /v1/executions`, `GET /v1/workflows` | none: the list contains only workflows the client may `read` |
+| `POST /v1/workflows`, `GET /v1/workers`, `/v1/workers/*`, `/v1/tasks/*`, `GET /v1/metrics` | refused |
+
+For routes with an execution id, the workflow is the execution's workflow; an id that does not exist is `404 NOT_FOUND`. See [Security: client identities](../runtime/security.md#client-identities).
 
 ```console
 $ curl -s https://orbit.internal:7233/v1/executions
 {"error":{"code":"UNAUTHENTICATED","message":"missing or invalid credentials"}}
 $ curl -s -H "authorization: Bearer $ORBIT_WORKER_TOKEN" https://orbit.internal:7233/v1/executions
 {"error":{"code":"FORBIDDEN","message":"worker credentials may only call /v1/workers/* and /v1/tasks/*"}}
+$ curl -s -H "authorization: Bearer $WAREHOUSE_TOKEN" https://orbit.internal:7233/v1/metrics
+{"error":{"code":"FORBIDDEN","message":"client `warehouse-app` may only use the execution API (start, signal, query, read, cancel)"}}
+$ curl -s -X POST -H "authorization: Bearer $WAREHOUSE_TOKEN" https://orbit.internal:7233/v1/executions/labels-1/cancel
+{"error":{"code":"FORBIDDEN","message":"client `warehouse-app` may not cancel executions of `PrintLabels`"}}
 ```
 
 ## Errors
@@ -49,7 +68,7 @@ Errors produced by ORBIT have this body:
 | `INVALID_EXECUTION_ID` | 400 | `POST /v1/executions` | `execution_id` is empty, longer than 200 characters, or contains characters other than letters, digits, `-`, `_`, `.` and `:`. |
 | `RESERVED_TASK` | 400 | `POST /v1/workers/register` | A worker announced a built-in task (`orbit.*`) or a child-workflow contract (`workflow:*`). |
 | `UNAUTHENTICATED` | 401 | any authenticated endpoint | No credential, or a credential that matches nothing. |
-| `FORBIDDEN` | 403 | any authenticated endpoint | The credential is valid but not allowed: a worker credential on an administrative endpoint, a per-worker identity acting for another worker, announcing a task outside its patterns or the wrong runtime, using another worker's session or token, or an unmatched client certificate. |
+| `FORBIDDEN` | 403 | any authenticated endpoint | The credential is valid but not allowed: a worker credential on an administrative endpoint, a per-worker identity acting for another worker, announcing a task outside its patterns or the wrong runtime, using another worker's session or token, a client identity outside the execution API or its granted workflows and actions, or an unmatched client certificate. |
 | `NOT_FOUND` | 404 | execution endpoints | The execution does not exist. |
 | `UNKNOWN_SIGNAL` | 404 | `POST /v1/executions/{id}/signals/{name}` | The execution's workflow does not declare this signal. The message lists the declared signals. |
 | `UNKNOWN_QUERY` | 404 | `GET /v1/executions/{id}/queries/{name}` | The execution's workflow does not declare this query. The message lists the declared queries. |
@@ -58,8 +77,10 @@ Errors produced by ORBIT have this body:
 | `DEFINITION_CONFLICT` | 409 | `POST /v1/workflows` | A different definition is already registered under this name and version. Definitions are immutable; bump the version. |
 | `EXECUTION_EXISTS` | 409 | `POST /v1/executions` | An execution with this `execution_id` exists for a different workflow definition. |
 | `EXECUTION_FINISHED` | 409 | `POST /v1/executions/{id}/cancel`, `POST /v1/executions/{id}/signals/{name}` | The execution is already terminal. |
+| `PAYLOAD_TOO_LARGE` | 413 | `POST /v1/executions`, `POST /v1/executions/{id}/signals/{name}`, `POST /v1/tasks/complete` | The execution input, signal payload or task result is larger than `--max-payload-bytes`, as compact JSON. Nothing is recorded. See [Resource limits](../runtime/server.md#resource-limits). |
 | `SIGNAL_PAYLOAD_INVALID` | 422 | `POST /v1/executions/{id}/signals/{name}` | The payload does not match the signal's declaration. The message names the path, for example `$.approved`. Nothing is recorded. |
 | `QUERY_FAILED` | 422 | `GET /v1/executions/{id}/queries/{name}` | Evaluating the query failed at runtime, for example with a division by zero. |
+| `RESOURCE_EXHAUSTED` | 429 | `POST /v1/executions` | `--max-active-executions` executions are already running. Nothing is started; retry later with the same `execution_id`. |
 | `STORAGE_ERROR` | 500 | any endpoint that reads or writes the database | The database operation failed. The message contains the backend error. Nothing was changed. On a cluster leader that was just deposed, the message starts with `fenced:`. |
 | `NOT_LEADER` | 503 | every route except `GET` routes, on a cluster standby | This server is a standby (`--cluster`). The body's `error` object adds `leader_node` and `leader_addr` (either may be `null`), the `x-orbit-leader` header carries the address, and `retry-after: 1` is set. Send the request to the leader, or retry. See [Running several servers](../runtime/cluster.md#standby-behavior). |
 
@@ -70,7 +91,7 @@ Some errors are produced by the HTTP layer before a request reaches ORBIT. They 
 | 400 | The body is not valid JSON, or a query parameter has the wrong type. | `Failed to parse the request body as JSON: expected ident at line 1 column 2` |
 | 404 | Unknown path. The body is empty. | |
 | 405 | Known path, wrong method. The `allow` header lists the method. | |
-| 413 | The body is larger than `--max-body`. | `Failed to buffer the request body: length limit exceeded` |
+| 413 | The body is larger than `--max-body`. (A value larger than `--max-payload-bytes` gets the JSON `PAYLOAD_TOO_LARGE` instead.) | `Failed to buffer the request body: length limit exceeded` |
 | 415 | A body was sent without `content-type: application/json`. | |
 | 422 | Valid JSON with a missing or mistyped field. | ``Failed to deserialize the JSON body into the target type: missing field `workflow` at line 1 column 12`` |
 
@@ -103,7 +124,7 @@ A client should check the status first, and parse the JSON error envelope only w
 | `POST` | [`/v1/tasks/complete`](#post-v1taskscomplete) | worker | Report a successful result. |
 | `POST` | [`/v1/tasks/fail`](#post-v1tasksfail) | worker | Report a failed attempt. |
 
-"admin" means the admin token when authentication is enabled. "worker" means any credential: admin, shared worker token or a per-worker identity.
+"admin" means the admin token when authentication is enabled; routes under `/v1/executions` and `GET /v1/workflows...` also accept a client identity with the matching action (see [Authentication](#authentication)). "worker" means any credential: admin, shared worker token or a per-worker identity.
 
 ## Health and metrics
 
@@ -284,11 +305,15 @@ Responses:
 | `400` | `INVALID_INPUT`, `INVALID_EXECUTION_ID` | |
 | `404` | `WORKFLOW_NOT_FOUND` | |
 | `409` | `EXECUTION_EXISTS` | The id exists for a different definition. |
+| `413` | `PAYLOAD_TOO_LARGE` | The input, with defaults applied, is larger than `--max-payload-bytes`. |
+| `429` | `RESOURCE_EXHAUSTED` | `--max-active-executions` is reached. An id that already exists still gets `200`. |
 
 ```json
 {"error":{"code":"INVALID_INPUT","message":"workflow input is invalid at $.order_id: expected String, found an integer"}}
 {"error":{"code":"WORKFLOW_NOT_FOUND","message":"workflow OrderProcessing@9.9.9 is not registered"}}
 {"error":{"code":"EXECUTION_EXISTS","message":"execution `order-1001` already exists for a different workflow"}}
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"execution input is 414 bytes; the limit is 200 (--max-payload-bytes)"}}
+{"error":{"code":"RESOURCE_EXHAUSTED","message":"2 executions are already running (--max-active-executions)"}}
 ```
 
 ### GET /v1/executions
@@ -300,6 +325,8 @@ List executions, newest first.
 | `status` | string | all | Filter by status, case-insensitive (`failed` matches `FAILED`). |
 | `workflow` | string | all | Filter by workflow name. |
 | `limit` | integer | `50` | Maximum rows, clamped to 1 through 1000. |
+
+For a client identity, rows of workflows it may not `read` are removed after the limit is applied, so it can receive fewer rows than `limit`; filter by `workflow` to get full pages.
 
 Response `200`:
 
@@ -513,10 +540,11 @@ Response `200`:
 | `accepted` | boolean | Always `true` in a `200` response. |
 | `seq` | integer | Sequence number of the recorded `SignalReceived` event. |
 
-Errors: `404 NOT_FOUND`; `409 EXECUTION_FINISHED` (checked first); `404 UNKNOWN_SIGNAL`; `422 SIGNAL_PAYLOAD_INVALID`:
+Errors: `404 NOT_FOUND`; `409 EXECUTION_FINISHED` (checked first); `404 UNKNOWN_SIGNAL`; `413 PAYLOAD_TOO_LARGE`; `422 SIGNAL_PAYLOAD_INVALID`:
 
 ```json
 {"error":{"code":"UNKNOWN_SIGNAL","message":"OrderApproval@1.0.0 has no signal `reveiw`; declared: review"}}
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"signal payload is 277 bytes; the limit is 200 (--max-payload-bytes)"}}
 {"error":{"code":"SIGNAL_PAYLOAD_INVALID","message":"payload for signal `review` is invalid at $.approved: expected Bool, found a string"}}
 ```
 
@@ -677,7 +705,7 @@ Response `200`: a task.
 |---|---|---|
 | `token` | string | Identifies this dispatch. Send it with the result. |
 | `execution_id`, `workflow`, `workflow_version` | string | The execution. |
-| `step_id` | string | Unit key: `step`, `step[i]` or `compensate:<unit>`. |
+| `step_id` | string | Unit key: `step`, `step[i]`, `compensate:<unit>` or `on_<kind>:<step>` (a step of an `on failure`, `on cancel` or `on timeout` handler). |
 | `task_name`, `contract_version` | string | The contract to run. |
 | `input` | any | Evaluated, validated input. |
 | `idempotency_key` | string | Stable across retries and redeliveries of this unit. |
@@ -719,7 +747,11 @@ Response `200`:
 
 A success is accepted for any token issued for a step that is not yet resolved, including the token of an earlier attempt that timed out or was considered lost. See [Delivery guarantees](../runtime/guarantees.md#reconciliation).
 
-Errors: `400 INVALID_REQUEST` (`token is required`); `403 FORBIDDEN` when a per-worker identity reports for a token issued to another worker.
+Errors: `400 INVALID_REQUEST` (`token is required`); `403 FORBIDDEN` when a per-worker identity reports for a token issued to another worker; `413 PAYLOAD_TOO_LARGE` when the output is larger than `--max-payload-bytes`. A refused output is not recorded and the attempt stays in flight, so the worker can still report a smaller result or a failure:
+
+```json
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"task result is 312 bytes; the limit is 200 (--max-payload-bytes)"}}
+```
 
 ### POST /v1/tasks/fail
 
@@ -754,10 +786,11 @@ With `--grpc-addr`, the worker protocol is also served over gRPC as `orbit.worke
 | 403 | `PERMISSION_DENIED` |
 | 404 | `NOT_FOUND` |
 | 409 | `FAILED_PRECONDITION` |
+| 413 (`PAYLOAD_TOO_LARGE`, `CompleteTask`) | `INTERNAL` |
 | 500 | `INTERNAL` |
 | 503 (`NOT_LEADER`, cluster standby) | `UNAVAILABLE` |
 
-`PollTask` returns an `ExecuteTaskRequest` with an empty `token` where HTTP returns `204`.
+`PollTask` returns an `ExecuteTaskRequest` with an empty `token` where HTTP returns `204`. Client identities cannot use the gRPC binding: every call gets `PERMISSION_DENIED` with the message ``FORBIDDEN: client `app` may not use the worker protocol``. A result larger than `--max-payload-bytes` gets `INTERNAL` with `orbit-error-code: PAYLOAD_TOO_LARGE`, so check the metadata rather than the status code.
 
 ## See also
 
