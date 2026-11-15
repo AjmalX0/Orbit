@@ -60,9 +60,25 @@ pub struct WorkflowIr {
     /// `on_event:<signal>@<seq>` holds the signal payload (`event`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub events: BTreeMap<String, Vec<StepIr>>,
+    /// `continue_as_new [when <cond>] with <input>`: evaluated when every
+    /// step has finished, instead of `return`. When the condition holds (or
+    /// there is none), the run ends and a new run of the same execution
+    /// starts with the evaluated input and an empty history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_as_new: Option<ContinueAsNewIr>,
     /// Source locations for diagnostics and tooling (not hashed).
     #[serde(default)]
     pub source_map: BTreeMap<String, SourceLocation>,
+}
+
+/// `continue_as_new [when <condition>] with <input>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContinueAsNewIr {
+    /// Absent: always continue (the workflow never completes by itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Expr>,
+    /// The next run's input, typed against the workflow input.
+    pub input: Expr,
 }
 
 /// Per-workflow resource limits (each optional).
@@ -339,7 +355,7 @@ impl WorkflowIr {
         }
         if self.ir_version == IR_VERSION && self.uses_v2_features() {
             return e(format!(
-                "`{IR_VERSION}` cannot use signals, queries, `await`, `compute` or lambdas; use `{IR_VERSION_2}`"
+                "`{IR_VERSION}` cannot use signals, queries, `await`, `compute`, lambdas or `continue_as_new`; use `{IR_VERSION_2}`"
             ));
         }
         if self.name.is_empty() || self.version.is_empty() {
@@ -445,6 +461,16 @@ impl WorkflowIr {
                 }
             }
         }
+        if let Some(can) = &self.continue_as_new {
+            let mut refs = vec![];
+            can.input.step_refs(&mut refs);
+            if let Some(c) = &can.condition {
+                c.step_refs(&mut refs);
+            }
+            if let Some(r) = refs.iter().find(|r| !ids.contains(r.as_str())) {
+                return e(format!("`continue_as_new` reads unknown step `{r}`"));
+            }
+        }
         if !self.definition_hash.is_empty() && self.definition_hash != self.compute_hash() {
             return e(
                 "definition_hash does not match the IR content (was the file modified?)".into(),
@@ -480,6 +506,7 @@ impl WorkflowIr {
             || !self.handlers.is_empty()
             || self.limits.is_some()
             || !self.events.is_empty()
+            || self.continue_as_new.is_some()
             || self.result.as_ref().is_some_and(lambda)
             || self.steps.iter().any(|s| {
                 matches!(s.action, Action::Await { .. } | Action::Compute { .. })

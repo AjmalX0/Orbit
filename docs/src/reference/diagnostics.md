@@ -287,6 +287,50 @@ error[E0322]: signal `note` is handled by `on event` and cannot also be awaited
   = note: every signal handled by `on event` starts the handler; an `await` would compete for it
 ```
 
+### E0323: continue_as_new without an input
+
+A [`continue_as_new`](../language/continue-as-new.md) member has no `with <input>`. The next run needs an input, even when it is `{}`.
+
+```text
+error[E0323]: `continue_as_new` needs `with <input>`
+ --> diag1.orbit:5:5
+  |
+5 |     continue_as_new when !page.done
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: give the next run's input, e.g. `continue_as_new with { cursor: page.next }`
+```
+
+The input itself is checked against the workflow's `input` type like a step's `with` against its contract: a missing required field is `E0403`, a value of the wrong type `E0400`.
+
+```text
+error[E0403]: missing required field `limit: Int`
+ --> diag4.orbit:5:42
+  |
+5 |     continue_as_new when !page.done with { cursor: string(page.next) }
+  |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: required by `{ cursor: Int, limit: Int }`
+
+error[E0400]: type mismatch: expected `Int`, found `String`
+ --> diag4.orbit:5:52
+  |
+5 |     continue_as_new when !page.done with { cursor: string(page.next) }
+  |                                                    ^^^^^^^^^^^^^^^^^
+```
+
+### E0324: continue_as_new condition is not Bool
+
+The `when` condition of `continue_as_new` must be a `Bool` (or an optional `Bool`, where `null` counts as false).
+
+```text
+error[E0324]: the `continue_as_new` condition must be `Bool`, found `Int`
+ --> diag2.orbit:5:26
+  |
+5 |     continue_as_new when page.next with { cursor: page.next }
+  |                          ^^^^^^^^^
+```
+
+A second `continue_as_new` in the same workflow is `E0106` (``duplicate `continue_as_new` ``).
+
 ### W0301: unknown worker language
 
 A `using` clause names a language ORBIT does not recognize. Message: ``unknown worker language `pyhton` ``. The step still compiles, but it is dispatched only to workers that announce exactly that runtime.
@@ -383,6 +427,21 @@ No step awaits a declared signal. Message: ``signal `escalate` is declared but n
 
 An `await` step has no `timeout`, and the workflow has no `timeout`. Message: ``step `decision` waits for signal `review` with no timeout``, with help ``add `timeout 7d` to the step (or a workflow `timeout`) so the execution cannot wait forever``.
 
+### W0607: return is never used
+
+A workflow has `continue_as_new` without `when` and also a `return`. Every run continues as new, so the execution never completes and `return` is never evaluated.
+
+```text
+warning[W0607]: `return` is never used: `continue_as_new` has no `when`, so every run continues
+ --> diag3.orbit:7:12
+  |
+7 |     return { pages: page.next }
+  |            ^^^^^^^^^^^^^^^^^^^^
+6 |     continue_as_new with { cursor: page.next }
+  |     ------------------------------------------ always continues
+  = help: add `when <condition>` to `continue_as_new`, or remove `return`
+```
+
 ## Tests (E07xx, W07xx)
 
 These diagnostics come from `test` declarations. They are reported by every command that compiles the file, including `orbit check`, and a file with test errors cannot be deployed. Values in a test are also checked with the expression rules above: a missing required `input` field is `E0403`, a mock result of the wrong type is `E0400`, and reading `input` in a test `input` or `expect` value is `E0401`. [Testing workflows](../tooling/testing.md) describes the declarations.
@@ -434,6 +493,32 @@ A constant in `input`, a `signal` payload or an expected output type-checks but 
 ### E0711: invalid count
 
 `times` must be at least 1, and `attempts` must be a non-negative number. Message: ``` `times 0` must be at least 1 ```.
+
+### E0712: invalid number of runs
+
+`expect runs` must be at least 1.
+
+```text
+error[E0712]: `runs 0` is not a valid number of runs
+  --> diag3.orbit:18:17
+   |
+18 |     expect runs 0
+   |                 ^
+   = note: an execution has at least one run
+```
+
+### E0713: runs expected of a workflow without continue_as_new
+
+`expect runs N` with `N` greater than 1 names a workflow that has no `continue_as_new`, so the expectation can never hold.
+
+```text
+error[E0713]: workflow `Once` has no `continue_as_new`, so it always ends in run 1
+  --> diag3.orbit:24:17
+   |
+24 |     expect runs 2
+   |                 ^
+   = help: expect `runs 1`, or add `continue_as_new` to the workflow
+```
 
 ### W0701: test checks nothing
 

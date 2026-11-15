@@ -19,13 +19,22 @@ pub struct Metrics {
     pub compensations_started: u64,
     pub compensations_failed: u64,
     pub events_committed: u64,
+    pub executions_continued_as_new: u64,
+    /// Schedule occurrences that started an execution (incl. triggers).
+    pub schedules_fired: u64,
+    /// Occurrences skipped because the previous run was still running.
+    pub schedules_skipped_overlap: u64,
+    /// Occurrences skipped because the server was down at the time.
+    pub schedules_skipped_missed: u64,
 }
 
 impl Metrics {
     pub fn observe(&mut self, e: &Event) {
         self.events_committed += 1;
         match e {
-            Event::WorkflowCreated { .. } => self.executions_started += 1,
+            // A new run (continue-as-new) is not a new execution.
+            Event::WorkflowCreated { run: None, .. } => self.executions_started += 1,
+            Event::WorkflowContinuedAsNew { .. } => self.executions_continued_as_new += 1,
             Event::WorkflowCompleted { .. } => self.executions_completed += 1,
             Event::WorkflowFailed { .. } => self.executions_failed += 1,
             Event::WorkflowCancelled { .. } => self.executions_cancelled += 1,
@@ -120,6 +129,16 @@ impl Metrics {
                 "History events committed",
                 self.events_committed,
             ),
+            (
+                "orbit_executions_continued_as_new_total",
+                "Runs ended by continue_as_new",
+                self.executions_continued_as_new,
+            ),
+            (
+                "orbit_schedules_fired_total",
+                "Schedule occurrences that started an execution",
+                self.schedules_fired,
+            ),
         ];
         let mut out = String::new();
         for (name, help, value) in counters {
@@ -127,6 +146,10 @@ impl Metrics {
                 "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
             ));
         }
+        out.push_str(&format!(
+            "# HELP orbit_schedules_skipped_total Schedule occurrences that started nothing\n# TYPE orbit_schedules_skipped_total counter\norbit_schedules_skipped_total{{reason=\"overlap\"}} {}\norbit_schedules_skipped_total{{reason=\"missed\"}} {}\n",
+            self.schedules_skipped_overlap, self.schedules_skipped_missed
+        ));
         out.push_str(&format!(
             "# HELP orbit_active_executions Executions not yet finished\n# TYPE orbit_active_executions gauge\norbit_active_executions {active}\n"
         ));

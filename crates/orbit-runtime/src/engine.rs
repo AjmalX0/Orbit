@@ -192,6 +192,16 @@ pub fn child_execution_id(parent: &str, unit: &str) -> String {
     format!("{parent}.{unit}")
 }
 
+/// [`child_execution_id`] for a unit of run `run` of the parent: runs after
+/// the first add `.run<N>`, so a later run's child is a new execution.
+pub fn child_execution_id_in_run(parent: &str, run: u32, unit: &str) -> String {
+    if run > 1 {
+        child_execution_id(&format!("{parent}.run{run}"), unit)
+    } else {
+        child_execution_id(parent, unit)
+    }
+}
+
 pub struct Engine {
     store: Store,
     clock: Clock,
@@ -218,6 +228,10 @@ pub struct Engine {
     /// Shared mode (`--cluster-mode shared`): ownership, task queue and inbox
     /// shared with the other servers. `None` everywhere else.
     pub(crate) shared: Option<Arc<crate::shared::Ctx>>,
+    /// Next time [`Engine::fire_schedules`] looks for due schedules.
+    pub(crate) schedule_poll_at: u64,
+    /// A schedule changed on this server: look again at the next tick.
+    pub(crate) schedules_dirty: bool,
 }
 
 fn semver_key(v: &str) -> (Vec<u64>, String) {
@@ -251,16 +265,42 @@ impl Engine {
             changed: Arc::new(tokio::sync::Notify::new()),
             telemetry: None,
             shared: None,
+            schedule_poll_at: 0,
+            schedules_dirty: true,
         };
         for ir in engine.store.definitions().map_err(EngineError::storage)? {
             engine.cache_definition(ir);
         }
         engine.recover()?;
+        // The only writer (single server, cluster leader): claims on schedule
+        // occurrences are from a process that is gone; fire them now instead
+        // of after the claim expires. Shared-mode claims expire on their own.
+        if !engine.store.read_only() && !engine.store.shared() {
+            let n = engine
+                .store
+                .release_schedule_claims()
+                .map_err(EngineError::storage)?;
+            if n > 0 {
+                tracing::info!(
+                    schedules = n,
+                    "released schedule claims of a previous process"
+                );
+            }
+        }
         Ok(engine)
     }
 
     pub fn now(&self) -> u64 {
         (self.clock)()
+    }
+
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// A random id of this engine instance (claims on schedule occurrences).
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance
     }
 
     fn cache_definition(&mut self, ir: WorkflowIr) -> Arc<WorkflowIr> {
@@ -408,7 +448,38 @@ impl Engine {
                 },
             )
         })?;
-        self.start_with(def, input, execution_id, None)
+        self.start_with(def, input, execution_id, None, None)
+    }
+
+    /// [`Engine::start`] for a schedule: the execution records `schedule_id`.
+    pub fn start_scheduled(
+        &mut self,
+        workflow: &str,
+        version: Option<&str>,
+        input: Value,
+        execution_id: String,
+        schedule_id: &str,
+    ) -> Result<StartResult> {
+        if self.shared.is_some() && self.definition(workflow, version).is_none() {
+            self.refresh_definitions()?;
+        }
+        let def = self.definition(workflow, version).ok_or_else(|| {
+            EngineError::new(
+                404,
+                "WORKFLOW_NOT_FOUND",
+                match version {
+                    Some(v) => format!("workflow {workflow}@{v} is not registered"),
+                    None => format!("workflow {workflow} is not registered"),
+                },
+            )
+        })?;
+        self.start_with(
+            def,
+            input,
+            Some(execution_id),
+            None,
+            Some(schedule_id.to_string()),
+        )
     }
 
     /// Start an execution of a specific definition. Child workflows pass their
@@ -420,6 +491,7 @@ impl Engine {
         mut input: Value,
         execution_id: Option<String>,
         parent: Option<ParentRef>,
+        schedule_id: Option<String>,
     ) -> Result<StartResult> {
         if input.is_null() {
             input = json!({});
@@ -492,6 +564,8 @@ impl Engine {
             definition_hash: def.definition_hash.clone(),
             input,
             parent,
+            schedule_id,
+            run: None,
         };
         if let Err(e) = self.commit(&id, vec![created, Event::WorkflowStarted {}]) {
             self.active.remove(&id);
@@ -701,6 +775,31 @@ impl Engine {
         Ok(h)
     }
 
+    /// The history of one run of an execution (continue-as-new): the
+    /// current run's, or an earlier run's from the archive.
+    pub fn run_history(&self, id: &str, run: u32) -> Result<Vec<HistoryEvent>> {
+        let current = self.history(id)?;
+        let current_run = ExecutionState::replay(id, &current[..current.len().min(1)]).run;
+        if run == current_run {
+            return Ok(current);
+        }
+        let h = if run > 0 && run < current_run {
+            self.store
+                .run_history(id, run)
+                .map_err(EngineError::storage)?
+        } else {
+            vec![]
+        };
+        if h.is_empty() {
+            return Err(EngineError::new(
+                404,
+                "RUN_NOT_FOUND",
+                format!("execution `{id}` has runs 1 to {current_run}; there is no run {run}"),
+            ));
+        }
+        Ok(h)
+    }
+
     pub fn list_executions(
         &self,
         status: Option<&str>,
@@ -739,18 +838,46 @@ impl Engine {
             apply(&mut state, &h);
             history.push(h);
         }
-        match &self.shared {
-            Some(ctx) => {
-                let def = self.by_hash.get(&state.definition_hash).cloned();
-                ctx.append(&mut self.store, &state, &history, def.as_deref())
+        // Continue-as-new: the next run's first events are written in the
+        // same transaction that archives this run.
+        let next = (state.status == WorkflowStatus::ContinuedAsNew)
+            .then(|| next_run(&state, &history, now));
+        let def = self.by_hash.get(&state.definition_hash).cloned();
+        match (&self.shared, &next) {
+            (Some(ctx), None) => {
+                ctx.append(&mut self.store, &state, &history, def.as_deref(), None)
             }
-            None => self.store.append(&state, &history),
+            (Some(ctx), Some((ns, nh))) => ctx.append(
+                &mut self.store,
+                ns,
+                nh,
+                def.as_deref(),
+                Some((state.run, history.clone())),
+            ),
+            (None, None) => self.store.append(&state, &history),
+            (None, Some((ns, nh))) => self.store.append_rollover(
+                ns,
+                nh,
+                crate::store::Rollover {
+                    run: state.run,
+                    events: &history,
+                },
+            ),
         }
         .map_err(EngineError::storage)?;
         // Export spans only once the events are durable.
         if let Some(t) = &self.telemetry {
             let ctx = self.trace_context(&state);
             t.export(crate::telemetry::spans_for(&state, &ctx, &history));
+            if let Some((ns, nh)) = &next {
+                t.export(crate::telemetry::spans_for(ns, &ctx, nh));
+            }
+        }
+        if let Some((ns, nh)) = &next {
+            for h in nh {
+                self.metrics.observe(&h.event);
+            }
+            tracing::info!(execution_id = %id, run = ns.run, carried_signals = nh.len() - 2, "execution continued as new");
         }
         for h in &history {
             self.metrics.observe(&h.event);
@@ -803,7 +930,14 @@ impl Engine {
                     self.token_workers.remove(t);
                 }
             }
-            self.active.remove(id);
+            match next {
+                Some((ns, _)) => {
+                    self.active.insert(id.to_string(), ns);
+                }
+                None => {
+                    self.active.remove(id);
+                }
+            }
         } else {
             self.active.insert(id.to_string(), state);
         }
@@ -812,8 +946,19 @@ impl Engine {
         Ok(())
     }
 
-    /// Run the decider to a fixpoint and commit the resulting events as one batch.
+    /// Run the decider to a fixpoint and commit the resulting events as one
+    /// batch. After a continue-as-new, the new run is advanced once too (a
+    /// run that continues again at once waits for the next tick).
     fn advance(&mut self, id: &str) -> Result<()> {
+        let run = self.active.get(id).map(|s| s.run);
+        self.advance_run(id)?;
+        if run.is_some() && self.active.get(id).map(|s| s.run) != run {
+            self.advance_run(id)?;
+        }
+        Ok(())
+    }
+
+    fn advance_run(&mut self, id: &str) -> Result<()> {
         let Some(state) = self.active.get(id) else {
             return Ok(());
         };
@@ -857,6 +1002,9 @@ impl Engine {
         self.dispatch_builtins()?;
         self.dispatch_children()?;
         self.reconcile_children()?;
+        if let Err(e) = self.fire_schedules() {
+            tracing::warn!(error = %e, "looking for due schedules failed");
+        }
         Ok(std::mem::take(&mut self.builtin_jobs))
     }
 
@@ -1258,7 +1406,8 @@ impl Engine {
             }
         }
         for (id, key, attempt, hash, input) in todo {
-            let child_id = child_execution_id(&id, &key);
+            let run = self.active.get(&id).map(|s| s.run).unwrap_or(1);
+            let child_id = child_execution_id_in_run(&id, run, &key);
             let failure = |code: &'static str, message: String| Event::StepAttemptFailed {
                 step: key.clone(),
                 attempt,
@@ -1279,7 +1428,8 @@ impl Engine {
                 execution_id: id.clone(),
                 step: key.clone(),
             };
-            if let Err(e) = self.start_with(child_def, input, Some(child_id.clone()), Some(parent))
+            if let Err(e) =
+                self.start_with(child_def, input, Some(child_id.clone()), Some(parent), None)
             {
                 self.commit(&id, vec![failure("CHILD_START_FAILED", e.message)])?;
                 self.advance(&id)?;
@@ -1647,6 +1797,54 @@ impl Engine {
         }
         Ok(added)
     }
+}
+
+/// The first events of the run after `state` (which just ended with
+/// `WorkflowContinuedAsNew`): created with the new input, started, and every
+/// signal the finished run received but did not deliver, in arrival order.
+fn next_run(
+    state: &ExecutionState,
+    history: &[HistoryEvent],
+    now: u64,
+) -> (ExecutionState, Vec<HistoryEvent>) {
+    let (next, input) = history
+        .iter()
+        .rev()
+        .find_map(|h| match &h.event {
+            Event::WorkflowContinuedAsNew { next_run, input } => Some((*next_run, input.clone())),
+            _ => None,
+        })
+        .unwrap_or((state.run + 1, Value::Null));
+    let mut events = vec![
+        Event::WorkflowCreated {
+            workflow: state.workflow.clone(),
+            version: state.version.clone(),
+            definition_hash: state.definition_hash.clone(),
+            input,
+            parent: state.parent.clone(),
+            schedule_id: state.schedule_id.clone(),
+            run: Some(next),
+        },
+        Event::WorkflowStarted {},
+    ];
+    for r in state.signals.iter().filter(|r| r.delivered_to.is_none()) {
+        events.push(Event::SignalReceived {
+            name: r.name.clone(),
+            payload: r.payload.clone(),
+        });
+    }
+    let mut ns = ExecutionState::new(&state.id);
+    let mut out = Vec::with_capacity(events.len());
+    for event in events {
+        let h = HistoryEvent {
+            seq: ns.last_seq + 1,
+            timestamp_ms: now,
+            event,
+        };
+        apply(&mut ns, &h);
+        out.push(h);
+    }
+    (ns, out)
 }
 
 /// The stricter of the server's limits and the workflow's `limits { ... }`.

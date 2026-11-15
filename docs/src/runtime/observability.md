@@ -92,11 +92,11 @@ scrape_configs:
 
 ### Metric reference
 
-The metrics have no labels. Counters are derived from committed events, are kept in memory, and start from zero when the server starts; Prometheus handles the reset in `rate()` and `increase()`.
+The metrics have no labels, except `reason` on `orbit_schedules_skipped_total`. Counters are derived from committed events and from schedule fires on this server, are kept in memory, and start from zero when the server starts; Prometheus handles the reset in `rate()` and `increase()`.
 
 | Metric | Type | Incremented by | Meaning |
 |---|---|---|---|
-| `orbit_executions_started_total` | counter | `WorkflowCreated` | Executions started, including child workflows. |
+| `orbit_executions_started_total` | counter | `WorkflowCreated` | Executions started, including child workflows. A new run after `continue_as_new` is not counted. |
 | `orbit_executions_completed_total` | counter | `WorkflowCompleted` | Executions completed. |
 | `orbit_executions_failed_total` | counter | `WorkflowFailed` | Executions failed. |
 | `orbit_executions_cancelled_total` | counter | `WorkflowCancelled` | Executions cancelled. |
@@ -111,6 +111,10 @@ The metrics have no labels. Counters are derived from committed events, are kept
 | `orbit_compensations_started_total` | counter | `CompensationStarted` | Executions that started compensating. |
 | `orbit_compensations_failed_total` | counter | `CompensationFailed` | Compensations that failed permanently (one per failed compensation). |
 | `orbit_events_committed_total` | counter | every event | History events committed. |
+| `orbit_executions_continued_as_new_total` | counter | `WorkflowContinuedAsNew` | Runs that ended with [`continue_as_new`](../language/continue-as-new.md). |
+| `orbit_schedules_fired_total` | counter | a schedule start | Executions this server started for a [schedule](schedules.md), including triggers. A start of an id that already existed is not counted. In shared mode, the sum over the servers. |
+| `orbit_schedules_skipped_total{reason="overlap"}` | counter | a schedule occurrence or trigger | Starts skipped by the `skip` overlap policy. |
+| `orbit_schedules_skipped_total{reason="missed"}` | counter | a schedule occurrence | Occurrences that passed while no server could fire them and that the catch-up policy did not start. |
 | `orbit_active_executions` | gauge | | Executions not yet finished. |
 | `orbit_worker_sessions` | gauge | | Worker sessions the runtime remembers. A silent session is forgotten after four session timeouts. |
 

@@ -9,6 +9,7 @@ servers in cluster mode (with ORBIT_E2E_POSTGRES_URL).
     cargo build && python3 -I tests/e2e/test_e2e.py
 """
 
+import calendar
 import http.client
 import json
 import os
@@ -414,6 +415,8 @@ class ClientsAndLimits(unittest.TestCase):
         workers = os.path.join(d, "workers.toml")
         with open(workers, "w") as f:
             f.write(f'[[client]]\nid = "billing"\ntoken_sha256 = "{h}"\nworkflows = ["OrderApproval"]\nactions = ["start", "signal", "query", "read"]\n')
+            s = hashlib.sha256(b"scheduler-token").hexdigest()
+            f.write(f'\n[[client]]\nid = "scheduler"\ntoken_sha256 = "{s}"\nworkflows = ["OrderApproval"]\nactions = ["schedule"]\n')
         cls.c = Cluster(server_args=["--token", "admin-secret", "--workers-file", workers,
                                      "--max-active-executions", "2", "--max-payload-bytes", "4096"],
                         admin_token="admin-secret")
@@ -450,6 +453,27 @@ class ClientsAndLimits(unittest.TestCase):
         self.expect_status(403, "POST", "/v1/workers/register", {"worker_id": "x", "runtime": "python", "contracts": []})
         listed = {e["workflow"] for e in self.as_client("GET", "/v1/executions")["executions"]}
         self.assertEqual(listed, {"OrderApproval"})
+
+    def test_schedules_need_the_schedule_action(self):
+        spec = {"schedule_id": "approvals", "workflow": "OrderApproval", "cron": "0 6 * * *", "paused": True,
+                "input": {"order_id": "SCH-1", "customer_id": "c", "amount": 10.0}}
+        # `billing` may start executions but not manage schedules.
+        self.expect_status(403, "POST", "/v1/schedules", spec)
+        self.client = {"authorization": "Bearer scheduler-token"}
+        try:
+            self.assertEqual(self.as_client("POST", "/v1/schedules", spec)["paused"], True)
+            self.expect_status(403, "POST", "/v1/schedules", {**spec, "schedule_id": "other", "workflow": "OrderProcessing"})
+            self.expect_status(403, "PATCH", "/v1/schedules/approvals", {"workflow": "OrderProcessing"})
+            self.c.post("/v1/schedules", {"schedule_id": "admin-only", "workflow": "OrderProcessing", "cron": "0 6 * * *",
+                                          "paused": True, "input": order("SCH-2")})
+            self.expect_status(403, "GET", "/v1/schedules/admin-only")
+            listed = [s["schedule_id"] for s in self.as_client("GET", "/v1/schedules")["schedules"]]
+            self.assertEqual(listed, ["approvals"])
+            self.assertEqual(self.as_client("DELETE", "/v1/schedules/approvals")["deleted"], True)
+            # Schedule access is not read access to executions.
+            self.assertEqual(self.as_client("GET", "/v1/executions")["executions"], [])
+        finally:
+            self.client = {"authorization": "Bearer billing-token"}
 
     def test_limits(self):
         self.expect_status(413, "POST", "/v1/executions", {"workflow": "OrderApproval",
@@ -1160,6 +1184,124 @@ class SharedCluster(unittest.TestCase):
             self.assertTrue(p["StepDispatched"][0]["worker_session"] != p["StepDispatched"][1]["worker_session"])
             self.assertEqual(len(p["StepSucceeded"]), 1, "exactly one recorded success for the charge")
         self.start_node(victim)
+
+    def test_d_each_schedule_occurrence_fires_once_across_nodes(self):
+        self.c.post("/v1/schedules", {"schedule_id": "sh-tick", "workflow": "OrderProcessing", "interval": "1s",
+                                      "overlap": "allow", "input": order("SH-T")})
+        time.sleep(5)
+        self.c.post("/v1/schedules/sh-tick/pause", {})
+        time.sleep(1)
+        s = self.c.get("/v1/schedules/sh-tick")
+        ids = sorted(e["execution_id"] for e in self.c.get("/v1/executions?limit=1000")["executions"]
+                     if e["execution_id"].startswith("sh-tick:"))
+        self.assertGreaterEqual(s["fired"], 3, s)
+        self.assertEqual(s["fired"], len(ids), (s, ids))
+        fired = 0
+        for n in self.NODES:
+            with urllib.request.urlopen(self.node_url(n) + "/v1/metrics", timeout=5) as r:
+                m = re.search(r"^orbit_schedules_fired_total (\d+)$", r.read().decode(), re.M)
+                fired += int(m.group(1))
+        self.assertEqual(fired, s["fired"], "each start was made by exactly one node")
+        for ex in ids:
+            self.assertEqual(self.wait(ex, timeout=60)["status"], "COMPLETED")
+
+
+class Schedules(unittest.TestCase):
+    """Schedules on a real server with real workers: occurrences started on
+    time with deterministic ids, the `orbit schedule` CLI, pause, resume,
+    trigger and the overlap policy, and a server killed with SIGKILL."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.c = Cluster()
+        cls.c.start_server()
+        cls.c.start_workers()
+        cls.c.cli("deploy", WORKFLOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.c.stop()
+        print(f"\nlogs: {cls.c.dir}")
+
+    def scheduled(self, sid):
+        return sorted(e["execution_id"] for e in self.c.get("/v1/executions?limit=1000")["executions"]
+                      if e["execution_id"].startswith(sid + ":"))
+
+    def await_count(self, sid, n, timeout=30):
+        deadline = time.time() + timeout
+        while len(self.scheduled(sid)) < n:
+            self.assertLess(time.time(), deadline, f"{sid} did not start {n} executions")
+            time.sleep(0.2)
+
+    def test_a_interval_schedule_with_the_cli(self):
+        out = self.c.cli("schedule", "create", "every2", "--workflow", "OrderProcessing", "--every", "2s",
+                         "--input", json.dumps(order("SC-1"))).stdout
+        self.assertIn("active", out)
+        self.assertIn("next fires:", out)
+        self.await_count("every2", 2)
+        for ex in self.scheduled("every2")[:2]:
+            # `<schedule-id>:<occurrence>`; the occurrence is on the 2s grid.
+            self.assertRegex(ex, r"^every2:\d{4}-\d\d-\d\dT\d\d:\d\d:\d[02468]Z$")
+            s = self.c.wait(ex)
+            self.assertEqual(s["status"], "COMPLETED", json.dumps(s, indent=2))
+            self.assertEqual(s["schedule_id"], "every2")
+            self.assertEqual(s["output"]["transaction_id"], "tx-SC-1")
+        listing = self.c.cli("schedule", "list").stdout
+        self.assertRegex(listing, r"every2\s+OrderProcessing\s+every 2s\s+active")
+        self.c.cli("schedule", "pause", "every2")
+        time.sleep(0.5)
+        paused = len(self.scheduled("every2"))
+        time.sleep(4.5)
+        self.assertEqual(len(self.scheduled("every2")), paused, "a paused schedule does not fire")
+        self.assertIn("paused", self.c.cli("schedule", "get", "every2").stdout)
+        started = self.c.cli("schedule", "trigger", "every2").stdout
+        self.assertRegex(started, r"started execution every2:manual:")
+        info = json.loads(self.c.cli("schedule", "get", "every2", "--json").stdout)
+        self.assertEqual(info["fired"], paused + 1)
+        self.assertIn(":manual:", info["last_execution_id"])
+        self.assertIn("resumed; next fire", self.c.cli("schedule", "resume", "every2").stdout)
+        self.await_count("every2", paused + 2)
+        self.c.cli("schedule", "delete", "every2")
+        missing = self.c.cli("schedule", "get", "every2", check=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("SCHEDULE_NOT_FOUND", missing.stderr)
+
+    def test_b_overlap_skip_waits_for_the_running_execution(self):
+        # amount 4242 makes the charge take 3s: occurrences every second are
+        # skipped while one execution runs.
+        self.c.post("/v1/schedules", {"schedule_id": "slow", "workflow": "OrderProcessing", "interval": "1s",
+                                      "input": order("SC-2", amount=4242)})
+        time.sleep(5)
+        self.c.post("/v1/schedules/slow/pause", {})
+        time.sleep(0.5)
+        s = self.c.get("/v1/schedules/slow")
+        ids = self.scheduled("slow")
+        self.assertGreaterEqual(s["skipped"], 2, s)
+        self.assertEqual(s["fired"], len(ids))
+        runs = [self.c.wait(ex, timeout=60) for ex in ids]
+        for a, b in zip(runs, runs[1:]):
+            self.assertLessEqual(a["finished_at_ms"], b["created_at_ms"], "executions never overlapped")
+
+    def test_c_a_killed_server_fires_each_occurrence_once_after_restart(self):
+        self.c.post("/v1/schedules", {"schedule_id": "crash", "workflow": "OrderProcessing", "interval": "1s",
+                                      "overlap": "allow", "input": order("SC-3")})
+        self.await_count("crash", 2)
+        self.c.kill_server()
+        self.c.start_server()
+        before = len(self.scheduled("crash"))
+        self.await_count("crash", before + 2)
+        self.c.post("/v1/schedules/crash/pause", {})
+        time.sleep(0.5)
+        s = self.c.get("/v1/schedules/crash")
+        ids = self.scheduled("crash")
+        self.assertEqual(s["fired"], len(ids), (s, ids))
+        first, last = (time.strptime(i.split(":", 1)[1], "%Y-%m-%dT%H:%M:%SZ") for i in (ids[0], ids[-1]))
+        # Every occurrence between the first and the last was started or counted as skipped.
+        self.assertEqual(calendar.timegm(last) - calendar.timegm(first) + 1, s["fired"] + s["skipped"], (s, ids))
+        for ex in ids:
+            self.assertEqual(self.c.wait(ex, timeout=60)["status"], "COMPLETED")
+        with urllib.request.urlopen(self.c.url + "/v1/metrics", timeout=5) as r:
+            self.assertRegex(r.read().decode(), r"orbit_schedules_fired_total \d+")
 
 
 if __name__ == "__main__":

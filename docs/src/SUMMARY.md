@@ -29,6 +29,7 @@
 - [Compensation](language/compensation.md)
 - [Outcome handlers](language/handlers.md)
 - [Event handlers](language/events.md)
+- [Continue-as-new](language/continue-as-new.md)
 - [Expressions](language/expressions.md)
 - [Built-in functions](language/functions.md)
 - [HTTP adapter](language/http-adapter.md)
@@ -50,6 +51,7 @@
 
 - [Running the server](runtime/server.md)
 - [Executions and history](runtime/executions.md)
+- [Schedules](runtime/schedules.md)
 - [Delivery guarantees](runtime/guarantees.md)
 - [Storage](runtime/storage.md)
 - [Running several servers](runtime/cluster.md)

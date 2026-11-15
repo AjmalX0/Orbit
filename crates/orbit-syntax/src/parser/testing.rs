@@ -18,7 +18,7 @@ use crate::lexer::TokenKind;
 
 pub(super) const TEST_MEMBERS: &[&str] =
     &["workflow", "version", "input", "mock", "signal", "expect"];
-const EXPECT_KINDS: &[&str] = &["status", "output", "error", "step", "compensated"];
+const EXPECT_KINDS: &[&str] = &["status", "output", "error", "step", "compensated", "runs"];
 const MOCK_OUTCOMES: &[&str] = &["returns", "fails", "hangs"];
 
 impl Parser {
@@ -237,6 +237,16 @@ impl Parser {
                 self.bump();
                 ExpectKind::Compensated(self.ident("a step name")?)
             }
+            "runs" => {
+                self.bump();
+                match self.kind().clone() {
+                    TokenKind::Int(n) => ExpectKind::Runs(n, self.bump().span),
+                    _ => {
+                        self.error_here("a number of runs");
+                        return Err(());
+                    }
+                }
+            }
             "step" => {
                 self.bump();
                 let mut step = self.ident("a step name")?;
@@ -277,7 +287,7 @@ impl Parser {
                 let mut d = Diagnostic::error(
                     "E0100",
                     format!(
-                        "expected `status`, `output`, `error`, `step` or `compensated`, found {}",
+                        "expected `status`, `output`, `error`, `step`, `compensated` or `runs`, found {}",
                         self.kind().describe()
                     ),
                     self.span(),

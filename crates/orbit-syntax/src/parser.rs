@@ -43,6 +43,7 @@ const WORKFLOW_MEMBERS: &[&str] = &[
     "query",
     "limits",
     "return",
+    "continue_as_new",
     "on",
 ];
 const STEP_MEMBERS: &[&str] = &[
@@ -475,6 +476,7 @@ impl Parser {
             handlers: vec![],
             limits: None,
             ret: None,
+            continue_as_new: None,
             span: start,
         };
         let span = self.block("workflow", WORKFLOW_MEMBERS, |p| {
@@ -549,6 +551,46 @@ impl Parser {
                 "return" => {
                     p.bump();
                     wf.ret = Some(p.expr());
+                }
+                "continue_as_new" => {
+                    let s = p.bump().span;
+                    if wf.continue_as_new.is_some() {
+                        p.diagnostics
+                            .push(Diagnostic::error("E0106", "duplicate `continue_as_new`", s));
+                    }
+                    let mut can = ContinueAsNew {
+                        condition: None,
+                        input: None,
+                        span: s,
+                    };
+                    // `when <cond>` and `with <input>`, in either order.
+                    loop {
+                        if p.at_word("when") && can.condition.is_none() {
+                            p.bump();
+                            p.eat_colon();
+                            can.condition = Some(p.expr());
+                        } else if p.at_word("with") && can.input.is_none() {
+                            p.bump();
+                            p.eat_colon();
+                            can.input = Some(p.expr());
+                        } else {
+                            break;
+                        }
+                        can.span = s.to(p.prev_span());
+                    }
+                    if can.input.is_none() {
+                        p.diagnostics.push(
+                            Diagnostic::error(
+                                "E0323",
+                                "`continue_as_new` needs `with <input>`",
+                                can.span,
+                            )
+                            .with_help(
+                                "give the next run's input, e.g. `continue_as_new with { cursor: page.next }`",
+                            ),
+                        );
+                    }
+                    wf.continue_as_new = Some(Box::new(can));
                 }
                 "on" => {
                     let s = p.bump().span;

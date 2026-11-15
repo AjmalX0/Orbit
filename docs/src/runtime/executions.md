@@ -14,7 +14,8 @@ You start an execution with `orbit run`, `POST /v1/executions`, or a parent work
 
 - The definition is chosen by name and optional version; without a version, the highest registered version (by semantic version order) is used. The execution is pinned to that definition's hash for its whole life.
 - Input defaults are applied and the input is validated strictly against the workflow's `input` type. An invalid input is rejected with `INVALID_INPUT` and no execution is created.
-- The execution id is a random UUID unless you pass one. A client-chosen id makes starting idempotent: starting the same id again returns the existing execution (`created: false`) instead of creating a second one. A child workflow's id is `<parent id>.<unit>`, with dots in place of brackets (`order-7.ship`, `order-7.reserve.2`).
+- The execution id is a random UUID unless you pass one. A client-chosen id makes starting idempotent: starting the same id again returns the existing execution (`created: false`) instead of creating a second one. A child workflow's id is `<parent id>.<unit>`, with dots in place of brackets (`order-7.ship`, `order-7.reserve.2`); a child started by run 2 or later of its parent ([continue-as-new](#runs-continue-as-new)) is `<parent id>.run<N>.<unit>`.
+- A [schedule](schedules.md) starts executions with the id `<schedule id>:<occurrence>`, for example `nightly-orders:2026-11-16T01:00:00Z`, and records `schedule_id` in the execution.
 
 ```console
 $ orbit run examples/order_processing.orbit --id order-1001 --no-wait --input-file input.json
@@ -30,6 +31,7 @@ $ orbit run examples/order_processing.orbit --id order-1001 --no-wait --input-fi
 | `FAILED` | yes | A step failed permanently, a [resource limit](server.md#resource-limits) was reached, the `return` expression failed, or the output did not match the workflow's `output` type. |
 | `CANCELLED` | yes | Cancellation was requested and the abort finished. |
 | `TIMED_OUT` | yes | The workflow `timeout` passed and the abort finished. |
+| `CONTINUED_AS_NEW` | yes, for the run | The run ended with `continue_as_new` and the next run of the execution started. Only archived runs have this status (`GET /v1/executions/{id}/history?run=N`); the execution itself is the latest run. |
 
 ```text
                   ┌──────────────► COMPLETED
@@ -46,6 +48,29 @@ A terminal execution also carries `compensation`:
 | `none` | Nothing needed compensating. |
 | `completed` | Every compensation succeeded. |
 | `failed` | A compensation failed permanently. The history shows exactly what was and was not undone. |
+
+## Runs (continue-as-new)
+
+An execution has one or more runs. It starts with run 1; every
+[`continue_as_new`](../language/continue-as-new.md) ends the current run and
+starts run N+1 under the same execution id, with the new input and an empty
+history. In one transaction the runtime appends `WorkflowContinuedAsNew` to the
+finished run, moves that run's events from `execution_events` to
+`execution_run_events` (keyed by execution id and run), and writes the new
+run's first events: `WorkflowCreated` (with `run`), `WorkflowStarted`, and one
+`SignalReceived` for every signal the finished run received but no step took,
+in arrival order. A crash cannot leave an execution between two runs.
+
+- `GET /v1/executions/{id}`, `orbit status` and `orbit inspect` show the latest run; its state has `run` (absent for run 1).
+- `GET /v1/executions/{id}/history` returns the latest run's history; `?run=N` (and `orbit logs --run N`, `orbit replay --run N`) an earlier run's. Every run's `seq` starts at 1.
+- `wait` returns when the latest run ends with a terminal status other than `CONTINUED_AS_NEW`.
+- Signals go to the current run. A signal sent while a run is finishing is either recorded in that run (and carried over if no step took it) or in the next one; none is lost.
+- Queries, cancellation and the workflow `timeout` apply to the current run. The `timeout` counts from the run's start, and `created_at_ms` is the run's creation time.
+- The workflow version does not change: every run uses the definition the execution started with.
+- A new run is not a new execution: it does not count against `--max-active-executions` and does not increment `orbit_executions_started_total`. `--max-history-events` and the workflow's `max_history_events` apply to each run.
+- The default idempotency key of a unit in run N > 1 is `<execution id>/run<N>/<unit>`, so a worker that deduplicates by key does not mistake a later run's step for an earlier one's.
+
+`GET /v1/executions` lists the execution once.
 
 ## Units
 
@@ -108,7 +133,7 @@ Error objects (`error`) have the fields `code` (string), `message` (string), `re
 
 | Event | Fields | Meaning |
 |---|---|---|
-| `WorkflowCreated` | `workflow`, `version`, `definition_hash`, `input`, `parent`? | The execution exists. `input` has defaults applied. `parent` (`{"execution_id", "step"}`) is set for child workflows. Always event 1. |
+| `WorkflowCreated` | `workflow`, `version`, `definition_hash`, `input`, `parent`?, `schedule_id`?, `run`? | The execution (or, with `run`, run `run` of it) exists. `input` has defaults applied. `parent` (`{"execution_id", "step"}`) is set for child workflows, `schedule_id` for executions a [schedule](schedules.md) started, and `run` for runs after the first. Always event 1. |
 | `WorkflowStarted` | none | The execution began. Always event 2. |
 | `WorkflowTimeoutReached` | none | The workflow `timeout` passed. The execution starts aborting. |
 | `CancelRequested` | `reason` | Cancellation was requested. The execution starts aborting, unless it is already aborting. |
@@ -117,6 +142,7 @@ Error objects (`error`) have the fields `code` (string), `message` (string), `re
 | `WorkflowFailed` | `error`, `compensation` | Terminal: `FAILED`. The error message names the failed step. |
 | `WorkflowCancelled` | `compensation` | Terminal: `CANCELLED`. |
 | `WorkflowTimedOut` | `compensation` | Terminal: `TIMED_OUT`. |
+| `WorkflowContinuedAsNew` | `next_run`, `input` | Terminal for the run: `CONTINUED_AS_NEW`. Run `next_run` starts with `input` (defaults applied). The last event of an archived run. |
 
 ### Step events
 

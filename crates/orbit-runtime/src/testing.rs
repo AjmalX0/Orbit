@@ -197,6 +197,8 @@ impl Simulator {
         handler: &mut dyn TaskHandler,
     ) -> Result<Simulation, String> {
         let root = ROOT_EXECUTION_ID.to_string();
+        // Across every run of the execution (continue-as-new).
+        let started_at = self.now();
         self.engine
             .start(workflow, version, input, Some(root.clone()))
             .map_err(|e| e.message)?;
@@ -297,7 +299,7 @@ impl Simulator {
         let root = self.collect(&root)?;
         let end = root.state.finished_at_ms.unwrap_or(self.now());
         Ok(Simulation {
-            elapsed_ms: end.saturating_sub(root.state.created_at_ms),
+            elapsed_ms: end.saturating_sub(started_at),
             root,
             children,
             problems,
@@ -313,11 +315,12 @@ impl Simulator {
             .list_executions(None, None, 1000)
             .map_err(|e| e.message)?
         {
-            total += 1 + self
+            // Each run's history starts again at 1 (continue-as-new).
+            let state = self
                 .engine
                 .execution(&s.execution_id)
-                .map_err(|e| e.message)?
-                .last_seq;
+                .map_err(|e| e.message)?;
+            total += 1 + state.last_seq + (state.run as u64) * (1 << 32);
         }
         Ok(total)
     }
@@ -764,6 +767,12 @@ fn check(e: &Expectation, state: &ExecutionState) -> Option<String> {
 fn check_one(e: &Expectation, state: &ExecutionState) -> Option<String> {
     let unit = |step: &str| state.units.get(step).cloned().unwrap_or_default();
     match e {
+        Expectation::Runs { runs } => (state.run != *runs).then(|| {
+            format!(
+                "expected the execution to end in run {runs}, it ended in run {}",
+                state.run
+            )
+        }),
         Expectation::Status { status } => (state.status.as_str() != status)
             .then(|| format!("expected status {status}, got {}", describe_end(state))),
         Expectation::Output { expected } => {

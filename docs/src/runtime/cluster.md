@@ -179,6 +179,12 @@ x-orbit-leader: http://127.0.0.1:7301
 
 On the gRPC binding, a standby fails every call with `UNAVAILABLE` and `orbit-error-code: NOT_LEADER`.
 
+### Schedules
+
+Only the leader fires [schedules](schedules.md). A standby's store is read-only, so its engine never looks for due occurrences; it answers `GET /v1/schedules` and `GET /v1/schedules/{id}` from the database, and `503 NOT_LEADER` to every change. Every occurrence is claimed and advanced with a compare-and-set on its `orbit_schedules` row, and the claim checks the cluster term in the same transaction, so a deposed leader cannot take an occurrence. When the leader fails, the new leader drops the claims left in the table (they belong to the old leader) and fires what is due, applying the schedule's [catch-up policy](schedules.md#catch-up-after-downtime) to occurrences that passed during the failover. An occurrence the old leader had already started is not started again: its execution id is deterministic and starting an existing id is a no-op.
+
+The test `only_the_leader_fires_schedules_and_a_new_leader_carries_on` in `crates/orbit-runtime/tests/cluster.rs` checks this: with a 1-second interval schedule on two servers, the standby's `orbit_schedules_fired_total` stays 0, the leader's counts every start, and after the leader is stopped the new leader carries on with the same schedule.
+
 The gate runs before authentication, so a standby answers `NOT_LEADER` even to a request without credentials, and `/v1/ready` never requires credentials.
 
 ### Clients and workers
@@ -422,6 +428,16 @@ The owner applies its entries in `seq` order, through the same engine methods a 
 A signal or cancellation that reaches the wrong server is validated there first: the execution must exist and be running, the signal must be declared and its payload valid. Errors such as `404 UNKNOWN_SIGNAL`, `409 EXECUTION_FINISHED` or `422 SIGNAL_PAYLOAD_INVALID` are answered at once, exactly as on one server. A valid one goes to the owner's inbox, and the receiving server waits up to 10 seconds for the owner's reply, so the response carries the signal's `seq` and the cancelled execution's state as usual.
 
 Starting an execution needs no inbox: the server that receives the request owns the new execution. Reads (`GET` executions, history, lists, queries, `wait`) work on every server from the database; `wait` wakes on `NOTIFY orbit_done`.
+
+### Schedules in shared mode
+
+Every server looks for due [schedules](schedules.md) about once a second and tries to claim each due occurrence with `UPDATE orbit_schedules SET claimed_by = <server>, claimed_until_ms = <now + 30 s> WHERE schedule_id = $1 AND next_fire_ms = <the occurrence> AND <no live claim>`. Exactly one server's update matches; it applies the overlap and catch-up policies, starts the execution (and so owns it), and advances `next_fire_ms` with a second compare-and-set that also releases the claim. A schedule can be created, changed or triggered through any server.
+
+If the claiming server dies before it advances the schedule, its claim expires after 30 seconds and another server takes the occurrence; the deterministic execution id makes a start that already happened a no-op. Occurrences that pass meanwhile follow the schedule's catch-up policy.
+
+The test `each_schedule_occurrence_is_fired_by_exactly_one_node` in `crates/orbit-runtime/tests/shared.rs` runs a 1-second schedule on three servers for five seconds and checks that the schedule's `fired` count, the number of executions and the sum of the servers' `orbit_schedules_fired_total` are equal, and that every occurrence between the first and the last was started or counted as skipped. The end-to-end test `SharedCluster.test_d_each_schedule_occurrence_fires_once_across_nodes` checks the same with three server processes behind a proxy.
+
+[Continue-as-new](../language/continue-as-new.md) keeps the execution's owner and ownership epoch; the finished run's rows in `orbit_tasks` are deleted in the same transaction that starts the next run.
 
 ### Worker sessions
 

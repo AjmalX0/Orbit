@@ -38,6 +38,9 @@ workflow_member  = "version" , [ ":" ] , STRING
                  | "signal" , IDENTIFIER , record_body           (* typed message the execution accepts *)
                  | "query" , IDENTIFIER , [ "=" | ":" ] , expression   (* read-only view; written with "=" *)
                  | "return" , expression
+                 | "continue_as_new" , continue_as_new
+                   (* at most one (E0106); `with` is required (E0323) and typed
+                      against the workflow input; `when` must be Bool (E0324) *)
                  | "limits" , "{" , { IDENTIFIER , ":" , INTEGER , [ sep ] } , "}"
                    (* max_fan_out, max_history_events, max_payload_bytes; positive
                       integers (E0320, E0321); the stricter of this and the
@@ -53,6 +56,9 @@ workflow_member  = "version" , [ ":" ] , STRING
                       compute or sleep action; no await, child workflow, for,
                       max_parallel or compensate (E0307, E0308); `after` names
                       steps of the same block (E0303). *)
+
+continue_as_new  = [ "when" , [ ":" ] , expression ] , "with" , [ ":" ] , expression
+                 | "with" , [ ":" ] , expression , "when" , [ ":" ] , expression ;
 
 step_decl        = "step" , IDENTIFIER , "{" , { step_member , [ sep ] } , "}" ;
 step_member      = action
@@ -140,4 +146,5 @@ expectation      = "status" , IDENTIFIER                          (* COMPLETED F
                  | "step" , IDENTIFIER , ( IDENTIFIER             (* a unit status, e.g. SKIPPED *)
                                          | "output" , expression
                                          | "attempts" , INTEGER )
-                 | "compensated" , IDENTIFIER ;
+                 | "compensated" , IDENTIFIER
+                 | "runs" , INTEGER ;                               (* the final run, >= 1 (E0712, E0713) *)

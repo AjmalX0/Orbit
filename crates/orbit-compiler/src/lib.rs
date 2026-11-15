@@ -1139,6 +1139,47 @@ fn lower_workflow(
         (None, None) => (Type::record(None, vec![]), None),
     };
 
+    // --- continue_as_new: the next run's input is typed like a start input.
+    let continue_as_new = wf.continue_as_new.as_ref().and_then(|can| {
+        let env = Env {
+            input: Some(&input_ty),
+            steps: &step_types,
+            allowed: None,
+            context: "`continue_as_new`",
+            locals: &[],
+        };
+        let mut ck = Checker {
+            env: &env,
+            diags: &mut *diags,
+        };
+        let condition = can.condition.as_ref().map(|c| {
+            let (t, l) = ck.check(c, None);
+            if assignable(&t, &Type::Bool.optional()).is_err() {
+                ck.diags.push(Diagnostic::error(
+                    "E0324",
+                    format!("the `continue_as_new` condition must be `Bool`, found `{t}`"),
+                    c.span(),
+                ));
+            }
+            l
+        });
+        let input = can.input.as_ref().map(|i| ck.check(i, Some(&input_ty)).1)?;
+        if condition.is_none() {
+            if let Some(ret) = &wf.ret {
+                ck.diags.push(
+                    Diagnostic::warning(
+                        "W0607",
+                        "`return` is never used: `continue_as_new` has no `when`, so every run continues",
+                        ret.span(),
+                    )
+                    .with_label(can.span, "always continues")
+                    .with_help("add `when <condition>` to `continue_as_new`, or remove `return`"),
+                );
+            }
+        }
+        Some(ir::ContinueAsNewIr { condition, input })
+    });
+
     // --- Queries: any step may not have run yet, so every step output is optional.
     let query_steps: BTreeMap<String, Type> = step_types
         .iter()
@@ -1284,6 +1325,7 @@ fn lower_workflow(
         handlers,
         limits,
         events,
+        continue_as_new,
         source_map,
     };
     ir.ir_version = ir.required_ir_version().into();

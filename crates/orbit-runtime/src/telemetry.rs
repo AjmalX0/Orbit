@@ -158,7 +158,16 @@ pub fn spans_for(state: &ExecutionState, ctx: &TraceContext, batch: &[HistoryEve
             if u.redelivery {
                 attrs.push(attr("orbit.redelivery", true));
             }
-            let id = unit_span_id(&state.id, key, u.dispatch_count.max(1));
+            // Later runs (continue-as-new) reuse unit keys: keep their spans apart.
+            let id = if state.run > 1 {
+                unit_span_id(
+                    &state.id,
+                    &format!("run{}/{key}", state.run),
+                    u.dispatch_count.max(1),
+                )
+            } else {
+                unit_span_id(&state.id, key, u.dispatch_count.max(1))
+            };
             Some(
                 Span {
                     trace: &ctx.trace_id,

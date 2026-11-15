@@ -46,7 +46,7 @@ A `task` declaration has a string name and up to five members: `version`,
 
 A workflow has an identifier name and members: `version`, `description`,
 `timeout`, `input`, `output`, any number of `step`, `signal` and `query`
-declarations, `return`, and `on` handlers. A `signal` has a name and a record body, like
+declarations, `return`, `continue_as_new`, and `on` handlers. `continue_as_new` takes `with <input>` and an optional `when <condition>`, in either order; see [Continue-as-new](continue-as-new.md). A `signal` has a name and a record body, like
 `input`. A `query` has a name, `=` and an expression; the parser also accepts
 `:` or nothing in place of `=`, but `=` is the documented form. See
 [Signals and queries](signals.md). An `on` member is an outcome handler:
@@ -65,7 +65,7 @@ restrictions listed under
 
 A `test` declaration has a string name and members: `workflow` (an
 identifier), `version`, `input`, any number of `mock`, `signal` and `expect`
-members. A `mock` chains behaviours with `times N then`. Tests are checked by
+members. A `mock` chains behaviours with `times N then`. `expect runs N` checks the run an execution ended in. Tests are checked by
 the compiler but never compiled into workflow IR. See
 [Testing workflows](../tooling/testing.md).
 
@@ -245,6 +245,8 @@ The grammar accepts some programs that the compiler then rejects:
 | `after` in a handler names a step of the same block. | `E0303` |
 | Handler steps take no `await`, child `workflow`, `for` or `max_parallel`, and no `compensate`. | `E0307`, `E0308` |
 | `failure` is read only inside handler steps. | `E0401` |
+| `continue_as_new` appears at most once, has `with`, a `Bool` `when`, and an input of the workflow's `input` type. | `E0106`, `E0323`, `E0324`, `E0400`, `E0403` |
+| `expect runs` is at least 1, and more than 1 only for a workflow with `continue_as_new`. | `E0712`, `E0713` |
 
 The full list of codes is in [Compiler diagnostics](../reference/diagnostics.md).
 

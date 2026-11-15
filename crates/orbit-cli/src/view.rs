@@ -379,6 +379,12 @@ pub fn status(s: &Value, tty: bool) -> String {
         s["workflow"].as_str().unwrap_or(""),
         s["version"].as_str().unwrap_or("")
     );
+    if let Some(run) = s["run"].as_u64() {
+        let _ = writeln!(out, "  run: {run} (continue-as-new)");
+    }
+    if let Some(sched) = s["schedule_id"].as_str() {
+        let _ = writeln!(out, "  schedule: {sched}");
+    }
     if let (Some(a), Some(b)) = (
         s["created_at_ms"].as_i64(),
         s["finished_at_ms"].as_i64().or(s["updated_at_ms"].as_i64()),
@@ -466,6 +472,9 @@ pub fn timeline(h: &Value, tty: bool) -> String {
             "delay_ms",
             "redelivery",
             "outcome",
+            "run",
+            "next_run",
+            "schedule_id",
         ] {
             if let Some(v) = e.get(key) {
                 if !v.is_null() && v != &Value::Bool(false) {

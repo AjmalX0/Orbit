@@ -17,6 +17,8 @@ pub struct ReplayArgs {
     pub definition: Option<PathBuf>,
     pub workflow: Option<String>,
     pub at: Option<u64>,
+    /// Replay this run of the execution (continue-as-new); default the latest.
+    pub run: Option<u32>,
     pub json: bool,
     pub remote: Remote,
 }
@@ -90,9 +92,11 @@ pub fn run(args: ReplayArgs, tty: bool) -> Result<ExitCode, String> {
         }
         (None, Some(id)) => {
             let client = args.remote.client();
-            let v = client
-                .get(&format!("/v1/executions/{id}/history"))
-                .map_err(|e| e.to_string())?;
+            let path = match args.run {
+                Some(run) => format!("/v1/executions/{id}/history?run={run}"),
+                None => format!("/v1/executions/{id}/history"),
+            };
+            let v = client.get(&path).map_err(|e| e.to_string())?;
             let (_, h) = parse_history(v, "the runtime")?;
             let def = match &args.definition {
                 Some(_) => None,

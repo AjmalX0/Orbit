@@ -35,6 +35,14 @@ workflow Waits {
     step wait { await go timeout 1h }
     step s { worker "a" after wait with { n: input.n } }
 }
+workflow Loop {
+    version "1.0.0"
+    input { n: Int }
+    output { n: Int }
+    step s { worker "a" with { n: input.n } }
+    continue_as_new when s.n < 1000 with { n: s.n }
+    return { n: s.n }
+}
 "#;
 
 struct Db {
@@ -309,7 +317,137 @@ fn drain(node: &TestNode, session: &str, ids: &[String]) {
     }
 }
 
+fn metric(node: &TestNode, name: &str) -> u64 {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let text = agent
+        .get(format!("{}/v1/metrics", node.url))
+        .call()
+        .unwrap()
+        .body_mut()
+        .read_to_string()
+        .unwrap();
+    text.lines()
+        .find_map(|l| l.strip_prefix(&format!("{name} ")))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 // ------------------------------------------------------------------- tests
+
+#[test]
+fn each_schedule_occurrence_is_fired_by_exactly_one_node() {
+    let db = db_or_skip!("shared_schedules");
+    let nodes = [
+        TestNode::spawn(&db.url, "node-a"),
+        TestNode::spawn(&db.url, "node-b"),
+        TestNode::spawn(&db.url, "node-c"),
+    ];
+    for ir in workflows() {
+        ok(
+            "POST",
+            &format!("{}/v1/workflows", nodes[0].url),
+            Some(serde_json::to_value(ir).unwrap()),
+        );
+    }
+    ok(
+        "POST",
+        &format!("{}/v1/schedules", nodes[1].url),
+        Some(json!({
+            "schedule_id": "tick",
+            "workflow": "One",
+            "interval": "1s",
+            "overlap": "allow",
+            "input": { "n": 1 }
+        })),
+    );
+    std::thread::sleep(Duration::from_millis(5_000));
+    ok(
+        "POST",
+        &format!("{}/v1/schedules/tick/pause", nodes[2].url),
+        None,
+    );
+    // A claim in progress when pausing finishes within the tick.
+    std::thread::sleep(Duration::from_millis(500));
+    let s = ok("GET", &format!("{}/v1/schedules/tick", nodes[0].url), None);
+    let mut ids: Vec<String> = ok(
+        "GET",
+        &format!("{}/v1/executions?limit=1000", nodes[0].url),
+        None,
+    )["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["execution_id"].as_str().map(str::to_string))
+        .filter(|id| id.starts_with("tick:"))
+        .collect();
+    ids.sort();
+    let fired = s["fired"].as_u64().unwrap();
+    assert!(fired >= 3, "{s}");
+    // Each start was claimed once: the schedule's count, the executions and
+    // the per-node counters agree.
+    assert_eq!(fired as usize, ids.len(), "{s} {ids:?}");
+    let per_node: Vec<u64> = nodes
+        .iter()
+        .map(|n| metric(n, "orbit_schedules_fired_total"))
+        .collect();
+    assert_eq!(per_node.iter().sum::<u64>(), fired, "{per_node:?}");
+    // Consecutive occurrences: none was handled twice or lost (skipped
+    // ones are counted, not started).
+    let first = orbit_runtime::schedule::parse_time(ids[0].trim_start_matches("tick:")).unwrap();
+    let last = orbit_runtime::schedule::parse_time(ids.last().unwrap().trim_start_matches("tick:"))
+        .unwrap();
+    assert_eq!(
+        (last - first) / 1000 + 1,
+        fired + s["skipped"].as_u64().unwrap(),
+        "{s} {ids:?}"
+    );
+}
+
+#[test]
+fn continue_as_new_keeps_the_owner_and_works_with_remote_workers() {
+    let db = db_or_skip!("shared_can");
+    let a = TestNode::spawn(&db.url, "node-a");
+    let b = TestNode::spawn(&db.url, "node-b");
+    for ir in workflows() {
+        ok(
+            "POST",
+            &format!("{}/v1/workflows", a.url),
+            Some(serde_json::to_value(ir).unwrap()),
+        );
+    }
+    start(&a, "Loop", "loop-1", 1);
+    // The worker polls node b; node a owns the execution through every run.
+    let session = register(&b);
+    drain(&b, &session, &["loop-1".to_string()]);
+    let s = wait(&b, "loop-1");
+    assert_eq!(s["status"], "COMPLETED");
+    assert_eq!(s["run"], 3);
+    assert_eq!(s["output"], json!({ "n": 1000 }));
+    let run1 = ok(
+        "GET",
+        &format!("{}/v1/executions/loop-1/history?run=1", b.url),
+        None,
+    );
+    assert_eq!(run1["run"], 1);
+    assert_eq!(
+        run1["events"].as_array().unwrap().last().unwrap()["type"],
+        "WorkflowContinuedAsNew"
+    );
+    let mut c = db.sql();
+    let tasks: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM orbit_tasks WHERE execution_id = 'loop-1'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    // Only the last run's queue row is left (finished runs' rows are deleted).
+    assert_eq!(tasks, 1);
+    assert_eq!(a.health()["owned_executions"], 0);
+}
 
 #[test]
 fn a_worker_on_one_node_runs_tasks_of_executions_another_node_owns() {

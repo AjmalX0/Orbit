@@ -75,13 +75,13 @@ jobs:
         run: cd sdks/java && mvn -B -q verify && mvn -B -q install -DskipTests -Dgpg.skip=true
       - name: C# SDK tests
         run: cd sdks/csharp && dotnet test --nologo
-      - name: End-to-end (six languages, crash recovery, TLS, mTLS identities)
+      - name: End-to-end (six languages, crash recovery, TLS, mTLS identities, schedules)
         run: cargo build && python3 -I tests/e2e/test_e2e.py
-      - name: End-to-end on PostgreSQL (incl. two-server failover, three active servers)
+      - name: End-to-end on PostgreSQL (incl. two-server failover, three active servers, schedules)
         env:
           ORBIT_E2E_POSTGRES_URL: postgres://orbit:orbit@127.0.0.1:5432/postgres
           PGPASSWORD: orbit
-        run: python3 -I tests/e2e/test_e2e.py EndToEnd HighAvailability SharedCluster
+        run: python3 -I tests/e2e/test_e2e.py EndToEnd HighAvailability SharedCluster Schedules
 
   msrv:
     name: minimum supported Rust (1.89)

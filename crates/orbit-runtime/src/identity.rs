@@ -56,7 +56,7 @@ pub fn pattern_matches(pattern: &str, task: &str) -> bool {
 }
 
 /// Actions a client identity can be granted.
-pub const CLIENT_ACTIONS: &[&str] = &["start", "signal", "query", "read", "cancel"];
+pub const CLIENT_ACTIONS: &[&str] = &["start", "signal", "query", "read", "cancel", "schedule"];
 
 fn default_client_actions() -> Vec<String> {
     ["start", "signal", "query", "read"]

@@ -66,14 +66,39 @@ The schema is the same on both backends (`BIGINT` columns are `INTEGER` in SQLit
 | `schema_version` | | One row: the schema version (`1`). |
 | `workflow_definitions` | `(name, version)` | `definition_hash`, the full IR as JSON in `ir`, and `created_at_ms`. Rows are never updated. |
 | `workflow_executions` | `execution_id` | Projection for listing: `workflow`, `version`, `definition_hash`, `status`, `created_at_ms`, `updated_at_ms`, `last_seq`. Indexed by `status`. |
-| `execution_events` | `(execution_id, seq)` | The authoritative history: `event_type`, `step` (or null), `payload` (the event as JSON), `timestamp_ms`. Append-only. |
+| `execution_events` | `(execution_id, seq)` | The authoritative history of each execution's current run: `event_type`, `step` (or null), `payload` (the event as JSON), `timestamp_ms`. Append-only, except that a run's events move to `execution_run_events` when it ends with `continue_as_new`. |
+| `execution_run_events` | `(execution_id, run, seq)` | The histories of runs that ended with [`continue_as_new`](../language/continue-as-new.md), with the same columns as `execution_events` plus `run`. Rows are never updated. |
+| `orbit_schedules` | `schedule_id` | [Schedules](schedules.md): see [Schedule table](#schedule-table). |
 | `worker_registry` | `worker_id` | Latest registration of each worker: `runtime`, `sdk`, `contracts` (JSON), `registered_at_ms`, `last_seen_ms`. |
 | `orbit_cluster` | `id` | PostgreSQL, cluster mode only. See [Cluster table](#cluster-table). |
 | `orbit_nodes`, `orbit_owners`, `orbit_tasks`, `orbit_inbox`, `orbit_sessions` | | PostgreSQL, shared mode only. See [Shared-mode tables](#shared-mode-tables). |
 
-Each batch of events and the matching `workflow_executions` update are written in one transaction. Worker sessions, tokens in flight and metrics are kept in memory only; sessions and tokens are rebuilt from the history on startup, and metrics start from zero. Shared mode is the exception: it keeps worker sessions and the task queue in the shared-mode tables, so that every server sees them.
+Each batch of events and the matching `workflow_executions` update are written in one transaction. So is a continue-as-new: the finished run's last events, the move of its history to `execution_run_events`, the next run's first events and the projection update commit together. Worker sessions, tokens in flight and metrics are kept in memory only; sessions and tokens are rebuilt from the history on startup, and metrics start from zero. Shared mode is the exception: it keeps worker sessions and the task queue in the shared-mode tables, so that every server sees them.
 
 The tables are an implementation detail. Read execution state through the [HTTP API](../reference/http-api.md), which applies the same fold the engine uses. Do not write to the tables: a modified history no longer matches what the engine decided.
+
+The tables are created with `CREATE TABLE IF NOT EXISTS` on every start, so a database created by an earlier version gains `execution_run_events` and `orbit_schedules` on the first start of this version, without a migration step and without changing existing rows. The schema version stays `1`.
+
+### Schedule table
+
+`orbit_schedules` holds one row per schedule. Every server that can write reads it about once a second for due occurrences; see [Schedules: how firing works](schedules.md#how-firing-works).
+
+| Column | Type | Meaning |
+|---|---|---|
+| `schedule_id` | `TEXT`, primary key | The schedule id. |
+| `spec` | `TEXT` | The specification as JSON: workflow, version, input, cron or interval, time zone, policies, start and end, jitter, description. |
+| `paused` | `BIGINT` | `1` while paused. |
+| `next_fire_ms` | `BIGINT` | The next occurrence (nominal time), or null when the schedule has ended. Claims and advances compare it (compare-and-set). |
+| `due_ms` | `BIGINT` | When that occurrence fires: `next_fire_ms` plus its jitter. Indexed. |
+| `last_fire_ms` | `BIGINT` | The latest occurrence handled. |
+| `last_execution_id` | `TEXT` | The latest execution started, including triggers. |
+| `fired_count`, `skipped_count` | `BIGINT` | Counters shown as `fired` and `skipped`. |
+| `last_error` | `TEXT` | Why the latest start failed, if it did. |
+| `claimed_by` | `TEXT` | The engine instance that holds a claim on `next_fire_ms`, or null. |
+| `claimed_until_ms` | `BIGINT` | When that claim expires (30 seconds after it was taken), or when a failed start is retried. |
+| `created_at_ms`, `updated_at_ms` | `BIGINT` | Creation and last change. |
+
+Times are milliseconds since the Unix epoch, from the clock of the server that wrote them.
 
 ### Cluster table
 
@@ -156,7 +181,7 @@ Every server deletes, every 30 seconds: sessions silent for four session timeout
 
 ## Retention
 
-The runtime never deletes history. Finished executions stay queryable through `orbit status`, `orbit logs` and the API indefinitely, and the database grows with the number of events. Plan disk space accordingly; a typical step produces three to five events. There is no built-in archival or pruning in this version.
+The runtime never deletes history. Finished executions stay queryable through `orbit status`, `orbit logs` and the API indefinitely, and the database grows with the number of events. Plan disk space accordingly; a typical step produces three to five events. There is no built-in archival or pruning in this version. Runs that ended with `continue_as_new` are kept in `execution_run_events`: continue-as-new bounds what one run replays and holds in memory, not what the database stores.
 
 ## Backups
 

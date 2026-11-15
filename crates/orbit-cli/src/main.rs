@@ -5,6 +5,7 @@ mod compat;
 mod lsp;
 mod replay;
 mod scaffold;
+mod schedule;
 mod testing;
 mod view;
 
@@ -204,6 +205,9 @@ enum Command {
         /// Print raw JSON events (with sensitive fields redacted).
         #[arg(long)]
         json: bool,
+        /// Show this run of the execution (continue-as-new); default the latest.
+        #[arg(long)]
+        run: Option<u32>,
         #[command(flatten)]
         remote: Remote,
     },
@@ -260,7 +264,7 @@ enum Command {
         #[arg(long = "workflow", requires = "client", default_value = "*")]
         workflows: Vec<String>,
         /// Actions the client is granted (with --client): start, signal,
-        /// query, read, cancel.
+        /// query, read, cancel, schedule.
         #[arg(long = "action", requires = "client", default_values_t = ["start".to_string(), "signal".to_string(), "query".to_string(), "read".to_string()])]
         actions: Vec<String>,
     },
@@ -268,6 +272,11 @@ enum Command {
     Workers {
         #[command(subcommand)]
         command: WorkersCommand,
+    },
+    /// Start workflows on a cron expression or a fixed interval.
+    Schedule {
+        #[command(subcommand)]
+        command: schedule::ScheduleCommand,
     },
     /// Run the `test` declarations in .orbit files, without a server or workers.
     Test {
@@ -323,6 +332,9 @@ enum Command {
         /// Print the reconstructed execution state right after this event.
         #[arg(long, value_name = "SEQ")]
         at: Option<u64>,
+        /// Replay this run of the execution (continue-as-new); default the latest.
+        #[arg(long, conflicts_with = "history")]
+        run: Option<u32>,
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
@@ -745,12 +757,14 @@ fn run(cmd: Command) -> Res {
         Command::Logs {
             execution_id,
             json,
+            run,
             remote,
         } => {
-            let h = remote
-                .client()
-                .get(&format!("/v1/executions/{execution_id}/history"))
-                .map_err(|e| e.to_string())?;
+            let path = match run {
+                Some(r) => format!("/v1/executions/{execution_id}/history?run={r}"),
+                None => format!("/v1/executions/{execution_id}/history"),
+            };
+            let h = remote.client().get(&path).map_err(|e| e.to_string())?;
             if json {
                 for e in h["events"].as_array().cloned().unwrap_or_default() {
                     println!("{}", serde_json::to_string(&view::redact(e)).unwrap());
@@ -951,6 +965,7 @@ fn run(cmd: Command) -> Res {
             definition,
             workflow,
             at,
+            run,
             json,
             remote,
         } => replay::run(
@@ -960,11 +975,13 @@ fn run(cmd: Command) -> Res {
                 definition,
                 workflow,
                 at,
+                run,
                 json,
                 remote,
             },
             tty,
         ),
+        Command::Schedule { command } => schedule::run(command, tty),
         Command::Workers {
             command: WorkersCommand::List { remote },
         } => {
