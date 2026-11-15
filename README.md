@@ -80,23 +80,23 @@ docker build -t orbit .
 docker run -p 7233:7233 -e ORBIT_TOKEN=change-me -v orbit-data:/data orbit
 ```
 
-**After the first tagged release** (see [RELEASING.md](RELEASING.md)), prebuilt
-binaries and packages are published:
+**Prebuilt binaries** (Linux, macOS, Windows) from
+[GitHub Releases](https://github.com/AjmalX0/Orbit/releases/latest):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AjmalX0/Orbit/main/install.sh | sh
+curl -fsSL https://github.com/AjmalX0/Orbit/releases/latest/download/install.sh | sh
 ```
 
 | | Package |
 |---|---|
 | CLI / runtime | `cargo install orbit-lang`, the install script, GitHub Releases, `ghcr.io/ajmalx0/orbit` |
 | Python | `pip install orbit-lang-sdk` |
-| TypeScript / JavaScript | `npm install @orbit-lang/sdk` |
+| TypeScript / JavaScript | `npm install orbit-lang` |
 | Go | `go get github.com/AjmalX0/Orbit/sdks/go` |
 | Rust | `cargo add orbit-worker` |
 | Java | `io.github.ajmalx0:orbit-sdk` (Maven Central) |
 | C# / .NET | `dotnet add package OrbitLang.Sdk` |
-| VS Code | the *ORBIT* extension (`orbit-lang.orbit-lang`) |
+| VS Code | `orbit-lang.vsix` from [GitHub Releases](https://github.com/AjmalX0/Orbit/releases/latest), then `code --install-extension orbit-lang.vsix` |
 
 ## Quick start
 

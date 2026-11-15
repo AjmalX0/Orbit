@@ -151,6 +151,7 @@ jobs:
         run: |
           mkdir -p assets
           find artifacts -type f \( -name 'orbit-*.tar.gz' -o -name 'orbit-*.zip' -o -name '*.vsix' -o -name '*.whl' -o -name '*.nupkg' -o -name '*.tgz' \) -exec cp {} assets/ \;
+          cp install.sh assets/
           cd assets && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
