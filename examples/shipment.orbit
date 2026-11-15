@@ -1,0 +1,48 @@
+// Shipment tracking with `on event` handlers and per-workflow limits.
+//
+// Every `location` signal (`orbit signal <id> location --data '{...}'`) runs
+// the `on event location` block once, alongside the main steps: the customer
+// is told where the parcel is. The shipment ends when a `delivered` signal
+// arrives; the execution finishes once every running `location` block is done.
+//
+// Workers: examples/workers/python/order_workers.py and
+// examples/workers/typescript/order_workers.ts.
+
+import "contracts.orbit"
+
+workflow Shipment {
+    version "1.0.0"
+    description "Tells the customer about every scan until the parcel is delivered"
+    input { shipment_id: String, customer_id: String }
+
+    limits { max_history_events: 5000 }
+
+    signal location { place: String, eta_hours: Int = 0 }
+    signal delivered { signed_by: String }
+
+    step arrival { await delivered timeout 30d }
+
+    step confirm {
+        worker "notifications.send"
+        with {
+            customer_id: input.customer_id
+            message: "Shipment " + input.shipment_id + " was delivered, signed by " + arrival.signed_by
+        }
+    }
+
+    on event location {
+        step text {
+            compute if event.eta_hours > 0
+                then "Shipment " + input.shipment_id + " is in " + event.place + ", about " + string(event.eta_hours) + "h away"
+                else "Shipment " + input.shipment_id + " is in " + event.place
+        }
+        step tell {
+            worker "notifications.send"
+            with { customer_id: input.customer_id, message: text }
+        }
+    }
+
+    query delivered_to = arrival.signed_by
+
+    return { signed_by: arrival.signed_by }
+}

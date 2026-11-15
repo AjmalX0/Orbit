@@ -107,6 +107,8 @@ pub struct Workflow {
 #[derive(Debug, Clone)]
 pub struct Handler {
     pub kind: Ident,
+    /// For `on event <signal>`: the signal that starts the block.
+    pub event: Option<Ident>,
     pub steps: Vec<Step>,
     pub span: Span,
 }

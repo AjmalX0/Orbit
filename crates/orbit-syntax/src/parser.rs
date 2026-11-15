@@ -552,8 +552,13 @@ impl Parser {
                 }
                 "on" => {
                     let s = p.bump().span;
-                    let kind = p.ident("`failure`, `cancel` or `timeout`")?;
-                    if ["failure", "cancel", "timeout"].contains(&kind.name.as_str()) {
+                    let kind = p.ident("`failure`, `cancel`, `timeout` or `event`")?;
+                    let event = if kind.name == "event" {
+                        Some(p.ident("a signal name")?)
+                    } else {
+                        None
+                    };
+                    if ["failure", "cancel", "timeout", "event"].contains(&kind.name.as_str()) {
                         let mut steps = vec![];
                         let end = p.block("handler", &["step"], |p| {
                             if p.at_word("step") {
@@ -565,6 +570,7 @@ impl Parser {
                         });
                         wf.handlers.push(Handler {
                             kind,
+                            event,
                             steps,
                             span: s.to(end),
                         });
@@ -595,7 +601,9 @@ impl Parser {
                             format!("`on {}` handlers are not supported", kind.name),
                             s.to(span),
                         )
-                        .with_help("use `on failure`, `on cancel` or `on timeout`"),
+                        .with_help(
+                            "use `on failure`, `on cancel`, `on timeout` or `on event <signal>`",
+                        ),
                     );
                 }
                 _ => return Ok(false),

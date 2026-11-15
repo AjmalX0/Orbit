@@ -240,9 +240,16 @@ fn lower_test(
     // --- Expectations.
     let step_names: Vec<&str> = wf.steps.iter().map(|s| s.id.as_str()).collect();
     let find_step = |name: &ast::Ident, diags: &mut Vec<Diagnostic>| -> Option<&ir::StepIr> {
-        let found = match ir::parse_handler_key(&name.name) {
-            Some((kind, id)) => wf.handler_step(kind, id),
-            None => wf.step(&name.name),
+        let found = match name
+            .name
+            .strip_prefix("on_event:")
+            .and_then(|r| r.split_once(':'))
+        {
+            Some((signal, id)) => wf.event_step(signal, id),
+            None => match ir::parse_handler_key(&name.name) {
+                Some((kind, id)) => wf.handler_step(kind, id),
+                None => wf.step(&name.name),
+            },
         };
         if found.is_none() {
             let mut d = Diagnostic::error(

@@ -1423,3 +1423,95 @@ fn child_workflows_do_not_count_toward_max_active_executions() {
     // The child started even though the parent already uses the only slot.
     assert!(h.engine.execution(&format!("{id}.kid")).is_ok());
 }
+
+const EVENTS: &str = r#"workflow W { version "1.0.0"
+    input { n: Int }
+    signal note { k: Int }
+    step wait { await done timeout 1h }
+    signal done { ok: Bool }
+    on event note {
+        step record { worker "a" with { n: event.k } }
+        step total { compute record.n * 10 after record }
+    }
+    return { ok: wait.ok }
+}"#;
+
+#[test]
+fn on_event_runs_a_block_for_every_signal() {
+    let mut h = Harness::new();
+    let ir = compile(EVENTS);
+    assert!(ir.events.contains_key("note"));
+    let id = h.start(&ir, json!({ "n": 1 }));
+    h.engine.signal(&id, "note", json!({ "k": 1 })).unwrap();
+    h.engine.signal(&id, "note", json!({ "k": 5 })).unwrap();
+    let s = h.state(&id);
+    let instances: Vec<_> = s
+        .signals
+        .iter()
+        .map(|r| r.delivered_to.clone().unwrap())
+        .collect();
+    let expected: Vec<String> = s
+        .signals
+        .iter()
+        .map(|r| format!("on_event:note@{}", r.seq))
+        .collect();
+    assert_eq!(instances, expected);
+    assert_eq!(s.units[&instances[0]].output, Some(json!({ "k": 1 })));
+    // The main workflow keeps waiting; finishing it waits for the instances.
+    h.engine.signal(&id, "done", json!({ "ok": true })).unwrap();
+    assert_eq!(h.state(&id).status, WorkflowStatus::Running);
+    let w = h.worker("w", "python", &["a"]);
+    let t1 = echo(&mut h, &w);
+    let t2 = echo(&mut h, &w);
+    let mut seen = vec![
+        t1.input["n"].as_i64().unwrap(),
+        t2.input["n"].as_i64().unwrap(),
+    ];
+    seen.sort();
+    assert_eq!(seen, [1, 5]);
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Completed);
+    assert_eq!(
+        s.units[&format!("{}:total", instances[0])].output,
+        Some(json!(20))
+    );
+    assert_eq!(
+        s.units[&format!("{}:total", instances[1])].output,
+        Some(json!(60))
+    );
+}
+
+#[test]
+fn a_failing_event_step_fails_the_execution() {
+    let mut h = Harness::new();
+    let ir = compile(EVENTS);
+    let id = h.start(&ir, json!({ "n": 1 }));
+    h.engine.signal(&id, "note", json!({ "k": 1 })).unwrap();
+    let w = h.worker("w", "python", &["a"]);
+    let t = h.poll(&w).unwrap();
+    h.engine
+        .fail(&t.token, TaskError::new("BAD", "nope", false))
+        .unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    let instance = s.signals[0].delivered_to.clone().unwrap();
+    assert_eq!(
+        s.units[&format!("{instance}:record")].status(),
+        UnitStatus::Failed
+    );
+    assert_eq!(
+        s.units[&format!("{instance}:total")].status(),
+        UnitStatus::Cancelled
+    );
+    assert_eq!(s.units["wait"].status(), UnitStatus::Cancelled);
+}
+
+#[test]
+fn signals_arriving_after_cancellation_start_no_event_block() {
+    let mut h = Harness::new();
+    let ir = compile(EVENTS);
+    let id = h.start(&ir, json!({ "n": 1 }));
+    h.engine.cancel(&id, "stop").unwrap();
+    assert_eq!(h.state(&id).status, WorkflowStatus::Cancelled);
+    assert!(h.engine.signal(&id, "note", json!({ "k": 1 })).is_err());
+}

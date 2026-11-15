@@ -14,7 +14,7 @@
       "captures": { "1": { "name": "keyword.declaration.orbit" }, "2": { "name": "entity.name.function.orbit" } }
     },
     { "name": "keyword.control.orbit", "match": "\\b(import|workflow|schema|task|step|signal|query|await|compute|return|when|after|compensate|retry|if|then|else|on)\\b" },
-    { "name": "keyword.other.orbit", "match": "\\b(version|description|input|output|worker|sleep|using|with|timeout|queue_timeout|idempotency_key|compensated_by|for|in|max_parallel)\\b" },
+    { "name": "keyword.other.orbit", "match": "\\b(version|description|input|output|worker|sleep|using|with|timeout|queue_timeout|idempotency_key|compensated_by|for|in|max_parallel|limits|event)\\b" },
     { "name": "storage.type.orbit", "match": "\\b(String|Int|Float|Bool|Bytes|Duration|Timestamp|UUID|JSON|List|Map)\\b" },
     { "name": "constant.language.orbit", "match": "\\b(true|false|null|fixed|exponential)\\b" },
     { "name": "constant.numeric.duration.orbit", "match": "\\b\\d[\\d_]*(\\.\\d+)?(ms|s|m|h|d)\\b" },

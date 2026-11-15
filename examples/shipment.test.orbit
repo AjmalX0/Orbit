@@ -1,0 +1,28 @@
+// Tests for the Shipment workflow (shipment.orbit).
+//
+// Run them with `orbit test examples/shipment.test.orbit`.
+
+import "shipment.orbit"
+
+test "every scan notifies the customer" {
+    workflow Shipment
+    input { shipment_id: "S-1", customer_id: "c-1" }
+    mock "notifications.send" returns { delivered: true }
+    signal location { place: "Rotterdam", eta_hours: 30 }
+    signal location { place: "Utrecht" }
+    signal delivered { signed_by: "J. de Vries" }
+    expect status COMPLETED
+    expect output { signed_by: "J. de Vries" }
+    expect step on_event: location: tell SUCCEEDED
+    expect step confirm output { delivered: true }
+}
+
+test "a failed scan notification fails the shipment" {
+    workflow Shipment
+    input { shipment_id: "S-2", customer_id: "c-2" }
+    mock "notifications.send" fails "UNREACHABLE" "the customer has no contact details"
+    signal location { place: "Antwerp" }
+    expect status FAILED
+    expect error "UNREACHABLE"
+    expect step on_event: location: tell FAILED
+}

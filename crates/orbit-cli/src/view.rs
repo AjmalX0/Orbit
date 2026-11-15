@@ -276,7 +276,24 @@ pub fn ir_summary(wf: &WorkflowIr, tty: bool) -> String {
             let _ = writeln!(out, "  {name:<28} {}", q.output_type);
         }
     }
-    for (kind, steps) in &wf.handlers {
+    if let Some(l) = &wf.limits {
+        let _ = writeln!(out, "\n{}", paint("limits", BOLD, tty));
+        for (name, v) in [
+            ("max_fan_out", l.max_fan_out),
+            ("max_history_events", l.max_history_events),
+            ("max_payload_bytes", l.max_payload_bytes),
+        ] {
+            if let Some(v) = v {
+                let _ = writeln!(out, "  {name:<28} {v}");
+            }
+        }
+    }
+    let blocks = wf
+        .handlers
+        .iter()
+        .map(|(k, v)| (k.clone(), v))
+        .chain(wf.events.iter().map(|(k, v)| (format!("event {k}"), v)));
+    for (kind, steps) in blocks {
         let _ = writeln!(out, "\n{}", paint(&format!("on {kind}"), BOLD, tty));
         for s in steps {
             let what = match &s.action {

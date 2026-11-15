@@ -54,6 +54,12 @@ pub struct WorkflowIr {
     /// stricter of these and its own server-wide limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<WorkflowLimits>,
+    /// `on event <signal> { ... }`: steps run once per received signal of
+    /// that name, alongside the workflow. Keyed by signal. Unit keys are
+    /// `on_event:<signal>@<seq>:<step>`; the instance unit
+    /// `on_event:<signal>@<seq>` holds the signal payload (`event`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub events: BTreeMap<String, Vec<StepIr>>,
     /// Source locations for diagnostics and tooling (not hashed).
     #[serde(default)]
     pub source_map: BTreeMap<String, SourceLocation>,
@@ -114,6 +120,22 @@ pub const HANDLER_KINDS: &[&str] = &["failure", "cancel", "timeout"];
 /// Unit key of a handler step: `on_<kind>:<step>`.
 pub fn handler_key(kind: &str, step: &str) -> String {
     format!("on_{kind}:{step}")
+}
+
+/// Key of an event-handler instance: `on_event:<signal>@<seq>`.
+pub fn event_instance_key(signal: &str, seq: u64) -> String {
+    format!("on_event:{signal}@{seq}")
+}
+
+/// `(instance key, signal, step)` for an event-handler step key
+/// `on_event:<signal>@<seq>:<step>`.
+pub fn parse_event_key(key: &str) -> Option<(&str, &str, &str)> {
+    let rest = key.strip_prefix("on_event:")?;
+    let (head, step) = rest.split_once(':')?;
+    let (signal, seq) = head.split_once('@')?;
+    seq.parse::<u64>().ok()?;
+    let instance = &key[..key.len() - step.len() - 1];
+    Some((instance, signal, step))
 }
 
 /// `(kind, step)` for a handler unit key.
@@ -441,6 +463,11 @@ impl WorkflowIr {
         }
     }
 
+    /// An `on event` step by signal and id.
+    pub fn event_step(&self, signal: &str, id: &str) -> Option<&StepIr> {
+        self.events.get(signal)?.iter().find(|s| s.id == id)
+    }
+
     /// A handler step by kind and id.
     pub fn handler_step(&self, kind: &str, id: &str) -> Option<&StepIr> {
         self.handlers.get(kind)?.iter().find(|s| s.id == id)
@@ -452,6 +479,7 @@ impl WorkflowIr {
             || !self.queries.is_empty()
             || !self.handlers.is_empty()
             || self.limits.is_some()
+            || !self.events.is_empty()
             || self.result.as_ref().is_some_and(lambda)
             || self.steps.iter().any(|s| {
                 matches!(s.action, Action::Await { .. } | Action::Compute { .. })

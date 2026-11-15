@@ -1181,10 +1181,13 @@ fn lower_workflow(
     }
     // Static safety: a signal nobody awaits is either dead or a missing step.
     for sig in &wf.signals {
-        let awaited = wf
-            .steps
-            .iter()
-            .any(|s| matches!(&s.action, Some(StepAction::Await(a)) if a.name == sig.name.name));
+        let awaited =
+            wf.steps.iter().any(
+                |s| matches!(&s.action, Some(StepAction::Await(a)) if a.name == sig.name.name),
+            ) || wf
+                .handlers
+                .iter()
+                .any(|h| h.event.as_ref().is_some_and(|e| e.name == sig.name.name));
         if !awaited {
             diags.push(
                 Diagnostic::warning(
@@ -1250,9 +1253,10 @@ fn lower_workflow(
     });
 
     // --- Outcome handlers (`on failure|cancel|timeout`).
-    let handlers = lower_handlers(
+    let (handlers, events) = lower_handlers(
         wf,
         &step_types,
+        &signal_types,
         &input_ty,
         contracts,
         &mut used_contracts,
@@ -1279,6 +1283,7 @@ fn lower_workflow(
         queries,
         handlers,
         limits,
+        events,
         source_map,
     };
     ir.ir_version = ir.required_ir_version().into();
@@ -1314,35 +1319,88 @@ pub fn failure_type() -> Type {
 /// Lower `on failure|cancel|timeout { step ... }` blocks. Handler steps may
 /// read the workflow input, `failure`, the outputs of main steps (optional:
 /// they may not have run) and earlier handler steps of the same block.
+#[allow(clippy::type_complexity)]
 fn lower_handlers(
     wf: &ast::Workflow,
     step_types: &BTreeMap<String, Type>,
+    signal_types: &BTreeMap<String, Type>,
     input_ty: &Type,
     contracts: &BTreeMap<String, TaskContract>,
     used_contracts: &mut BTreeMap<String, TaskContract>,
     diags: &mut Vec<Diagnostic>,
-) -> BTreeMap<String, Vec<StepIr>> {
+) -> (BTreeMap<String, Vec<StepIr>>, BTreeMap<String, Vec<StepIr>>) {
     let mut out: BTreeMap<String, Vec<StepIr>> = BTreeMap::new();
-    let mut seen_kinds: BTreeMap<&str, Span> = BTreeMap::new();
+    let mut events: BTreeMap<String, Vec<StepIr>> = BTreeMap::new();
+    let mut seen_kinds: BTreeMap<String, Span> = BTreeMap::new();
     let failure = failure_type();
     for h in &wf.handlers {
-        if let Some(prev) = seen_kinds.get(h.kind.name.as_str()) {
+        // `on event <signal>`: the signal must exist and must not also be awaited.
+        let event_signal = h.event.as_ref();
+        let label = match event_signal {
+            Some(sig) => format!("event {}", sig.name),
+            None => h.kind.name.clone(),
+        };
+        if let Some(prev) = seen_kinds.get(&label) {
             diags.push(
                 Diagnostic::error(
                     "E0319",
-                    format!("`on {}` is declared more than once", h.kind.name),
+                    format!("`on {label}` is declared more than once"),
                     h.kind.span,
                 )
                 .with_label(*prev, "first declared here"),
             );
             continue;
         }
-        seen_kinds.insert(&h.kind.name, h.kind.span);
+        seen_kinds.insert(label.clone(), h.kind.span);
+        let local = match event_signal {
+            Some(sig) => match signal_types.get(&sig.name) {
+                Some(t) => {
+                    for s in &wf.steps {
+                        if let Some(StepAction::Await(a)) = &s.action {
+                            if a.name == sig.name {
+                                diags.push(
+                                    Diagnostic::error(
+                                        "E0322",
+                                        format!("signal `{}` is handled by `on event` and cannot also be awaited", sig.name),
+                                        a.span,
+                                    )
+                                    .with_label(sig.span, "handled here")
+                                    .with_note("every signal handled by `on event` starts the handler; an `await` would compete for it"),
+                                );
+                            }
+                        }
+                    }
+                    ("event".to_string(), t.clone())
+                }
+                None => {
+                    let mut d = Diagnostic::error(
+                        "E0315",
+                        format!("unknown signal `{}`", sig.name),
+                        sig.span,
+                    );
+                    if let Some(sug) = suggest(&sig.name, signal_types.keys().map(String::as_str)) {
+                        d = d.with_help(format!("did you mean `{sug}`?"));
+                    } else {
+                        d = d.with_help(format!(
+                            "declare it in the workflow: `signal {} {{ ... }}`",
+                            sig.name
+                        ));
+                    }
+                    diags.push(d);
+                    continue;
+                }
+            },
+            None => ("failure".to_string(), failure.clone()),
+        };
         // Names: unique in the block, distinct from main steps.
         let mut by_name: BTreeMap<&str, &ast::Step> = BTreeMap::new();
         for s in &h.steps {
             let n = s.name.name.as_str();
-            if step_types.contains_key(n) || RESERVED_STEP_NAMES.contains(&n) || n == "failure" {
+            if step_types.contains_key(n)
+                || RESERVED_STEP_NAMES.contains(&n)
+                || n == "failure"
+                || n == "event"
+            {
                 diags.push(
                     Diagnostic::error(
                         "E0302",
@@ -1380,7 +1438,7 @@ fn lower_handlers(
                         diags.push(
                             Diagnostic::error(
                                 "E0303",
-                                format!("`after` in an `on {}` block must name a step of the same block", h.kind.name),
+                                format!("`after` in an `on {label}` block must name a step of the same block"),
                                 a.span,
                             )
                             .with_note("workflow steps have all finished before a handler runs"),
@@ -1442,11 +1500,11 @@ fn lower_handlers(
             .iter()
             .map(|(k, t)| (k.clone(), t.clone().optional()))
             .collect();
-        let locals = vec![("failure".to_string(), failure.clone())];
+        let locals = vec![local];
         let mut steps_ir = vec![];
         for name in order {
             let s = by_name[name];
-            let what = format!("an `on {}` step", h.kind.name);
+            let what = format!("an `on {label}` step");
             let bad = |diags: &mut Vec<Diagnostic>, span: Span, member: &str| {
                 diags.push(Diagnostic::error(
                     "E0307",
@@ -1570,9 +1628,16 @@ fn lower_handlers(
                 });
             }
         }
-        out.insert(h.kind.name.clone(), steps_ir);
+        match event_signal {
+            Some(sig) => {
+                events.insert(sig.name.clone(), steps_ir);
+            }
+            None => {
+                out.insert(h.kind.name.clone(), steps_ir);
+            }
+        }
     }
-    out
+    (out, events)
 }
 
 /// The value of an IR expression that reads nothing (no input, steps,

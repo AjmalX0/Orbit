@@ -38,6 +38,15 @@ workflow_member  = "version" , [ ":" ] , STRING
                  | "signal" , IDENTIFIER , record_body           (* typed message the execution accepts *)
                  | "query" , IDENTIFIER , [ "=" | ":" ] , expression   (* read-only view; written with "=" *)
                  | "return" , expression
+                 | "limits" , "{" , { IDENTIFIER , ":" , INTEGER , [ sep ] } , "}"
+                   (* max_fan_out, max_history_events, max_payload_bytes; positive
+                      integers (E0320, E0321); the stricter of this and the
+                      server's limit applies *)
+                 | "on" , "event" , IDENTIFIER , "{" , { step_decl , [ sep ] } , "}"
+                   (* runs once per arriving signal of that name, alongside the
+                      main steps; `event` is the payload. The signal must be
+                      declared (E0315) and not awaited (E0322); one block per
+                      signal (E0319). Same step rules as outcome handlers. *)
                  | "on" , ( "failure" | "cancel" | "timeout" ) , "{" , { step_decl , [ sep ] } , "}" ;
                    (* outcome handler: at most one block per kind (E0319); other
                       kinds are rejected (E0105). Handler steps take a worker,

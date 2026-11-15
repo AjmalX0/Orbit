@@ -11,7 +11,8 @@
 
 use crate::model::*;
 use orbit_ir::{
-    eval, handler_key, parse_handler_key, Action, Invocation, Scope, StepIr, WorkflowIr,
+    eval, event_instance_key, handler_key, parse_event_key, parse_handler_key, Action, Invocation,
+    Scope, StepIr, WorkflowIr,
 };
 use serde_json::Value;
 
@@ -24,6 +25,9 @@ pub struct StateScope<'a> {
     pub own_output: Option<(&'a str, &'a Value)>,
     /// `failure` inside `on` handlers: `{ reason, code, message }`.
     pub failure: Option<Value>,
+    /// Inside an `on event` instance: its key (`on_event:<signal>@<seq>`) and
+    /// the signal payload (`event`).
+    pub event: Option<(String, Value)>,
 }
 
 impl<'a> StateScope<'a> {
@@ -33,6 +37,7 @@ impl<'a> StateScope<'a> {
             local: None,
             own_output: None,
             failure: None,
+            event: None,
         }
     }
 }
@@ -50,8 +55,9 @@ impl Scope for StateScope<'_> {
         }
         // Inside a handler, a name refers to a step of the same handler block
         // first (handler step names never clash with workflow step names).
-        let handler_unit = match (&self.failure, &self.state.handlers) {
-            (Some(_), Some(phase)) => self.state.units.get(&handler_key(&phase.kind, step)),
+        let handler_unit = match (&self.failure, &self.state.handlers, &self.event) {
+            (_, _, Some((instance, _))) => self.state.units.get(&format!("{instance}:{step}")),
+            (Some(_), Some(phase), _) => self.state.units.get(&handler_key(&phase.kind, step)),
             _ => None,
         };
         let found = handler_unit
@@ -63,8 +69,8 @@ impl Scope for StateScope<'_> {
         // Handlers see steps that never ran (or did not succeed) as `null`;
         // the compiler types them as optional there.
         static NULL: Value = Value::Null;
-        match (found, &self.failure) {
-            (None, Some(_)) => Some(&NULL),
+        match (found, self.failure.is_some() || self.event.is_some()) {
+            (None, true) => Some(&NULL),
             (found, _) => found,
         }
     }
@@ -82,6 +88,11 @@ impl Scope for StateScope<'_> {
         if name == "failure" {
             if let Some(f) = &self.failure {
                 return Some(f);
+            }
+        }
+        if name == "event" {
+            if let Some((_, payload)) = &self.event {
+                return Some(payload);
             }
         }
         self.local.filter(|(n, _)| *n == name).map(|(_, v)| v)
@@ -107,6 +118,18 @@ pub fn failure_value(state: &ExecutionState) -> Value {
     serde_json::json!({ "reason": reason, "code": code, "message": message })
 }
 
+/// `(instance key, payload)` for a unit of an `on event` instance.
+fn event_scope(state: &ExecutionState, key: &str) -> Option<(String, Value)> {
+    let (instance, _, _) = parse_event_key(key)?;
+    let payload = state
+        .units
+        .get(instance)?
+        .output
+        .clone()
+        .unwrap_or(Value::Null);
+    Some((instance.to_string(), payload))
+}
+
 /// The handler step behind a handler unit key.
 fn handler_step<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a StepIr> {
     let (kind, id) = parse_handler_key(key)?;
@@ -117,6 +140,9 @@ fn handler_step<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a StepIr> {
 pub fn invocation<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a Invocation> {
     if let Some(step) = handler_step(def, key) {
         return step.invocation();
+    }
+    if let Some((_, signal, id)) = parse_event_key(key) {
+        return def.event_step(signal, id)?.invocation();
     }
     let k = parse_key(key);
     let step = def.step(k.step)?;
@@ -152,6 +178,7 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
     if parse_handler_key(key).is_some() {
         scope.failure = Some(failure_value(state));
     }
+    scope.event = event_scope(state, key);
     // Inside the compensation of an element, `<step>` is that element's output.
     let element_unit = if k.compensation && k.index.is_some() {
         key.strip_prefix("compensate:")
@@ -386,6 +413,21 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
     }
 }
 
+/// Started `on event` instances: `(instance key, signal)`, in start order.
+fn event_instances<'a>(state: &'a ExecutionState, def: &'a WorkflowIr) -> Vec<(String, &'a str)> {
+    state
+        .signals
+        .iter()
+        .filter_map(|r| {
+            let key = r.delivered_to.as_ref()?;
+            let signal = key.strip_prefix("on_event:")?.split_once('@')?.0;
+            def.events
+                .get_key_value(signal)
+                .map(|(k, _)| (key.clone(), k.as_str()))
+        })
+        .collect()
+}
+
 /// The signal an `await` unit waits for.
 fn awaited_signal<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a str> {
     let k = parse_key(key);
@@ -405,6 +447,7 @@ fn compute(state: &ExecutionState, def: &WorkflowIr, key: &str, expr: &orbit_ir:
     if parse_handler_key(key).is_some() {
         scope.failure = Some(failure_value(state));
     }
+    scope.event = event_scope(state, key);
     match eval(expr, &scope) {
         Ok(output) => Event::StepSucceeded {
             step: key.into(),
@@ -601,13 +644,104 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
                 Action::Compute { expr } => out.push(compute(state, def, &step.id, expr)),
             }
         }
+        // `on event`: start an instance for every new signal of a handled name,
+        // then run the steps of every instance.
+        for r in &state.signals {
+            if r.delivered_to.is_none() && def.events.contains_key(&r.name) {
+                out.push(Event::SignalDelivered {
+                    step: event_instance_key(&r.name, r.seq),
+                    signal_seq: r.seq,
+                });
+            }
+        }
+        let mut events_done = true;
+        for (instance, signal) in event_instances(state, def) {
+            let steps = &def.events[signal];
+            for step in steps {
+                let key = format!("{instance}:{}", step.id);
+                let u = unit(state, &key);
+                if u.status().is_terminal() {
+                    continue;
+                }
+                events_done = false;
+                if u.status() != UnitStatus::Pending {
+                    continue;
+                }
+                let deps: Vec<UnitStatus> = step
+                    .dependencies
+                    .iter()
+                    .map(|d| unit(state, &format!("{instance}:{d}")).status())
+                    .collect();
+                if !deps
+                    .iter()
+                    .all(|s| matches!(s, UnitStatus::Succeeded | UnitStatus::Skipped))
+                {
+                    continue;
+                }
+                let mut scope = StateScope::new(state);
+                scope.event = event_scope(state, &key);
+                if let Some(cond) = &step.condition {
+                    match eval(cond, &scope) {
+                        Ok(Value::Bool(true)) => {}
+                        Ok(Value::Bool(false)) | Ok(Value::Null) => {
+                            out.push(Event::StepSkipped {
+                                step: key,
+                                reason: "`when` condition was false".into(),
+                            });
+                            continue;
+                        }
+                        Ok(other) => {
+                            out.push(Event::StepFailed {
+                                step: key,
+                                error: TaskError::new(
+                                    codes::EXPRESSION_ERROR,
+                                    format!("`when` evaluated to {other}, expected Bool"),
+                                    false,
+                                ),
+                            });
+                            continue;
+                        }
+                        Err(e) => {
+                            out.push(Event::StepFailed {
+                                step: key,
+                                error: TaskError::new(
+                                    codes::EXPRESSION_ERROR,
+                                    format!("evaluating `when`: {e}"),
+                                    false,
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                match &step.action {
+                    Action::Task(inv) | Action::Workflow(inv) => {
+                        out.push(schedule(state, def, &key, inv))
+                    }
+                    Action::Sleep { duration_ms } => out.push(Event::TimerStarted {
+                        step: key,
+                        fire_at_ms: now + duration_ms,
+                    }),
+                    Action::Compute { expr } => out.push(compute(state, def, &key, expr)),
+                    Action::Await { .. } => out.push(Event::StepFailed {
+                        step: key,
+                        error: TaskError::new(
+                            "UNKNOWN",
+                            "`await` is not allowed in an `on event` step",
+                            false,
+                        ),
+                    }),
+                }
+            }
+        }
         if !out.is_empty() {
             return out;
         }
-        let all_done = def
-            .steps
-            .iter()
-            .all(|s| unit(state, &s.id).status().is_terminal());
+        let all_done = events_done
+            && def
+                .steps
+                .iter()
+                .all(|s| unit(state, &s.id).status().is_terminal());
         if all_done {
             let output = match &def.result {
                 Some(expr) => match eval(expr, &StateScope::new(state)) {
@@ -685,6 +819,13 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
             }
         } else {
             withdraw(&step.id, &u, &mut out, &mut waiting);
+        }
+    }
+    for (instance, signal) in event_instances(state, def) {
+        for step in &def.events[signal] {
+            let key = format!("{instance}:{}", step.id);
+            let u = unit(state, &key);
+            withdraw(&key, &u, &mut out, &mut waiting);
         }
     }
     if !out.is_empty() || waiting {

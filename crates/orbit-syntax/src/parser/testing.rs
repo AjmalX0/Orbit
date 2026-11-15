@@ -240,8 +240,13 @@ impl Parser {
             "step" => {
                 self.bump();
                 let mut step = self.ident("a step name")?;
-                // Handler steps are named `on_<kind>:<step>`.
-                if self.at(&TokenKind::Colon) && step.name.starts_with("on_") {
+                // Handler steps are named `on_<kind>:<step>`; event steps
+                // `on_event:<signal>:<step>`.
+                let parts = if step.name == "on_event" { 2 } else { 1 };
+                for _ in 0..parts {
+                    if !(self.at(&TokenKind::Colon) && step.name.starts_with("on_")) {
+                        break;
+                    }
                     self.bump();
                     let rest = self.ident("a handler step name")?;
                     step = Ident {

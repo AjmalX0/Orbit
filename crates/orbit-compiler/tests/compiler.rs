@@ -750,7 +750,7 @@ fn outcome_handlers() {
         vec!["E0303"]
     );
     assert_eq!(
-        codes(r#"workflow W { version "1.0.0" step a { compute 1 } on event "x" { } }"#),
+        codes(r#"workflow W { version "1.0.0" step a { compute 1 } on success { } }"#),
         vec!["E0105"]
     );
     // `failure` exists only inside handlers.
@@ -787,5 +787,52 @@ fn workflow_limits() {
             r#"workflow W { version "1.0.0" input { n: Int } limits { max_fan_out: input.n } step a { compute 1 } }"#
         ),
         vec!["E0321"]
+    );
+}
+
+#[test]
+fn on_event_handlers() {
+    let ir = ok(r#"workflow W { version "1.0.0"
+        signal note { text: String, n: Int = 1 }
+        step a { compute 1 }
+        on event note {
+            step first { compute { t: event.text, n: event.n, a: a } }
+            step second { compute first.n + 1 after first }
+        }
+    }"#);
+    assert_eq!(ir.ir_version, "orbit-ir/2");
+    let steps = &ir.events["note"];
+    assert_eq!(
+        steps[0].output_type.to_string(),
+        "{ t: String, n: Int, a: Int? }"
+    );
+    assert_eq!(steps[1].dependencies, vec!["first"]);
+    // The signal must exist.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" step a { compute 1 } on event nope { step x { compute 1 } } }"#
+        ),
+        vec!["E0315"]
+    );
+    // One block per signal.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" signal s { n: Int } step a { compute 1 }
+            on event s { step x { compute 1 } } on event s { step y { compute 2 } } }"#
+        ),
+        vec!["E0319"]
+    );
+    // A signal is either awaited or handled, not both.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" signal s { n: Int } step a { await s timeout 1h }
+            on event s { step x { compute event.n } } }"#
+        ),
+        vec!["E0322"]
+    );
+    // `event` exists only inside `on event` blocks.
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" step a { compute event } }"#),
+        vec!["E0401"]
     );
 }

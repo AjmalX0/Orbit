@@ -3,7 +3,8 @@
 //! The [`Simulator`] runs the real [`Engine`] over an in-memory store with a
 //! manual clock. It acts as the worker for every task (asking a
 //! [`TaskHandler`] for each result), starts child workflows like the server
-//! does, sends signals as soon as the execution waits for them, and advances
+//! does, sends signals as soon as the execution waits for them (or, for
+//! signals an `on event` block handles, as soon as it is idle), and advances
 //! durable time (sleeps, retry backoff, timeouts) straight to the next
 //! wake-up whenever nothing else can happen, so simulations finish instantly
 //! and deterministically.
@@ -338,11 +339,15 @@ impl Simulator {
         let Some(def) = self.definition(state) else {
             return BTreeSet::new();
         };
+        // Signals handled by `on event` are accepted whenever the execution is
+        // running and not shutting down.
+        let handled = def.events.keys().filter(|_| state.abort.is_none()).cloned();
         state
             .units
             .iter()
             .filter(|(_, u)| u.status() == UnitStatus::Waiting)
             .filter_map(|(key, _)| awaited(&def, key).map(str::to_string))
+            .chain(handled)
             .collect()
     }
 
@@ -713,8 +718,50 @@ fn describe_end(state: &ExecutionState) -> String {
     }
 }
 
-/// `None` if the expectation holds, else what went wrong.
+/// `None` if the expectation holds, else what went wrong. A step written
+/// `on_event:<signal>:<step>` stands for that step in every instance of the
+/// block: the expectation must hold for each, and at least one must exist.
 fn check(e: &Expectation, state: &ExecutionState) -> Option<String> {
+    let event_step = match e {
+        Expectation::StepStatus { step, .. }
+        | Expectation::StepOutput { step, .. }
+        | Expectation::StepAttempts { step, .. } => step
+            .strip_prefix("on_event:")
+            .and_then(|r| r.split_once(':'))
+            .map(|(signal, id)| (step.clone(), signal.to_string(), id.to_string())),
+        _ => None,
+    };
+    if let Some((written, signal, id)) = event_step {
+        let instances: Vec<String> = state
+            .signals
+            .iter()
+            .filter_map(|r| r.delivered_to.clone())
+            .filter(|k| k.starts_with(&format!("on_event:{signal}@")))
+            .collect();
+        if instances.is_empty() {
+            return Some(format!(
+                "expected step `{written}`, but no `{signal}` signal started the `on event {signal}` block"
+            ));
+        }
+        for instance in instances {
+            let key = format!("{instance}:{id}");
+            let mut one = e.clone();
+            match &mut one {
+                Expectation::StepStatus { step, .. }
+                | Expectation::StepOutput { step, .. }
+                | Expectation::StepAttempts { step, .. } => *step = key,
+                _ => {}
+            }
+            if let Some(why) = check_one(&one, state) {
+                return Some(why.replace(&format!("{instance}:{id}"), &written));
+            }
+        }
+        return None;
+    }
+    check_one(e, state)
+}
+
+fn check_one(e: &Expectation, state: &ExecutionState) -> Option<String> {
     let unit = |step: &str| state.units.get(step).cloned().unwrap_or_default();
     match e {
         Expectation::Status { status } => (state.status.as_str() != status)
