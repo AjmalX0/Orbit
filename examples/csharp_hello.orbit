@@ -1,0 +1,35 @@
+// A one-step workflow served by the C# worker in examples/workers/csharp/.
+//
+//   orbit server
+//   dotnet run --project examples/workers/csharp
+//   orbit run examples/csharp_hello.orbit --input '{"name": "Ada", "excitement": 2}'
+
+task "greeting.csharp" {
+    version "1.0.0"
+    input { name: String, excitement: Int }
+    output { message: String, length: Int, dotnet_version: String }
+}
+
+workflow CSharpHello {
+    version "1.0.0"
+    input {
+        name: String
+        excitement: Int = 1
+    }
+    output {
+        message: String
+        length: Int
+    }
+
+    step greet {
+        worker "greeting.csharp"
+        using csharp
+        with { name: input.name, excitement: input.excitement }
+        timeout 10s
+    }
+
+    return {
+        message: greet.message
+        length: greet.length
+    }
+}

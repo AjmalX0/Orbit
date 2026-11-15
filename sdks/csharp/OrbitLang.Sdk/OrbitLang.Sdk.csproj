@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>OrbitLang.Sdk</RootNamespace>
+    <AssemblyName>OrbitLang.Sdk</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <PackageId>OrbitLang.Sdk</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>ORBIT contributors</Authors>
+    <Description>Worker SDK for the ORBIT workflow orchestration runtime: long-polls for tasks, runs typed handlers and reports results over the ORBIT worker protocol (HTTP/JSON).</Description>
+    <PackageTags>orbit;workflow;orchestration;worker;saga</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/AjmalX0/Orbit</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/AjmalX0/Orbit</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="OrbitLang.Sdk.Tests" />
+  </ItemGroup>
+
+</Project>
