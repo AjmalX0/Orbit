@@ -11,3 +11,5 @@ sdks/typescript/dist/
 .claude/worktrees/
 bin/
 obj/
+sdks/java/target/
+examples/workers/java/target/
