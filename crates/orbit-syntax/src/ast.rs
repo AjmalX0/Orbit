@@ -98,6 +98,18 @@ pub struct Workflow {
     /// `limits { max_fan_out: 100, ... }`.
     pub limits: Option<Retry>,
     pub ret: Option<Expr>,
+    /// `continue_as_new [when <cond>] with <input>`.
+    pub continue_as_new: Option<Box<ContinueAsNew>>,
+    pub span: Span,
+}
+
+/// `continue_as_new [when <condition>] with <input>`: when every step has
+/// finished and the condition holds, the run ends and a new run of the same
+/// execution starts with `input`.
+#[derive(Debug, Clone)]
+pub struct ContinueAsNew {
+    pub condition: Option<Expr>,
+    pub input: Option<Expr>,
     pub span: Span,
 }
 

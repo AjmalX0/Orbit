@@ -45,7 +45,7 @@ $ curl -s https://orbit.internal:7233/v1/executions
 $ curl -s -H "authorization: Bearer $ORBIT_WORKER_TOKEN" https://orbit.internal:7233/v1/executions
 {"error":{"code":"FORBIDDEN","message":"worker credentials may only call /v1/workers/* and /v1/tasks/*"}}
 $ curl -s -H "authorization: Bearer $WAREHOUSE_TOKEN" https://orbit.internal:7233/v1/metrics
-{"error":{"code":"FORBIDDEN","message":"client `warehouse-app` may only use the execution API (start, signal, query, read, cancel)"}}
+{"error":{"code":"FORBIDDEN","message":"client `warehouse-app` may only use the execution API (start, signal, query, read, cancel) and schedules"}}
 $ curl -s -X POST -H "authorization: Bearer $WAREHOUSE_TOKEN" https://orbit.internal:7233/v1/executions/labels-1/cancel
 {"error":{"code":"FORBIDDEN","message":"client `warehouse-app` may not cancel executions of `PrintLabels`"}}
 ```
@@ -65,18 +65,22 @@ Errors produced by ORBIT have this body:
 | `INVALID_REQUEST` | 400 | worker register, task complete/fail | A required field is missing or empty: `worker_id is required`, `a worker must announce at least one task contract`, `token is required`, `error_code is required`. |
 | `INVALID_IR` | 400 | `POST /v1/workflows` | The body is not valid IR in a supported version (`orbit-ir/1` or `orbit-ir/2`): an unsupported `ir_version`, a missing field, a failed validation, a missing `definition_hash`, or a `definition_hash` that does not match the content. |
 | `CHILD_NOT_REGISTERED` | 400 | `POST /v1/workflows` | The definition starts a child workflow whose exact definition is not registered. Register the child first; `orbit deploy` does this. |
-| `INVALID_INPUT` | 400 | `POST /v1/executions` | The workflow input does not match the workflow's `input` type. The message names the path, for example `$.order_id`. |
+| `INVALID_INPUT` | 400 | `POST /v1/executions`, `POST`/`PATCH /v1/schedules` | The workflow input (an execution's, or a schedule's) does not match the workflow's `input` type. The message names the path, for example `$.order_id`. |
+| `INVALID_SCHEDULE` | 400 | `POST`/`PATCH /v1/schedules` | The schedule is not valid: an invalid id, neither or both of `cron` and `interval`, an invalid cron expression, interval, duration or time, an unknown time zone, `timezone` with `interval`, `end_at` not after `start_at`, or an unknown field. The message says which. |
 | `INVALID_EXECUTION_ID` | 400 | `POST /v1/executions` | `execution_id` is empty, longer than 200 characters, or contains characters other than letters, digits, `-`, `_`, `.` and `:`. |
 | `RESERVED_TASK` | 400 | `POST /v1/workers/register` | A worker announced a built-in task (`orbit.*`) or a child-workflow contract (`workflow:*`). |
 | `UNAUTHENTICATED` | 401 | any authenticated endpoint | No credential, or a credential that matches nothing. |
 | `FORBIDDEN` | 403 | any authenticated endpoint | The credential is valid but not allowed: a worker credential on an administrative endpoint, a per-worker identity acting for another worker, announcing a task outside its patterns or the wrong runtime, using another worker's session or token, a client identity outside the execution API or its granted workflows and actions, or an unmatched client certificate. |
 | `NOT_FOUND` | 404 | execution endpoints | The execution does not exist. |
+| `RUN_NOT_FOUND` | 404 | `GET /v1/executions/{id}/history?run=N` | The execution has no run `N`. |
+| `SCHEDULE_NOT_FOUND` | 404 | `/v1/schedules/{id}` | The schedule does not exist. |
 | `UNKNOWN_SIGNAL` | 404 | `POST /v1/executions/{id}/signals/{name}` | The execution's workflow does not declare this signal. The message lists the declared signals. |
 | `UNKNOWN_QUERY` | 404 | `GET /v1/executions/{id}/queries/{name}` | The execution's workflow does not declare this query. The message lists the declared queries. |
 | `WORKFLOW_NOT_FOUND` | 404 | workflow endpoints, `POST /v1/executions` | No such workflow, or no such version. |
 | `UNKNOWN_SESSION` | 404 | heartbeat, poll, unregister | The worker session does not exist or has expired. Register again. |
 | `DEFINITION_CONFLICT` | 409 | `POST /v1/workflows` | A different definition is already registered under this name and version. Definitions are immutable; bump the version. |
 | `EXECUTION_EXISTS` | 409 | `POST /v1/executions` | An execution with this `execution_id` exists for a different workflow definition. |
+| `SCHEDULE_EXISTS` | 409 | `POST /v1/schedules` | A schedule with this `schedule_id` exists. |
 | `EXECUTION_FINISHED` | 409 | `POST /v1/executions/{id}/cancel`, `POST /v1/executions/{id}/signals/{name}` | The execution is already terminal. |
 | `PAYLOAD_TOO_LARGE` | 413 | `POST /v1/executions`, `POST /v1/executions/{id}/signals/{name}`, `POST /v1/tasks/complete` | The execution input, signal payload or task result is larger than `--max-payload-bytes`, as compact JSON. Nothing is recorded. See [Resource limits](../runtime/server.md#resource-limits). |
 | `SIGNAL_PAYLOAD_INVALID` | 422 | `POST /v1/executions/{id}/signals/{name}` | The payload does not match the signal's declaration. The message names the path, for example `$.approved`. Nothing is recorded. |
@@ -117,6 +121,13 @@ A client should check the status first, and parse the JSON error envelope only w
 | `POST` | [`/v1/executions/{id}/cancel`](#post-v1executionsidcancel) | admin | Request cancellation. |
 | `POST` | [`/v1/executions/{id}/signals/{name}`](#post-v1executionsidsignalsname) | admin | Send a typed signal. |
 | `GET` | [`/v1/executions/{id}/queries/{name}`](#get-v1executionsidqueriesname) | admin | Evaluate a declared query. |
+| `POST` | [`/v1/schedules`](#post-v1schedules) | admin | Create a schedule. |
+| `GET` | [`/v1/schedules`](#get-v1schedules) | admin | List schedules. |
+| `GET` | [`/v1/schedules/{id}`](#get-v1schedulesid) | admin | One schedule, with its next fire times. |
+| `PATCH` | [`/v1/schedules/{id}`](#patch-v1schedulesid) | admin | Change a schedule. |
+| `DELETE` | [`/v1/schedules/{id}`](#delete-v1schedulesid) | admin | Delete a schedule. |
+| `POST` | [`/v1/schedules/{id}/pause`, `/resume`](#post-v1schedulesidpause-and-resume) | admin | Pause or resume a schedule. |
+| `POST` | [`/v1/schedules/{id}/trigger`](#post-v1schedulesidtrigger) | admin | Start an execution of a schedule now. |
 | `GET` | [`/v1/workers`](#get-v1workers) | admin | Registered workers. |
 | `POST` | [`/v1/workers/register`](#post-v1workersregister) | worker | Open a worker session. |
 | `POST` | [`/v1/workers/heartbeat`](#post-v1workersheartbeat) | worker | Keep a session alive; receive cancellations. |
@@ -125,7 +136,7 @@ A client should check the status first, and parse the JSON error envelope only w
 | `POST` | [`/v1/tasks/complete`](#post-v1taskscomplete) | worker | Report a successful result. |
 | `POST` | [`/v1/tasks/fail`](#post-v1tasksfail) | worker | Report a failed attempt. |
 
-"admin" means the admin token when authentication is enabled; routes under `/v1/executions` and `GET /v1/workflows...` also accept a client identity with the matching action (see [Authentication](#authentication)). "worker" means any credential: admin, shared worker token or a per-worker identity.
+"admin" means the admin token when authentication is enabled; routes under `/v1/executions` and `GET /v1/workflows...` also accept a client identity with the matching action, and routes under `/v1/schedules` a client identity with the `schedule` action for the schedule's workflow (see [Authentication](#authentication)). "worker" means any credential: admin, shared worker token or a per-worker identity.
 
 ## Health and metrics
 
@@ -214,6 +225,21 @@ orbit_executions_started_total 8
 # HELP orbit_active_executions Executions not yet finished
 # TYPE orbit_active_executions gauge
 orbit_active_executions 0
+```
+
+Schedules and continue-as-new add these counters (from a server that ran the examples of [Schedules](../runtime/schedules.md)):
+
+```text
+# HELP orbit_executions_continued_as_new_total Runs ended by continue_as_new
+# TYPE orbit_executions_continued_as_new_total counter
+orbit_executions_continued_as_new_total 2
+# HELP orbit_schedules_fired_total Schedule occurrences that started an execution
+# TYPE orbit_schedules_fired_total counter
+orbit_schedules_fired_total 5
+# HELP orbit_schedules_skipped_total Schedule occurrences that started nothing
+# TYPE orbit_schedules_skipped_total counter
+orbit_schedules_skipped_total{reason="overlap"} 0
+orbit_schedules_skipped_total{reason="missed"} 0
 ```
 
 ## Workflow definitions
@@ -420,11 +446,13 @@ Execution fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | Execution id. |
+| `run` | integer, optional | The run this state describes, when it is not run 1 ([continue-as-new](../language/continue-as-new.md)). The state is always the latest run's. |
 | `parent` | object, optional | For a child workflow: `{"execution_id", "step"}` of the parent unit that started it. |
+| `schedule_id` | string, optional | The [schedule](../runtime/schedules.md) that started the execution. |
 | `workflow`, `version`, `definition_hash` | string | The definition the execution is pinned to. |
 | `input` | any | Input after defaults were applied. |
-| `status` | string | `RUNNING`, `COMPENSATING`, `COMPLETED`, `FAILED`, `CANCELLED` or `TIMED_OUT`. |
-| `created_at_ms`, `updated_at_ms` | integer | First and latest event times. |
+| `status` | string | `RUNNING`, `COMPENSATING`, `COMPLETED`, `FAILED`, `CANCELLED` or `TIMED_OUT`. (`CONTINUED_AS_NEW` only in the state of an archived run, rebuilt from its history.) |
+| `created_at_ms`, `updated_at_ms` | integer | First and latest event times of the run. |
 | `finished_at_ms` | integer, optional | Set when terminal. |
 | `units` | object | Unit state by unit key (`step`, `step[i]`, `compensate:<unit>`). Only units that have been touched appear. |
 | `abort` | object, optional | Why the execution is being wound down: `{"kind": "failed", "error"}`, `{"kind": "cancelled", "reason"}` or `{"kind": "timed_out"}`. |
@@ -475,7 +503,13 @@ Signal fields (`signals[]`):
 
 ### GET /v1/executions/{id}/history {#get-v1executionsidhistory}
 
-The full event history, in commit order. Error `404 NOT_FOUND`. [Executions and history](../runtime/executions.md#history-events) describes every event type.
+The full event history of the latest run, in commit order. Error `404 NOT_FOUND`. [Executions and history](../runtime/executions.md#history-events) describes every event type.
+
+| Query parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `run` | integer | the latest run | The history of this run of the execution ([continue-as-new](../language/continue-as-new.md)). Error `404 RUN_NOT_FOUND` for a run that does not exist. |
+
+The response has `run` when the history is not run 1's or when `run` was given.
 
 Response `200` (first and last events of `order-1002`):
 
@@ -499,6 +533,57 @@ Response `200` (first and last events of `order-1002`):
      "compensation": "completed"}
   ]
 }
+```
+
+The history of an earlier run ends with `WorkflowContinuedAsNew`. Response `200` for `GET /v1/executions/count-1/history?run=1` (the `Countdown` workflow of [Continue-as-new](../language/continue-as-new.md)):
+
+```json
+{
+    "execution_id": "count-1",
+    "events": [
+        {
+            "seq": 1,
+            "timestamp_ms": 1794768604803,
+            "type": "WorkflowCreated",
+            "workflow": "Countdown",
+            "version": "1.0.0",
+            "definition_hash": "sha256:fb3ef66116e32f38464f39b5a1ba617a8a94583b9c1a9a7ce77035d07849d709",
+            "input": {
+                "n": 3
+            }
+        },
+        {
+            "seq": 2,
+            "timestamp_ms": 1794768604803,
+            "type": "WorkflowStarted"
+        },
+        {
+            "seq": 3,
+            "timestamp_ms": 1794768604804,
+            "type": "StepSucceeded",
+            "step": "tick",
+            "attempt": 1,
+            "output": {
+                "left": 2
+            }
+        },
+        {
+            "seq": 4,
+            "timestamp_ms": 1794768604804,
+            "type": "WorkflowContinuedAsNew",
+            "next_run": 2,
+            "input": {
+                "n": 2
+            }
+        }
+    ],
+    "run": 1
+}
+```
+
+```console
+$ curl -s "localhost:7233/v1/executions/count-1/history?run=7"
+{"error":{"code":"RUN_NOT_FOUND","message":"execution `count-1` has runs 1 to 3; there is no run 7"}}
 ```
 
 The history endpoint returns values unredacted. `orbit logs --json` redacts them.
@@ -587,6 +672,227 @@ Errors: `404 NOT_FOUND`; `404 UNKNOWN_QUERY`; `422 QUERY_FAILED` (`` evaluating 
 ```json
 {"error":{"code":"UNKNOWN_QUERY","message":"OrderApproval@1.0.0 has no query `stat`; declared: status"}}
 ```
+
+## Schedules
+
+A schedule starts executions of a workflow on a cron expression or a fixed interval. [Schedules](../runtime/schedules.md) explains timing, the overlap and catch-up policies and how several servers share the work. Schedules are durable (stored in the database) and every change is effective at once on every server. On a cluster standby, `GET` routes work and changes answer `503 NOT_LEADER`.
+
+### POST /v1/schedules
+
+Create a schedule. Request fields:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `schedule_id` | string | yes | Letters, digits, `-`, `_` and `.`, at most 100 characters. |
+| `workflow` | string | yes | The workflow to start. It must be registered. |
+| `version` | string | no | Pin a version. Default: the latest registered version at each fire. |
+| `input` | object | no | Execution input (default `{}`), validated against the workflow's `input` type when the schedule is created or changed, and again at each start. |
+| `cron` | string | one of `cron` or `interval` | Five fields, `minute hour day-of-month month day-of-week`, or `@hourly`, `@daily` (`@midnight`), `@weekly`, `@monthly`, `@yearly` (`@annually`). See [Cron expressions](../runtime/schedules.md#cron-expressions). |
+| `interval` | string | one of `cron` or `interval` | A duration such as `30s`, `15m`, `1h30m` or `1d` (units `ms`, `s`, `m`, `h`, `d`; at least `1s`). Occurrences are aligned to `start_at`, or to the Unix epoch. |
+| `timezone` | string | no | IANA time zone for `cron`, such as `Europe/Berlin`. Default UTC. Not allowed with `interval`. |
+| `overlap` | string | no | `skip` (default), `allow` or `cancel_previous`. |
+| `catchup` | string | no | `skip_missed` (default) or `run_once`. |
+| `start_at`, `end_at` | string | no | RFC 3339 times bounding the occurrences. |
+| `jitter` | string | no | A duration up to `24h`: each fire is delayed by a deterministic amount below it. |
+| `description` | string | no | Free text. |
+| `paused` | boolean | no | Create the schedule paused. Default `false`. |
+
+Unknown fields are rejected. Response `201` with the schedule (the same document as `GET /v1/schedules/{id}`):
+
+```console
+$ curl -s -X POST localhost:7233/v1/schedules -H 'content-type: application/json' -d '{"schedule_id": "orders-every-10s", "workflow": "OrderProcessing", "interval": "10s", "input": {"order_id": "R-1", "customer_id": "cust-1", "amount": 120.0, "items": [{"sku": "BOOK-1", "quantity": 1}]}}'
+{"schedule_id":"orders-every-10s","workflow":"OrderProcessing","input":{"order_id":"R-1","customer_id":"cust-1","amount":120.0,"items":[{"sku":"BOOK-1","quantity":1}]},"interval":"10s","overlap":"skip","catchup":"skip_missed","paused":false,"next_fire_at":"2026-11-15T18:51:10Z","next_fire_times":["2026-11-15T18:51:10Z","2026-11-15T18:51:20Z","2026-11-15T18:51:30Z","2026-11-15T18:51:40Z","2026-11-15T18:51:50Z"],"last_fire_at":null,"last_execution_id":null,"fired":0,"skipped":0,"last_error":null,"created_at":"2026-11-15T18:51:00.347Z","updated_at":"2026-11-15T18:51:00.347Z"}
+```
+
+Errors: `400 INVALID_SCHEDULE`, `400 INVALID_INPUT`, `404 WORKFLOW_NOT_FOUND`, `409 SCHEDULE_EXISTS`.
+
+```json
+{"error":{"code":"INVALID_SCHEDULE","message":"cron `0 25 * * *`: `25` is out of range for the hour field (0-23)"}}
+{"error":{"code":"INVALID_INPUT","message":"the schedule input is invalid for OrderProcessing@1.0.0 at $.order_id: expected String, found an integer"}}
+{"error":{"code":"SCHEDULE_EXISTS","message":"schedule `nightly-orders` already exists"}}
+```
+
+### GET /v1/schedules/{id} {#get-v1schedulesid}
+
+Response `200`, thirty seconds after the schedule above was created:
+
+```json
+{
+    "schedule_id": "orders-every-10s",
+    "workflow": "OrderProcessing",
+    "input": {
+        "order_id": "R-1",
+        "customer_id": "cust-1",
+        "amount": 120.0,
+        "items": [
+            {
+                "sku": "BOOK-1",
+                "quantity": 1
+            }
+        ]
+    },
+    "interval": "10s",
+    "overlap": "skip",
+    "catchup": "skip_missed",
+    "paused": false,
+    "next_fire_at": "2026-11-15T18:51:40Z",
+    "next_fire_times": [
+        "2026-11-15T18:51:40Z",
+        "2026-11-15T18:51:50Z",
+        "2026-11-15T18:52:00Z",
+        "2026-11-15T18:52:10Z",
+        "2026-11-15T18:52:20Z"
+    ],
+    "last_fire_at": "2026-11-15T18:51:30Z",
+    "last_execution_id": "orders-every-10s:2026-11-15T18:51:30Z",
+    "fired": 3,
+    "skipped": 0,
+    "last_error": null,
+    "created_at": "2026-11-15T18:51:00.347Z",
+    "updated_at": "2026-11-15T18:51:30.409Z"
+}
+```
+
+The specification fields are those of `POST /v1/schedules` (optional fields that are not set are absent). The state fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `paused` | boolean | The schedule does not fire. |
+| `next_fire_at` | string or null | When the next occurrence fires: the occurrence plus its jitter. `null` while paused and after `end_at`. |
+| `next_fire_times` | array of strings | The next five occurrences (without jitter). Empty while paused and after `end_at`. |
+| `last_fire_at` | string or null | The latest occurrence handled (started or skipped). Triggers do not change it. |
+| `last_execution_id` | string or null | The latest execution the schedule started, including triggers. The overlap policy looks at this execution. |
+| `fired` | integer | Executions started, including triggers. |
+| `skipped` | integer | Occurrences that started nothing: skipped by the overlap policy or missed while no server could fire them. |
+| `last_error` | string or null | Why the latest start failed (for example `RESOURCE_EXHAUSTED`); the occurrence is retried every 5 seconds. Cleared by the next successful fire and by every change. |
+| `created_at`, `updated_at` | string | RFC 3339, UTC. |
+
+Error `404 SCHEDULE_NOT_FOUND`:
+
+```json
+{"error":{"code":"SCHEDULE_NOT_FOUND","message":"schedule `orders-every-10s` not found"}}
+```
+
+### GET /v1/schedules
+
+Every schedule, by id: `{"schedules": [ ... ]}`, each in the form of `GET /v1/schedules/{id}`. A client identity sees only the schedules of workflows it may `schedule`.
+
+```json
+{
+    "schedules": [
+        {
+            "schedule_id": "nightly-orders",
+            "workflow": "OrderProcessing",
+            "input": {
+                "order_id": "N-1",
+                "customer_id": "cust-1",
+                "amount": 120.0,
+                "items": [
+                    {
+                        "sku": "BOOK-1",
+                        "quantity": 1
+                    }
+                ]
+            },
+            "cron": "0 2 * * *",
+            "timezone": "Europe/Berlin",
+            "overlap": "skip",
+            "catchup": "skip_missed",
+            "description": "Nightly reconciliation order",
+            "paused": false,
+            "next_fire_at": "2026-11-16T01:00:00Z",
+            "next_fire_times": [
+                "2026-11-16T01:00:00Z",
+                "2026-11-17T01:00:00Z",
+                "2026-11-18T01:00:00Z",
+                "2026-11-19T01:00:00Z",
+                "2026-11-20T01:00:00Z"
+            ],
+            "last_fire_at": null,
+            "last_execution_id": "nightly-orders:manual:2026-11-15T18:52:22.296Z",
+            "fired": 1,
+            "skipped": 0,
+            "last_error": null,
+            "created_at": "2026-11-15T18:50:54.213Z",
+            "updated_at": "2026-11-15T18:52:22.296Z"
+        }
+    ]
+}
+```
+
+### PATCH /v1/schedules/{id} {#patch-v1schedulesid}
+
+Change a schedule. The body is a JSON object with the fields to change, in the form of `POST /v1/schedules`; `null` removes an optional field, and `paused` pauses or resumes. The result is validated like a new schedule, the next occurrence is recomputed from now, and `fired`, `skipped`, `last_fire_at` and `last_execution_id` are kept. `schedule_id` cannot change. To switch from an interval to cron, remove `interval` and set `cron` in one request. Response `200` with the schedule (shortened):
+
+```console
+$ curl -s -X PATCH localhost:7233/v1/schedules/orders-every-10s -H 'content-type: application/json' -d '{"interval": null, "cron": "*/15 * * * *", "overlap": "cancel_previous"}'
+```
+
+```json
+{
+    "schedule_id": "orders-every-10s",
+    "cron": "*/15 * * * *",
+    "overlap": "cancel_previous",
+    "next_fire_at": "2026-11-15T19:00:00Z",
+    "next_fire_times": [
+        "2026-11-15T19:00:00Z",
+        "2026-11-15T19:15:00Z",
+        "2026-11-15T19:30:00Z",
+        "2026-11-15T19:45:00Z",
+        "2026-11-15T20:00:00Z"
+    ],
+    "fired": 5,
+    "skipped": 0
+}
+```
+
+Errors as for `POST /v1/schedules`, and `404 SCHEDULE_NOT_FOUND`.
+
+### DELETE /v1/schedules/{id} {#delete-v1schedulesid}
+
+Delete a schedule. Executions it started are not affected. Response `200`:
+
+```json
+{"schedule_id":"orders-every-10s","deleted":true}
+```
+
+Error `404 SCHEDULE_NOT_FOUND`.
+
+### POST /v1/schedules/{id}/pause and /resume {#post-v1schedulesidpause-and-resume}
+
+The same as `PATCH` with `{"paused": true}` or `{"paused": false}`; no body is needed. Resuming computes the next occurrence from now: occurrences that passed while the schedule was paused are not started. Response `200` with the schedule (shortened):
+
+```json
+{
+    "schedule_id": "orders-every-10s",
+    "paused": true,
+    "next_fire_at": null,
+    "next_fire_times": []
+}
+```
+
+```json
+{
+    "schedule_id": "orders-every-10s",
+    "paused": false,
+    "next_fire_at": "2026-11-15T18:51:40Z",
+    "fired": 4
+}
+```
+
+### POST /v1/schedules/{id}/trigger {#post-v1schedulesidtrigger}
+
+Start an execution of the schedule now, with its workflow, version and input, whether it is paused or not. The execution id is `<schedule_id>:manual:<now, RFC 3339 with milliseconds>`. The overlap policy applies: with `skip`, nothing starts while the schedule's previous execution runs. The schedule's timing does not change. Response `200`:
+
+```json
+{
+    "schedule_id": "orders-every-10s",
+    "started": true,
+    "execution_id": "orders-every-10s:manual:2026-11-15T18:51:38.514Z"
+}
+```
+
+When the overlap policy skips it: `{"schedule_id": "...", "started": false, "skipped": "overlap"}`.
 
 ## Workers
 

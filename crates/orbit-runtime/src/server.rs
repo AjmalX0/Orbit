@@ -75,6 +75,16 @@ pub fn router(state: Shared, body_limit: usize) -> Router {
         .route("/v1/executions/{id}/signals/{name}", post(send_signal))
         .route("/v1/executions/{id}/queries/{name}", get(run_query))
         .route("/v1/executions/{id}/wait", get(wait_execution))
+        .route("/v1/schedules", post(create_schedule).get(list_schedules))
+        .route(
+            "/v1/schedules/{id}",
+            get(get_schedule)
+                .patch(update_schedule)
+                .delete(delete_schedule),
+        )
+        .route("/v1/schedules/{id}/pause", post(pause_schedule))
+        .route("/v1/schedules/{id}/resume", post(resume_schedule))
+        .route("/v1/schedules/{id}/trigger", post(trigger_schedule))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/register", post(register_worker))
         .route("/v1/workers/heartbeat", post(heartbeat))
@@ -250,7 +260,7 @@ async fn auth(State(state): State<Shared>, mut req: Request, next: Next) -> Resp
             || path == "/v1/metrics";
         if is_worker_path(&path) || admin_only {
             return forbidden(format!(
-                "client `{}` may only use the execution API (start, signal, query, read, cancel)",
+                "client `{}` may only use the execution API (start, signal, query, read, cancel) and schedules",
                 c.id
             ))
             .into_response();
@@ -469,14 +479,137 @@ async fn get_execution(
     Ok(Json(serde_json::to_value(s).unwrap_or_default()))
 }
 
+#[derive(Deserialize)]
+struct HistoryQuery {
+    run: Option<u32>,
+}
+
+/// `GET /v1/executions/{id}/history[?run=N]`: the latest run's history, or
+/// run `N`'s (continue-as-new).
 async fn get_history(
     State(state): State<Shared>,
     Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
+    Query(q): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
     allow_execution(&state, &caller, "read", &id)?;
-    let h = engine(&state).history(&id)?;
-    Ok(Json(json!({ "execution_id": id, "events": h })))
+    let e = engine(&state);
+    let h = match q.run {
+        Some(run) => e.run_history(&id, run)?,
+        None => e.history(&id)?,
+    };
+    let run = crate::model::ExecutionState::replay(&id, &h[..h.len().min(1)]).run;
+    let mut body = json!({ "execution_id": id, "events": h });
+    if run > 1 || q.run.is_some() {
+        body["run"] = json!(run);
+    }
+    Ok(Json(body))
+}
+
+// --------------------------------------------------------------- schedules
+
+/// A client identity needs the `schedule` action for the schedule's workflow.
+fn allow_schedule(caller: &Caller, workflow: &str) -> ApiResult<()> {
+    if let Caller::Client(c) = caller {
+        if !c.allows("schedule", workflow) {
+            return Err(forbidden(format!(
+                "client `{}` may not manage schedules of `{workflow}`",
+                c.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn allow_schedule_id(state: &Shared, caller: &Caller, id: &str) -> ApiResult<()> {
+    if matches!(caller, Caller::Client(_)) {
+        let workflow = engine(state).schedule_workflow(id)?;
+        allow_schedule(caller, &workflow)?;
+    }
+    Ok(())
+}
+
+async fn create_schedule(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Json(req): Json<crate::schedule::CreateSchedule>,
+) -> ApiResult<Response> {
+    allow_schedule(&caller, req.spec["workflow"].as_str().unwrap_or(""))?;
+    let v = engine(&state).create_schedule(req)?;
+    Ok((StatusCode::CREATED, Json(v)).into_response())
+}
+
+async fn list_schedules(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+) -> ApiResult<Json<Value>> {
+    let mut list = engine(&state).list_schedules()?;
+    if let Caller::Client(c) = &caller {
+        list.retain(|s| c.allows("schedule", s["workflow"].as_str().unwrap_or("")));
+    }
+    Ok(Json(json!({ "schedules": list })))
+}
+
+async fn get_schedule(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    allow_schedule_id(&state, &caller, &id)?;
+    Ok(Json(engine(&state).get_schedule(&id)?))
+}
+
+async fn update_schedule(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    Json(patch): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    allow_schedule_id(&state, &caller, &id)?;
+    if let Some(w) = patch.get("workflow").and_then(Value::as_str) {
+        allow_schedule(&caller, w)?;
+    }
+    Ok(Json(engine(&state).update_schedule(&id, patch)?))
+}
+
+async fn delete_schedule(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    allow_schedule_id(&state, &caller, &id)?;
+    engine(&state).delete_schedule(&id)?;
+    Ok(Json(json!({ "schedule_id": id, "deleted": true })))
+}
+
+async fn pause_schedule(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    allow_schedule_id(&state, &caller, &id)?;
+    Ok(Json(engine(&state).set_schedule_paused(&id, true)?))
+}
+
+async fn resume_schedule(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    allow_schedule_id(&state, &caller, &id)?;
+    Ok(Json(engine(&state).set_schedule_paused(&id, false)?))
+}
+
+/// `POST /v1/schedules/{id}/trigger`: start an execution now (the overlap
+/// policy applies; the timing is not changed).
+async fn trigger_schedule(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    allow_schedule_id(&state, &caller, &id)?;
+    let t = engine(&state).trigger_schedule(&id)?;
+    Ok(Json(serde_json::to_value(t).unwrap_or_default()))
 }
 
 #[derive(Deserialize, Default)]

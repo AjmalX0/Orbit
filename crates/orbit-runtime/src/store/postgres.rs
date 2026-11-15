@@ -7,7 +7,10 @@
 //! engine, the connection is reconnected automatically if it drops, and each
 //! `append` is a single transaction, exactly like the SQLite backend.
 
-use super::{ExecutionSummary, PutDefinition, Result, StoreError, WorkerRecord, SCHEMA};
+use super::{
+    ExecutionSummary, FireRecord, PutDefinition, Result, Rollover, ScheduleRow, StoreError,
+    WorkerRecord, SCHEMA,
+};
 use crate::model::{Event, ExecutionState, HistoryEvent};
 use orbit_ir::WorkflowIr;
 use postgres::Client;
@@ -420,6 +423,74 @@ impl PgStore {
             .collect()
     }
 
+    pub fn append_rollover(
+        &mut self,
+        state: &ExecutionState,
+        events: &[HistoryEvent],
+        rollover: Rollover<'_>,
+    ) -> Result<()> {
+        let fence = match self.mode {
+            PgMode::ReadWrite => None,
+            PgMode::ReadOnly => return Err(read_only()),
+            PgMode::Fenced(term) => Some(term),
+            PgMode::Shared => {
+                return Err(StoreError(
+                    "shared mode: history appends must carry the execution's ownership epoch"
+                        .into(),
+                ))
+            }
+        };
+        let tail = event_rows(rollover.events);
+        let rows = event_rows(events);
+        let run = rollover.run as i64;
+        let id = state.id.clone();
+        let projection = projection_of(state);
+        self.run(move |c| {
+            let mut tx = c.transaction()?;
+            if let Some(term) = fence {
+                check_term(&mut tx, term)?;
+            }
+            archive_run(&mut tx, &id, run, &tail)?;
+            insert_events(&mut tx, &id, &rows, &projection)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn run_history(&self, id: &str, run: u32) -> Result<Vec<HistoryEvent>> {
+        let id = id.to_string();
+        let rows = self.run(move |c| {
+            Ok(c.query(
+                "SELECT seq, timestamp_ms, payload FROM execution_run_events WHERE execution_id = $1 AND run = $2 ORDER BY seq",
+                &[&id, &(run as i64)],
+            )?
+            .into_iter()
+            .map(|r| (r.get::<_, i64>(0), r.get::<_, i64>(1), r.get::<_, String>(2)))
+            .collect::<Vec<_>>())
+        })?;
+        rows.into_iter()
+            .map(|(seq, ts, payload)| {
+                let event: Event = serde_json::from_str(&payload).map_err(bad_payload)?;
+                Ok(HistoryEvent {
+                    seq: seq as u64,
+                    timestamp_ms: ts as u64,
+                    event,
+                })
+            })
+            .collect()
+    }
+
+    pub fn execution_status(&self, id: &str) -> Result<Option<String>> {
+        let id = id.to_string();
+        self.run(move |c| {
+            Ok(c.query_opt(
+                "SELECT status FROM workflow_executions WHERE execution_id = $1",
+                &[&id],
+            )?
+            .map(|r| r.get(0)))
+        })
+    }
+
     pub fn active_execution_ids(&self) -> Result<Vec<String>> {
         if matches!(self.mode, PgMode::ReadOnly | PgMode::Shared) {
             return Ok(vec![]);
@@ -520,6 +591,351 @@ impl PgStore {
                 last_seen_ms: r.get::<_, i64>(5) as u64,
             })
             .collect())
+        })
+    }
+}
+
+type Projection = (String, String, String, &'static str, i64, i64, i64);
+
+fn projection_of(state: &ExecutionState) -> Projection {
+    (
+        state.workflow.clone(),
+        state.version.clone(),
+        state.definition_hash.clone(),
+        state.status.as_str(),
+        state.created_at_ms as i64,
+        state.updated_at_ms as i64,
+        state.last_seq as i64,
+    )
+}
+
+fn event_rows(events: &[HistoryEvent]) -> Vec<EventRow> {
+    events
+        .iter()
+        .map(|h| {
+            (
+                h.seq as i64,
+                h.event.name(),
+                h.event.step().map(str::to_string),
+                serde_json::to_string(&h.event).expect("event serialises"),
+                h.timestamp_ms as i64,
+            )
+        })
+        .collect()
+}
+
+/// The cluster term check of a fenced append (see [`PgStore::append`]).
+fn check_term(tx: &mut postgres::Transaction<'_>, term: i64) -> Result<()> {
+    let current: Option<i64> = tx
+        .query_opt("SELECT term FROM orbit_cluster WHERE id = 1 FOR SHARE", &[])?
+        .map(|r| r.get(0));
+    if current != Some(term) {
+        return Err(StoreError(format!(
+            "fenced: this server led term {term}, but the cluster is at term {}; another server is the leader",
+            current.map_or("unknown".to_string(), |t| t.to_string())
+        )));
+    }
+    Ok(())
+}
+
+/// Continue-as-new: move the stored history of the finished run, plus its
+/// last events `tail`, to `execution_run_events` under `run`.
+fn archive_run(
+    tx: &mut postgres::Transaction<'_>,
+    id: &String,
+    run: i64,
+    tail: &[EventRow],
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO execution_run_events (execution_id, run, seq, event_type, step, payload, timestamp_ms)
+         SELECT execution_id, $2, seq, event_type, step, payload, timestamp_ms FROM execution_events WHERE execution_id = $1",
+        &[id, &run],
+    )?;
+    tx.execute(
+        "DELETE FROM execution_events WHERE execution_id = $1",
+        &[id],
+    )?;
+    let ins = tx.prepare(
+        "INSERT INTO execution_run_events (execution_id, run, seq, event_type, step, payload, timestamp_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )?;
+    for (seq, ty, step, payload, ts) in tail {
+        tx.execute(&ins, &[id, &run, seq, ty, step, payload, ts])?;
+    }
+    Ok(())
+}
+
+/// Insert events one by one and upsert the projection (used by the
+/// transactional paths that are not the hot single-statement append).
+fn insert_events(
+    tx: &mut postgres::Transaction<'_>,
+    id: &String,
+    rows: &[EventRow],
+    projection: &Projection,
+) -> Result<()> {
+    let ins = tx.prepare(
+        "INSERT INTO execution_events (execution_id, seq, event_type, step, payload, timestamp_ms)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )?;
+    for (seq, ty, step, payload, ts) in rows {
+        tx.execute(&ins, &[id, seq, ty, step, payload, ts])?;
+    }
+    let (workflow, version, hash, status, created, updated, last_seq) = projection;
+    tx.execute(
+        "INSERT INTO workflow_executions (execution_id, workflow, version, definition_hash, status, created_at_ms, updated_at_ms, last_seq)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (execution_id) DO UPDATE SET status = EXCLUDED.status, updated_at_ms = EXCLUDED.updated_at_ms, last_seq = EXCLUDED.last_seq",
+        &[id, workflow, version, hash, status, created, updated, last_seq],
+    )?;
+    Ok(())
+}
+
+// -------------------------------------------------------------- schedules
+
+const SCHEDULE_COLUMNS: &str = "schedule_id, spec, paused, next_fire_ms, due_ms, last_fire_ms, last_execution_id, fired_count, skipped_count, last_error, created_at_ms, updated_at_ms";
+
+fn schedule_row(r: &postgres::Row) -> ScheduleRow {
+    let opt = |v: Option<i64>| v.map(|x| x as u64);
+    ScheduleRow {
+        schedule_id: r.get(0),
+        spec: r.get(1),
+        paused: r.get::<_, i64>(2) != 0,
+        next_fire_ms: opt(r.get(3)),
+        due_ms: opt(r.get(4)),
+        last_fire_ms: opt(r.get(5)),
+        last_execution_id: r.get(6),
+        fired: r.get::<_, i64>(7) as u64,
+        skipped: r.get::<_, i64>(8) as u64,
+        last_error: r.get(9),
+        created_at_ms: r.get::<_, i64>(10) as u64,
+        updated_at_ms: r.get::<_, i64>(11) as u64,
+    }
+}
+
+fn opt_i64(v: Option<u64>) -> Option<i64> {
+    v.map(|x| x as i64)
+}
+
+impl PgStore {
+    fn writable(&self) -> Result<Option<i64>> {
+        match self.mode {
+            PgMode::ReadOnly => Err(read_only()),
+            PgMode::Fenced(term) => Ok(Some(term)),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn insert_schedule(&self, row: &ScheduleRow) -> Result<bool> {
+        self.writable()?;
+        let r = row.clone();
+        self.run(move |c| {
+            let n = c.execute(
+                &format!(
+                    "INSERT INTO orbit_schedules ({SCHEDULE_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     ON CONFLICT (schedule_id) DO NOTHING"
+                ),
+                &[
+                    &r.schedule_id,
+                    &r.spec,
+                    &(r.paused as i64),
+                    &opt_i64(r.next_fire_ms),
+                    &opt_i64(r.due_ms),
+                    &opt_i64(r.last_fire_ms),
+                    &r.last_execution_id,
+                    &(r.fired as i64),
+                    &(r.skipped as i64),
+                    &r.last_error,
+                    &(r.created_at_ms as i64),
+                    &(r.updated_at_ms as i64),
+                ],
+            )?;
+            Ok(n == 1)
+        })
+    }
+
+    pub fn update_schedule(&self, row: &ScheduleRow) -> Result<bool> {
+        self.writable()?;
+        let r = row.clone();
+        self.run(move |c| {
+            let n = c.execute(
+                "UPDATE orbit_schedules SET spec = $2, paused = $3, next_fire_ms = $4, due_ms = $5, last_error = $6,
+                 claimed_by = NULL, claimed_until_ms = NULL, updated_at_ms = $7 WHERE schedule_id = $1",
+                &[
+                    &r.schedule_id,
+                    &r.spec,
+                    &(r.paused as i64),
+                    &opt_i64(r.next_fire_ms),
+                    &opt_i64(r.due_ms),
+                    &r.last_error,
+                    &(r.updated_at_ms as i64),
+                ],
+            )?;
+            Ok(n == 1)
+        })
+    }
+
+    pub fn schedule(&self, id: &str) -> Result<Option<ScheduleRow>> {
+        let id = id.to_string();
+        self.run(move |c| {
+            Ok(c.query_opt(
+                &format!("SELECT {SCHEDULE_COLUMNS} FROM orbit_schedules WHERE schedule_id = $1"),
+                &[&id],
+            )?
+            .map(|r| schedule_row(&r)))
+        })
+    }
+
+    pub fn schedules(&self) -> Result<Vec<ScheduleRow>> {
+        self.run(|c| {
+            Ok(c.query(
+                &format!("SELECT {SCHEDULE_COLUMNS} FROM orbit_schedules ORDER BY schedule_id"),
+                &[],
+            )?
+            .iter()
+            .map(schedule_row)
+            .collect())
+        })
+    }
+
+    pub fn delete_schedule(&self, id: &str) -> Result<bool> {
+        self.writable()?;
+        let id = id.to_string();
+        self.run(move |c| {
+            Ok(c.execute("DELETE FROM orbit_schedules WHERE schedule_id = $1", &[&id])? == 1)
+        })
+    }
+
+    pub fn due_schedules(&self, now: u64) -> Result<Vec<ScheduleRow>> {
+        let now = now as i64;
+        self.run(move |c| {
+            Ok(c.query(
+                &format!(
+                    "SELECT {SCHEDULE_COLUMNS} FROM orbit_schedules
+                     WHERE paused = 0 AND due_ms IS NOT NULL AND due_ms <= $1
+                     AND (claimed_until_ms IS NULL OR claimed_until_ms <= $1)
+                     ORDER BY due_ms LIMIT 100"
+                ),
+                &[&now],
+            )?
+            .iter()
+            .map(schedule_row)
+            .collect())
+        })
+    }
+
+    pub fn claim_schedule(
+        &self,
+        id: &str,
+        next_fire_ms: u64,
+        node: &str,
+        now: u64,
+        until: u64,
+    ) -> Result<bool> {
+        let fence = self.writable()?;
+        let (id, node) = (id.to_string(), node.to_string());
+        self.run(move |c| {
+            let mut tx = c.transaction()?;
+            if let Some(term) = fence {
+                // A deposed leader must not take (and then skip) occurrences.
+                check_term(&mut tx, term)?;
+            }
+            let n = tx.execute(
+                "UPDATE orbit_schedules SET claimed_by = $3, claimed_until_ms = $5
+                 WHERE schedule_id = $1 AND next_fire_ms = $2 AND paused = 0
+                 AND (claimed_until_ms IS NULL OR claimed_until_ms <= $4)",
+                &[
+                    &id,
+                    &(next_fire_ms as i64),
+                    &node,
+                    &(now as i64),
+                    &(until as i64),
+                ],
+            )?;
+            tx.commit()?;
+            Ok(n == 1)
+        })
+    }
+
+    pub fn finish_schedule_fire(
+        &self,
+        id: &str,
+        next_fire_ms: u64,
+        node: &str,
+        now: u64,
+        rec: &FireRecord,
+    ) -> Result<bool> {
+        let fence = self.writable()?;
+        let (id, node, rec) = (id.to_string(), node.to_string(), rec.clone());
+        self.run(move |c| {
+            let mut tx = c.transaction()?;
+            if let Some(term) = fence {
+                check_term(&mut tx, term)?;
+            }
+            let n = tx.execute(
+                "UPDATE orbit_schedules SET next_fire_ms = $4, due_ms = $5,
+                 last_fire_ms = COALESCE($6, last_fire_ms), last_execution_id = COALESCE($7, last_execution_id),
+                 fired_count = fired_count + $8, skipped_count = skipped_count + $9, last_error = $10,
+                 claimed_by = NULL, claimed_until_ms = NULL, updated_at_ms = $11
+                 WHERE schedule_id = $1 AND next_fire_ms = $2 AND claimed_by = $3",
+                &[
+                    &id,
+                    &(next_fire_ms as i64),
+                    &node,
+                    &opt_i64(rec.next_fire_ms),
+                    &opt_i64(rec.due_ms),
+                    &opt_i64(rec.last_fire_ms),
+                    &rec.last_execution_id,
+                    &(rec.fired as i64),
+                    &(rec.skipped as i64),
+                    &rec.last_error,
+                    &(now as i64),
+                ],
+            )?;
+            tx.commit()?;
+            Ok(n == 1)
+        })
+    }
+
+    pub fn release_schedule_claims(&self) -> Result<u64> {
+        self.writable()?;
+        self.run(|c| {
+            Ok(c.execute(
+                "UPDATE orbit_schedules SET claimed_by = NULL, claimed_until_ms = NULL WHERE claimed_by IS NOT NULL",
+                &[],
+            )?)
+        })
+    }
+
+    pub fn release_schedule_claim(
+        &self,
+        id: &str,
+        node: &str,
+        retry_at: u64,
+        error: &str,
+        now: u64,
+    ) -> Result<()> {
+        self.writable()?;
+        let (id, node, error) = (id.to_string(), node.to_string(), error.to_string());
+        self.run(move |c| {
+            c.execute(
+                "UPDATE orbit_schedules SET claimed_by = NULL, claimed_until_ms = $3, last_error = $4, updated_at_ms = $5
+                 WHERE schedule_id = $1 AND claimed_by = $2",
+                &[&id, &node, &(retry_at as i64), &error, &(now as i64)],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn record_schedule_trigger(&self, id: &str, execution_id: &str, now: u64) -> Result<()> {
+        self.writable()?;
+        let (id, exec) = (id.to_string(), execution_id.to_string());
+        self.run(move |c| {
+            c.execute(
+                "UPDATE orbit_schedules SET last_execution_id = $2, fired_count = fired_count + 1, updated_at_ms = $3
+                 WHERE schedule_id = $1",
+                &[&id, &exec, &(now as i64)],
+            )?;
+            Ok(())
         })
     }
 }
@@ -641,6 +1057,10 @@ pub(crate) struct SharedAppend {
     /// Set when the execution reaches a terminal status: the reply recorded
     /// for commands still waiting in its inbox.
     pub finished_reply: Option<String>,
+    /// Continue-as-new: the finished run and its last events, archived
+    /// before the new run's events are written. The execution keeps its
+    /// owner and epoch; the finished run's queue rows are deleted.
+    pub rollover: Option<(u32, Vec<HistoryEvent>)>,
 }
 
 impl PgStore {
@@ -719,6 +1139,10 @@ impl PgStore {
                         )));
                     }
                 }
+            }
+            if let Some((run, tail)) = &ext.rollover {
+                archive_run(&mut tx, &id, *run as i64, &event_rows(tail))?;
+                tx.execute("DELETE FROM orbit_tasks WHERE execution_id = $1", &[&id])?;
             }
             let ins = tx.prepare(
                 "INSERT INTO execution_events (execution_id, seq, event_type, step, payload, timestamp_ms)

@@ -151,6 +151,28 @@ impl Client {
         })
     }
 
+    pub fn patch(&self, path: &str, body: &Value) -> Result<Value> {
+        self.send(|base| {
+            let mut req = self.agent.patch(format!("{base}{path}"));
+            if let Some(t) = &self.token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            req.send_json(body)
+        })
+        .map(|r| r.1)
+    }
+
+    pub fn delete(&self, path: &str) -> Result<Value> {
+        self.send(|base| {
+            let mut req = self.agent.delete(format!("{base}{path}"));
+            if let Some(t) = &self.token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            req.call()
+        })
+        .map(|r| r.1)
+    }
+
     pub fn post_raw(&self, path: &str, body: String) -> Result<(u16, Value)> {
         self.send(|base| {
             let mut req = self

@@ -320,9 +320,11 @@ differences:
 | Changing a workflow | A new immutable `name@version`; running executions keep their definition; `orbit compat` reports breaking changes | Versioning APIs and worker build IDs |
 | Failure handling | Compensation per step, then `on failure`, `on cancel` and `on timeout` handler steps | Code in the workflow, such as `try`/`catch` and cancellation scopes |
 | Recurring messages | `on event <signal>` blocks run once per arriving signal, alongside the main steps | Signal handlers in workflow code |
+| Recurring starts | [Schedules](runtime/schedules.md): cron expressions (with a time zone) or fixed intervals, with overlap and catch-up policies, managed with `/v1/schedules` and `orbit schedule` | Schedules |
+| Long-running workflows | [`continue_as_new`](language/continue-as-new.md), declared in the workflow and type-checked against its input; each run has its own history | Continue-As-New, called from workflow code |
 | Testing | `test` declarations run by `orbit test` with mocked tasks and simulated time; `orbit simulate` and `orbit replay` | SDK test frameworks with time skipping, and replay testing |
 | Deployment | One binary with SQLite or PostgreSQL; one server, active/standby servers, or several active servers sharing the work on PostgreSQL | A multi-service cluster with several supported databases |
-| Features not yet in ORBIT | | Updates, schedules, a web UI |
+| Features not yet in ORBIT | | Updates, a web UI |
 
 ORBIT suits processes that you want to read, review and check as a whole,
 across services in different languages. Temporal is a mature platform that

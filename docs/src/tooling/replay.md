@@ -23,6 +23,7 @@ orbit replay [OPTIONS] [EXECUTION_ID]
 | `--definition <PATH>` | The definition to replay against: a compiled IR `.json` file, or `.orbit` source that is compiled first. Required with `--history`. With an execution id, it replaces the runtime's copy. |
 | `--workflow <NAME>` | The workflow to use when `--definition` defines several. Default: the workflow named in the history's `WorkflowCreated` event. |
 | `--at <SEQ>` | Stop after event `SEQ` and print the reconstructed state. |
+| `--run <RUN>` | With an execution id: replay this run ([continue-as-new](../language/continue-as-new.md#replay-and-tests)) instead of the latest one (`GET /v1/executions/{id}/history?run=N`). Each run replays on its own; signals carried into a run are external events. |
 | `--json` | Print the report as JSON. |
 | runtime connection options | `--server`, `--token`, `--ca-cert`, `--client-cert`, `--client-key`; see [CLI](../reference/cli.md#runtime-connection-options). |
 

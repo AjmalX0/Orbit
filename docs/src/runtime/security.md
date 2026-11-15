@@ -180,13 +180,13 @@ Each `[[client]]` table accepts exactly these fields. Unknown fields are rejecte
 | `token_sha256` | string | one of `token_sha256` or `client_cert` | Hex SHA-256 of the client's bearer token, 64 characters (case-insensitive). |
 | `client_cert` | string | one of `token_sha256` or `client_cert` | Certificate name for mutual TLS, matched like a worker's `client_cert`. |
 | `workflows` | array of strings | yes, at least one | Workflow name patterns: an exact name (`Refund`), a prefix ending in `*` (`Invoice*` matches `InvoiceMonthly`), or `*` for every workflow. |
-| `actions` | array of strings | no | Granted actions, from `start`, `signal`, `query`, `read` and `cancel`. Default: `start`, `signal`, `query` and `read`. `cancel` must be granted explicitly. |
+| `actions` | array of strings | no | Granted actions, from `start`, `signal`, `query`, `read`, `cancel` and `schedule`. Default: `start`, `signal`, `query` and `read`. `cancel` and `schedule` must be granted explicitly. |
 
 The server refuses to start when an entry is invalid:
 
 ```console
 $ orbit server --token t --workers-file bad.toml
-error: bad.toml: client `app`: unknown action `deploy` (allowed: start, signal, query, read, cancel)
+error: bad.toml: client `app`: unknown action `deploy` (allowed: start, signal, query, read, cancel, schedule)
 ```
 
 Other messages: ``client `app` needs `token_sha256` or `client_cert` ``, ``client `app`: `token_sha256` must be 64 hex characters (use `orbit token`)``, ``client `app` must list at least one workflow pattern``, ``a client has an empty `id` ``, ``identity `x` is declared twice`` (a client reuses the id of a worker or of another client), and TOML parse errors such as ``missing field `workflows` ``. A workers file requires `--token`, even when it declares only clients.
@@ -208,7 +208,7 @@ workflows = ["Order*"]
 actions = ["start", "read"]
 ```
 
-An unknown action is rejected: ``error: unknown action `deploy` (allowed: start, signal, query, read, cancel)``. To hash a token you already have:
+An unknown action is rejected: ``error: unknown action `deploy` (allowed: start, signal, query, read, cancel, schedule)``. To hash a token you already have:
 
 ```bash
 printf %s "$TOKEN" | sha256sum | cut -d' ' -f1
@@ -225,9 +225,23 @@ A client identity can use only the execution API, for workflows that match one o
 | Evaluate a query (`orbit query`) | `query` |
 | Read an execution, its history, or wait for it (`orbit status`, `logs`, `inspect`, `run` without `--no-wait`); read a workflow definition | `read` |
 | Cancel an execution (`orbit cancel`) | `cancel` |
+| Create, read, change, pause, resume, trigger or delete a [schedule](schedules.md) (`/v1/schedules`, `orbit schedule`) | `schedule`, for the schedule's workflow. Changing a schedule's workflow needs `schedule` for both. `GET /v1/schedules` lists only the schedules of workflows the client may `schedule`. |
 | List executions or workflows (`orbit ps`) | nothing; the list shows only workflows it may `read`. A page of executions still holds up to `limit` entries it may read, taken from the 1000 most recent matching the other filters. |
 
-For a request about an existing execution, the workflow is the execution's workflow. Everything else is refused with `403 FORBIDDEN`: deploying workflows, `GET /v1/workers`, `/v1/metrics`, the worker protocol over HTTP (`/v1/workers/*`, `/v1/tasks/*`) and the gRPC binding.
+For a request about an existing execution, the workflow is the execution's workflow. `schedule` grants nothing on executions: the executions a schedule starts are read, signalled or cancelled with the other actions. Everything else is refused with `403 FORBIDDEN`: deploying workflows, `GET /v1/workers`, `/v1/metrics`, the worker protocol over HTTP (`/v1/workers/*`, `/v1/tasks/*`) and the gRPC binding.
+
+```console
+$ orbit token --client nightly-ops --workflow 'Order*' --action schedule --action read
+b8ef2f0e492f4651b8c93fa608353bf51c075ca1de3e4ab9ae33de786d88c1ee
+
+Give the token above to the application (ORBIT_TOKEN). Add this to the workers file:
+
+[[client]]
+id = "nightly-ops"
+token_sha256 = "907f6d7a6d7bdb81c376c157fc86ea81d3d78253290e76d6743846698387198a"
+workflows = ["Order*"]
+actions = ["schedule", "read"]
+```
 
 ```console
 $ export ORBIT_TOKEN=$WAREHOUSE_TOKEN
@@ -237,7 +251,7 @@ labels-9
 $ orbit run Review --no-wait --input '{"order_id":"1"}'
 error: FORBIDDEN (403): client `warehouse-app` may not start executions of `Review`
 $ orbit deploy labels.orbit
-error: FORBIDDEN (403): client `warehouse-app` may only use the execution API (start, signal, query, read, cancel)
+error: FORBIDDEN (403): client `warehouse-app` may only use the execution API (start, signal, query, read, cancel) and schedules
 $ curl -s -X POST -H "authorization: Bearer $WAREHOUSE_TOKEN" http://127.0.0.1:7233/v1/executions/labels-1/cancel
 {"error":{"code":"FORBIDDEN","message":"client `warehouse-app` may not cancel executions of `PrintLabels`"}}
 ```
@@ -315,6 +329,8 @@ Every SDK supports client certificates through `ORBIT_CLIENT_CERT` and `ORBIT_CL
 | `POST /v1/executions/{id}/signals/{name}` | yes | yes | 403 | 403 | with `signal` | 401 |
 | `GET /v1/executions/{id}/queries/{name}` | yes | yes | 403 | 403 | with `query` | 401 |
 | `POST /v1/executions/{id}/cancel` | yes | yes | 403 | 403 | with `cancel` | 401 |
+| `POST /v1/schedules`, `GET`, `PATCH`, `DELETE /v1/schedules/{id}`, `POST .../pause`, `resume`, `trigger` | yes | yes | 403 | 403 | with `schedule` | 401 |
+| `GET /v1/schedules` | yes | yes | 403 | 403 | filtered to workflows it may `schedule` | 401 |
 | `GET /v1/workers` | yes | yes | 403 | 403 | 403 | 401 |
 | `POST /v1/workers/register` | yes | yes | yes, any id and tasks | own id, allowed tasks, required runtime | 403 | 401 |
 | `POST /v1/workers/heartbeat`, `poll`, `unregister` | yes | yes | yes | own sessions only | 403 | 401 |

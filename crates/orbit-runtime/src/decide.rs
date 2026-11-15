@@ -211,7 +211,7 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
     let idempotency_key = match &inv.idempotency_key {
         Some(expr) => match eval(expr, &scope) {
             Ok(Value::String(s)) => s,
-            Ok(Value::Null) => format!("{}/{key}", state.id),
+            Ok(Value::Null) => default_idempotency_key(state, key),
             Ok(other) => other.to_string(),
             Err(e) => {
                 return fail(
@@ -220,7 +220,7 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
                 )
             }
         },
-        None => format!("{}/{key}", state.id),
+        None => default_idempotency_key(state, key),
     };
     Event::StepScheduled {
         step: key.into(),
@@ -228,6 +228,16 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
         input,
         idempotency_key,
         redelivery: false,
+    }
+}
+
+/// `<execution>/<unit>` for run 1, `<execution>/run<N>/<unit>` for later runs
+/// (so a worker never mistakes a later run's step for an earlier one's).
+fn default_idempotency_key(state: &ExecutionState, key: &str) -> String {
+    if state.run > 1 {
+        format!("{}/run{}/{key}", state.id, state.run)
+    } else {
+        format!("{}/{key}", state.id)
     }
 }
 
@@ -743,6 +753,9 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
                 .iter()
                 .all(|s| unit(state, &s.id).status().is_terminal());
         if all_done {
+            if let Some(event) = continue_as_new(state, def) {
+                return vec![event];
+            }
             let output = match &def.result {
                 Some(expr) => match eval(expr, &StateScope::new(state)) {
                     Ok(v) => v,
@@ -862,6 +875,56 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
         reason,
         steps: done.into_iter().map(|(s, _)| s).collect(),
     }]
+}
+
+/// `continue_as_new`: `None` when the workflow has none or its condition is
+/// false (the run then completes with `return`), else the event that ends
+/// the run (or fails it, if the condition or the input cannot be evaluated).
+fn continue_as_new(state: &ExecutionState, def: &WorkflowIr) -> Option<Event> {
+    let can = def.continue_as_new.as_ref()?;
+    let scope = StateScope::new(state);
+    let fail = |code: &str, message: String| Event::WorkflowFailed {
+        error: TaskError::new(code, message, false),
+        compensation: CompensationOutcome::None,
+    };
+    if let Some(cond) = &can.condition {
+        match eval(cond, &scope) {
+            Ok(Value::Bool(true)) => {}
+            Ok(Value::Bool(false)) | Ok(Value::Null) => return None,
+            Ok(other) => {
+                return Some(fail(
+                    codes::EXPRESSION_ERROR,
+                    format!("the `continue_as_new` condition evaluated to {other}, expected Bool"),
+                ))
+            }
+            Err(e) => {
+                return Some(fail(
+                    codes::EXPRESSION_ERROR,
+                    format!("evaluating the `continue_as_new` condition: {e}"),
+                ))
+            }
+        }
+    }
+    let mut input = match eval(&can.input, &scope) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(fail(
+                codes::EXPRESSION_ERROR,
+                format!("evaluating the `continue_as_new` input: {e}"),
+            ))
+        }
+    };
+    def.input.apply_defaults(&mut input);
+    if let Err(e) = def.input.validate(&input, false) {
+        return Some(fail(
+            codes::INPUT_CONTRACT_VIOLATION,
+            format!("the `continue_as_new` input is invalid at {e}"),
+        ));
+    }
+    Some(Event::WorkflowContinuedAsNew {
+        next_run: state.run + 1,
+        input,
+    })
 }
 
 fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {

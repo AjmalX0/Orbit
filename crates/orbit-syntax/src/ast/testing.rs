@@ -77,6 +77,8 @@ pub enum ExpectKind {
     Step(Ident, StepExpectation),
     /// `expect compensated <step>`
     Compensated(Ident),
+    /// `expect runs <n>`: the execution ended in run `n` (continue-as-new).
+    Runs(i64, Span),
 }
 
 #[derive(Debug, Clone)]

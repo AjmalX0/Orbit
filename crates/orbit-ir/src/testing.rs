@@ -74,6 +74,8 @@ pub enum Expectation {
     StepAttempts { step: String, attempts: u32 },
     /// The step's compensation ran and succeeded.
     Compensated { step: String },
+    /// The execution ended in this run (1 plus one per `continue_as_new`).
+    Runs { runs: u32 },
 }
 
 impl fmt::Display for Expectation {
@@ -90,6 +92,7 @@ impl fmt::Display for Expectation {
                 write!(f, "step {step} attempts {attempts}")
             }
             Expectation::Compensated { step } => write!(f, "compensated {step}"),
+            Expectation::Runs { runs } => write!(f, "runs {runs}"),
         }
     }
 }

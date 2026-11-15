@@ -317,6 +317,7 @@ const KEYWORD_DOCS: &[(&str, &str)] = &[
     ("on", "`on failure|cancel|timeout { step ... }` runs steps after compensation when the execution fails, is cancelled or times out; they can read `failure`. `on event <signal> { step ... }` runs steps every time that signal arrives; they can read `event`."),
     ("event", "Inside `on event <signal>` blocks: the signal payload."),
     ("limits", "`limits { max_fan_out, max_history_events, max_payload_bytes }` tightens the server's resource limits for this workflow."),
+    ("continue_as_new", "`continue_as_new [when <cond>] with <input>`: when every step is done and the condition holds, the run ends and a new run of the same execution starts with this input and an empty history (instead of `return`)."),
     ("failure", "Inside `on` handlers: `failure.reason` (failed, cancelled, timed_out), `failure.code`, `failure.message`."),
     ("compensated_by", "On a task contract: steps calling this task must compensate with the named task (W0601/W0602)."),
     ("worker", "`worker \"task.name\"` runs a task implemented by a worker in any language."),

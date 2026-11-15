@@ -296,6 +296,34 @@ fn lower_test(
                     .map(|expected| Expectation::Output { expected })
             }
             ExpectKind::Error(code, _) => Some(Expectation::Error { code: code.clone() }),
+            ExpectKind::Runs(n, span) => {
+                if *n < 1 || *n > u32::MAX as i64 {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0712",
+                            format!("`runs {n}` is not a valid number of runs"),
+                            *span,
+                        )
+                        .with_note("an execution has at least one run"),
+                    );
+                    None
+                } else if *n > 1 && wf.continue_as_new.is_none() {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0713",
+                            format!(
+                                "workflow `{}` has no `continue_as_new`, so it always ends in run 1",
+                                wf.name
+                            ),
+                            *span,
+                        )
+                        .with_help("expect `runs 1`, or add `continue_as_new` to the workflow"),
+                    );
+                    None
+                } else {
+                    Some(Expectation::Runs { runs: *n as u32 })
+                }
+            }
             ExpectKind::Compensated(name) => match find_step(name, diags) {
                 Some(step) if step.compensation.is_none() => {
                     diags.push(

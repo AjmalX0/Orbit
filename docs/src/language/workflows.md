@@ -58,6 +58,7 @@ and is what you pass to `orbit run` and to the start API.
 | `signal` | `signal name { fields }` | no | none | A typed message the execution accepts; `await` steps receive it. See [Signals and queries](signals.md). |
 | `query` | `query name = expression` | no | none | A typed, read-only view of the execution state, evaluated on demand. See [Signals and queries](signals.md#queries). |
 | `return` | `return expression` | when `output` has required fields (`E0501`) | `{}` | The result of a successful execution. |
+| `continue_as_new` | `continue_as_new when cond with { ... }` | no | none | When every step has finished and `cond` holds, end the run and start a new run of the execution with this input and an empty history, instead of returning. See [Continue-as-new](continue-as-new.md). |
 | `on failure` | `on failure { steps }` | no | none | Steps that run after compensation when a step fails permanently or a resource limit is reached. See [Outcome handlers](handlers.md). |
 | `on cancel` | `on cancel { steps }` | no | none | Steps that run after compensation when the execution is cancelled. |
 | `on timeout` | `on timeout { steps }` | no | none | Steps that run after compensation when the workflow `timeout` passes. |

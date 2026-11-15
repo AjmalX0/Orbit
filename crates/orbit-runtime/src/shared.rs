@@ -402,12 +402,14 @@ impl Ctx {
         state: &ExecutionState,
         history: &[HistoryEvent],
         def: Option<&WorkflowIr>,
+        rollover: Option<(u32, Vec<HistoryEvent>)>,
     ) -> crate::store::Result<()> {
         let Store::Postgres(pg) = store else {
             return Err(StoreError("shared mode needs a PostgreSQL store".into()));
         };
         let id = state.id.clone();
-        let created = history.first().is_some_and(|h| h.seq == 1);
+        // A new run (continue-as-new) also starts at 1 but keeps its owner.
+        let created = rollover.is_none() && history.first().is_some_and(|h| h.seq == 1);
         let epoch = if created {
             None
         } else {
@@ -463,6 +465,7 @@ impl Ctx {
                     &format!("execution is already {}", state.status.as_str()),
                 )
             }),
+            rollover,
         };
         let result = pg.append_shared(state, history, ext);
         match &result {

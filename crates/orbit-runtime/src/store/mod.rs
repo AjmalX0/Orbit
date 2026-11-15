@@ -3,6 +3,10 @@
 //! The `execution_events` table is the source of truth. `workflow_executions`
 //! is a projection kept in the same transaction for fast listing. Every batch
 //! of events is appended atomically together with the projection update.
+//! `execution_events` holds each execution's current run; runs that ended
+//! with continue-as-new are moved to `execution_run_events` (keyed by run) in
+//! the transaction that starts the next run. `orbit_schedules` holds the
+//! schedules (see `crate::schedule`).
 //!
 //! Two backends share the schema and the guarantees:
 //!
@@ -117,7 +121,78 @@ CREATE TABLE IF NOT EXISTS worker_registry (
     registered_at_ms BIGINT NOT NULL,
     last_seen_ms BIGINT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS execution_run_events (
+    execution_id TEXT NOT NULL,
+    run BIGINT NOT NULL,
+    seq BIGINT NOT NULL,
+    event_type TEXT NOT NULL,
+    step TEXT,
+    payload TEXT NOT NULL,
+    timestamp_ms BIGINT NOT NULL,
+    PRIMARY KEY (execution_id, run, seq)
+);
+CREATE TABLE IF NOT EXISTS orbit_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    spec TEXT NOT NULL,
+    paused BIGINT NOT NULL,
+    next_fire_ms BIGINT,
+    due_ms BIGINT,
+    last_fire_ms BIGINT,
+    last_execution_id TEXT,
+    fired_count BIGINT NOT NULL,
+    skipped_count BIGINT NOT NULL,
+    last_error TEXT,
+    claimed_by TEXT,
+    claimed_until_ms BIGINT,
+    created_at_ms BIGINT NOT NULL,
+    updated_at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orbit_schedules_due ON orbit_schedules(due_ms);
 "#;
+
+/// A schedule as stored in `orbit_schedules`. `spec` is the JSON of
+/// [`crate::schedule::ScheduleSpec`]; the other columns are the schedule's
+/// progress, written by whichever server fires it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleRow {
+    pub schedule_id: String,
+    pub spec: String,
+    pub paused: bool,
+    /// The next occurrence (nominal time); `None` once the schedule ended.
+    pub next_fire_ms: Option<u64>,
+    /// When that occurrence fires: `next_fire_ms` plus the jitter.
+    pub due_ms: Option<u64>,
+    pub last_fire_ms: Option<u64>,
+    pub last_execution_id: Option<String>,
+    pub fired: u64,
+    pub skipped: u64,
+    pub last_error: Option<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+/// The outcome of firing one occurrence, written when the firing server
+/// releases its claim (see [`Store::finish_schedule_fire`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FireRecord {
+    pub next_fire_ms: Option<u64>,
+    pub due_ms: Option<u64>,
+    /// Set when an occurrence was handled (started or skipped).
+    pub last_fire_ms: Option<u64>,
+    /// Set when an execution was started.
+    pub last_execution_id: Option<String>,
+    pub fired: u64,
+    pub skipped: u64,
+    pub last_error: Option<String>,
+}
+
+/// Continue-as-new: the finished run's number and its last events. They are
+/// archived, together with the rest of that run's history, in the
+/// transaction that writes the next run's first events.
+pub struct Rollover<'a> {
+    pub run: u32,
+    pub events: &'a [HistoryEvent],
+}
 
 /// The storage backend used by the engine.
 pub enum Store {
@@ -180,6 +255,122 @@ impl Store {
 
     pub fn history(&self, id: &str) -> Result<Vec<HistoryEvent>> {
         dispatch!(self, s => s.history(id))
+    }
+
+    /// Continue-as-new in one transaction: archive the finished run (its
+    /// stored history plus `rollover.events`) under its run number, then
+    /// write the next run's first `events` and point the projection at it.
+    pub fn append_rollover(
+        &mut self,
+        state: &ExecutionState,
+        events: &[HistoryEvent],
+        rollover: Rollover<'_>,
+    ) -> Result<()> {
+        dispatch!(self, s => s.append_rollover(state, events, rollover))
+    }
+
+    /// The history of an earlier (archived) run; empty if there is none.
+    pub fn run_history(&self, id: &str, run: u32) -> Result<Vec<HistoryEvent>> {
+        dispatch!(self, s => s.run_history(id, run))
+    }
+
+    /// The projected status of an execution (its latest run), if it exists.
+    pub fn execution_status(&self, id: &str) -> Result<Option<String>> {
+        dispatch!(self, s => s.execution_status(id))
+    }
+
+    /// True when this store cannot write (a cluster standby).
+    pub fn read_only(&self) -> bool {
+        matches!(self, Store::Postgres(p) if p.mode() == PgMode::ReadOnly)
+    }
+
+    /// True for a shared-mode store (several servers write).
+    pub fn shared(&self) -> bool {
+        matches!(self, Store::Postgres(p) if p.mode() == PgMode::Shared)
+    }
+
+    /// Drop every claim on a schedule occurrence. Only for a server that is
+    /// the only writer (single server, cluster leader): claims left behind
+    /// are from a process that is gone.
+    pub fn release_schedule_claims(&self) -> Result<u64> {
+        dispatch!(self, s => s.release_schedule_claims())
+    }
+
+    // -------------------------------------------------------------- schedules
+
+    /// Insert a new schedule; false if the id is taken.
+    pub fn insert_schedule(&self, row: &ScheduleRow) -> Result<bool> {
+        dispatch!(self, s => s.insert_schedule(row))
+    }
+
+    /// Overwrite a schedule's spec, paused flag and next occurrence, and drop
+    /// any claim on it; false if it does not exist.
+    pub fn update_schedule(&self, row: &ScheduleRow) -> Result<bool> {
+        dispatch!(self, s => s.update_schedule(row))
+    }
+
+    pub fn schedule(&self, id: &str) -> Result<Option<ScheduleRow>> {
+        dispatch!(self, s => s.schedule(id))
+    }
+
+    pub fn schedules(&self) -> Result<Vec<ScheduleRow>> {
+        dispatch!(self, s => s.schedules())
+    }
+
+    pub fn delete_schedule(&self, id: &str) -> Result<bool> {
+        dispatch!(self, s => s.delete_schedule(id))
+    }
+
+    /// Unpaused schedules whose next occurrence is due at `now` and that no
+    /// server holds a live claim on.
+    pub fn due_schedules(&self, now: u64) -> Result<Vec<ScheduleRow>> {
+        dispatch!(self, s => s.due_schedules(now))
+    }
+
+    /// Claim the occurrence `next_fire_ms` of a schedule for `node` until
+    /// `until`: a compare-and-set on the row, so of several servers that
+    /// find the same occurrence due exactly one gets it.
+    pub fn claim_schedule(
+        &self,
+        id: &str,
+        next_fire_ms: u64,
+        node: &str,
+        now: u64,
+        until: u64,
+    ) -> Result<bool> {
+        dispatch!(self, s => s.claim_schedule(id, next_fire_ms, node, now, until))
+    }
+
+    /// Record a handled occurrence and release the claim, if `node` still
+    /// holds it on occurrence `next_fire_ms`. False when the row changed
+    /// meanwhile (updated, paused, deleted or claimed by another server).
+    pub fn finish_schedule_fire(
+        &self,
+        id: &str,
+        next_fire_ms: u64,
+        node: &str,
+        now: u64,
+        record: &FireRecord,
+    ) -> Result<bool> {
+        dispatch!(self, s => s.finish_schedule_fire(id, next_fire_ms, node, now, record))
+    }
+
+    /// Give up a claim without advancing the schedule: the occurrence is
+    /// tried again from `retry_at` by any server.
+    pub fn release_schedule_claim(
+        &self,
+        id: &str,
+        node: &str,
+        retry_at: u64,
+        error: &str,
+        now: u64,
+    ) -> Result<()> {
+        dispatch!(self, s => s.release_schedule_claim(id, node, retry_at, error, now))
+    }
+
+    /// Note an execution started by `POST /v1/schedules/{id}/trigger`.
+    pub fn record_schedule_trigger(&self, id: &str, execution_id: &str, now: u64) -> Result<()> {
+        dispatch!(self, s => s.record_schedule_trigger(id, execution_id, now))
     }
 
     /// Ids of executions that have not reached a terminal status.

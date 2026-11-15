@@ -1,0 +1,62 @@
+// A monthly subscription: charge, send a receipt, wait 30 days, repeat.
+//
+// Each billing period is one run of the same execution. When a period's
+// steps are done, `continue_as_new` ends the run and starts the next one with
+// a new input and an empty history, so the history holds one period's events
+// however many periods the subscription lasts. `orbit status <id>` shows the
+// current run; `orbit logs <id> --run 1` shows an earlier one.
+//
+// Workers: examples/workers/python/order_workers.py (payments.charge) and
+// examples/workers/typescript/order_workers.ts (notifications.send).
+
+import "contracts.orbit"
+
+workflow Subscription {
+    version "1.0.0"
+    description "Charge a customer once per period, for a number of periods"
+    input {
+        customer_id: String
+        amount: Float
+        periods: Int = 12
+        period: Int = 1
+        charged: Float = 0.0
+    }
+    output { periods: Int, charged: Float }
+
+    // The current period, readable at any time: `orbit query <id> period`.
+    query period = { period: input.period, of: input.periods, charged: input.charged }
+
+    step charge {
+        worker "payments.charge"
+        with {
+            order_id: input.customer_id + "-" + string(input.period)
+            amount: input.amount
+            currency: "USD"
+        }
+        idempotency_key input.customer_id + "/period-" + string(input.period)
+        retry { attempts: 5, backoff: exponential, initial_delay: 1m, max_delay: 1h }
+    }
+
+    step receipt {
+        worker "notifications.send"
+        after charge
+        with {
+            customer_id: input.customer_id
+            message: "Payment " + charge.transaction_id + " for period " + string(input.period)
+        }
+    }
+
+    step next_period { sleep 30d after receipt }
+
+    // Not the last period: start the next one. `with` is typed against the
+    // workflow input (omitted fields take their defaults).
+    continue_as_new when input.period < input.periods with {
+        customer_id: input.customer_id
+        amount: input.amount
+        periods: input.periods
+        period: input.period + 1
+        charged: input.charged + input.amount
+    }
+
+    return { periods: input.period, charged: input.charged + input.amount }
+}

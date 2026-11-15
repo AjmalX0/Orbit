@@ -29,6 +29,7 @@ Commands:
   ps        List recent executions
   token     Generate a random bearer token and the workers-file entry for it
   workers   Worker commands
+  schedule  Start workflows on a cron expression or a fixed interval
   test      Run the `test` declarations in .orbit files, without a server or workers
   simulate  Run a workflow locally with mocked or generated task results
   replay    Re-run a recorded history through the current decider and report divergences
@@ -541,6 +542,7 @@ Options:
       --definition <DEFINITION>    The definition to replay against: compiled IR `.json` or `.orbit` source (required with --history; overrides the runtime's copy otherwise)
       --workflow <WORKFLOW>        Workflow to use when --definition defines several (default: the one the history ran)
       --at <SEQ>                   Print the reconstructed execution state right after this event
+      --run <RUN>                  Replay this run of the execution (continue-as-new); default the latest
       --json                       Print the report as JSON
       --server <SERVER>            Runtime API address [env: ORBIT_SERVER=] [default: http://127.0.0.1:7233]
       --token <TOKEN>              Bearer token for the runtime API [env: ORBIT_TOKEN]
@@ -557,6 +559,7 @@ Options:
 | `--definition <DEFINITION>` | path | the runtime's copy | Compiled IR `.json` or `.orbit` source to replay against. Required with `--history`. |
 | `--workflow <WORKFLOW>` | string | from the history | Workflow to use when `--definition` defines several. |
 | `--at <SEQ>` | integer | none | Stop after this event and print the reconstructed state. |
+| `--run <RUN>` | integer | the latest run | With an execution id: replay this run of the execution ([continue-as-new](../language/continue-as-new.md)). Every run replays on its own. Cannot be combined with `--history`. |
 | `--json` | flag | off | Print the report as one JSON object; see [JSON report](../tooling/replay.md#json-report). |
 | runtime connection options | | | See [Runtime connection options](#runtime-connection-options). Used only with an execution id. |
 
@@ -842,9 +845,10 @@ orbit logs [OPTIONS] <EXECUTION_ID>
 |---|---|---|---|
 | `<EXECUTION_ID>` | string | required | The execution to show. |
 | `--json` | flag | off | Print raw JSON events, one per line, with sensitive fields redacted. |
+| `--run <RUN>` | integer | the latest run | Show this run of the execution ([continue-as-new](../language/continue-as-new.md)). |
 | runtime connection options | | | See [Runtime connection options](#runtime-connection-options). |
 
-The timeline shows the time since the first event, the sequence number, the event type and the fields `step`, `attempt`, `worker_id`, `reason`, `delay_ms`, `redelivery`, `outcome` and `error` when the event has them. [Executions and history](../runtime/executions.md#history-events) describes every event type.
+The timeline shows the time since the first event, the sequence number, the event type and the fields `step`, `attempt`, `worker_id`, `reason`, `delay_ms`, `redelivery`, `outcome`, `run`, `next_run`, `schedule_id` and `error` when the event has them. [Executions and history](../runtime/executions.md#history-events) describes every event type.
 
 Exit codes: `0` when the execution exists; `1` otherwise.
 
@@ -994,7 +998,7 @@ orbit token [OPTIONS]
 | `--task <TASKS>` | string, repeatable | `*` | Task pattern the worker may serve. Repeat the flag for several patterns. |
 | `--client <CLIENT>` | string | none | Print a `[[client]]` entry with this id instead of a `[[worker]]` entry ([client identities](../runtime/security.md#client-identities)). Cannot be combined with `--worker` or `--task`. |
 | `--workflow <WORKFLOWS>` | string, repeatable | `*` | With `--client`: a workflow pattern the client may use. |
-| `--action <ACTIONS>` | string, repeatable | `start`, `signal`, `query`, `read` | With `--client`: a granted action (`start`, `signal`, `query`, `read`, `cancel`). |
+| `--action <ACTIONS>` | string, repeatable | `start`, `signal`, `query`, `read` | With `--client`: a granted action (`start`, `signal`, `query`, `read`, `cancel`, `schedule`). |
 
 Exit codes: `0`; `1` for an unknown `--action`.
 
@@ -1038,6 +1042,219 @@ WORKER                       RUNTIME      STATE    INFLIGHT  TASKS
 py-1                         python       offline  0  risk.analyze@1.0.0, payments.charge@1.0.0, payments.refund@1.0.0
 ts-1                         typescript   offline  0  orders.validate@1.0.0, inventory.reserve@1.0.0, inventory.release@1.0.0, notifications.send@1.0.0
 ```
+
+## orbit schedule
+
+Manage [schedules](../runtime/schedules.md): workflows started on a cron expression or a fixed interval. Every subcommand takes the [runtime connection options](#runtime-connection-options) and calls the [`/v1/schedules` API](http-api.md#schedules).
+
+```text
+Start workflows on a cron expression or a fixed interval
+
+Usage: orbit schedule <COMMAND>
+
+Commands:
+  create   Create a schedule that starts a workflow on a cron expression or an interval
+  update   Change a schedule's timing, input or policies (other settings are kept)
+  list     List schedules with their next fire time
+  get      Show a schedule, its state and its next fire times
+  pause    Stop firing a schedule until it is resumed
+  resume   Resume a paused schedule from its next occurrence (missed ones are skipped)
+  trigger  Start an execution of the schedule now (the overlap policy applies)
+  delete   Delete a schedule (executions it started keep running)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+Exit codes for every subcommand: `0` on success; `1` on an API or connection error (for example `INVALID_SCHEDULE`, `SCHEDULE_EXISTS` or `SCHEDULE_NOT_FOUND`) or an invalid `--input`; `2` for invalid arguments.
+
+### orbit schedule create
+
+`orbit schedule create -h` (with `--help`, each `--overlap` and `--catchup` value is described):
+
+```text
+Create a schedule that starts a workflow on a cron expression or an interval
+
+Usage: orbit schedule create [OPTIONS] --workflow <WORKFLOW> <ID>
+
+Arguments:
+  <ID>  Schedule id: letters, digits, `-`, `_` and `.`
+
+Options:
+      --workflow <WORKFLOW>        The workflow to start
+      --version <VERSION>          Workflow version (default: the latest registered version at each fire)
+      --cron <CRON>                Cron expression: minute hour day-of-month month day-of-week, e.g. "0 2 * * *"
+      --every <EVERY>              Fixed interval instead of cron, e.g. 15m or 1h30m (aligned to --start-at or the Unix epoch)
+      --timezone <TIMEZONE>        IANA time zone for --cron, e.g. Europe/Berlin (default UTC)
+  -i, --input <INPUT>              Workflow input as JSON
+      --input-file <INPUT_FILE>    Read the workflow input from a JSON file
+      --overlap <OVERLAP>          What to do when an occurrence is due while the previous execution still runs [default: skip] [possible values: skip, allow, cancel-previous]
+      --catchup <CATCHUP>          What to do with occurrences missed while no server was running [default: skip-missed] [possible values: skip-missed, run-once]
+      --start-at <START_AT>        No occurrence before this RFC 3339 time
+      --end-at <END_AT>            No occurrence after this RFC 3339 time
+      --jitter <JITTER>            Delay each fire by up to this long (deterministic per occurrence), e.g. 30s
+      --description <DESCRIPTION>  Free text shown by `orbit schedule get`
+      --paused                     Create the schedule paused
+      --server <SERVER>            Runtime API address [env: ORBIT_SERVER=] [default: http://127.0.0.1:7233]
+      --token <TOKEN>              Bearer token for the runtime API [env: ORBIT_TOKEN]
+      --ca-cert <CA_CERT>          Extra PEM CA certificate to trust (for a runtime with a private certificate) [env: ORBIT_CA_CERT=]
+      --client-cert <CLIENT_CERT>  PEM client certificate for mutual TLS (with --client-key) [env: ORBIT_CLIENT_CERT=]
+      --client-key <CLIENT_KEY>    PEM private key for --client-cert [env: ORBIT_CLIENT_KEY=]
+  -h, --help                       Print help (see more with '--help')
+```
+
+Exactly one of `--cron` and `--every` is required. The values map to the fields of [`POST /v1/schedules`](http-api.md#post-v1schedules) (`--every` is `interval`; `cancel-previous` and the other values are written with `_` in the API). The command prints the new schedule as `orbit schedule get` does:
+
+```console
+$ orbit schedule create nightly-orders --workflow OrderProcessing --cron "0 2 * * *" --timezone Europe/Berlin --input '{"order_id": "N-1", "customer_id": "cust-1", "amount": 120.0, "items": [{"sku": "BOOK-1", "quantity": 1}]}' --description "Nightly reconciliation order"
+active nightly-orders  cron "0 2 * * *" Europe/Berlin
+  workflow:   OrderProcessing (latest version)
+  input:      {"order_id":"N-1","customer_id":"cust-1","amount":120.0,"items":[{"sku":"BOOK-1","quantity":1}]}
+  overlap:    skip   catchup: skip_missed
+  description: Nightly reconciliation order
+  fired:      0   skipped: 0
+  last fire:  -
+  last run:   -
+  next fires:
+    2026-11-16T01:00:00Z
+    2026-11-17T01:00:00Z
+    2026-11-18T01:00:00Z
+    2026-11-19T01:00:00Z
+    2026-11-20T01:00:00Z
+```
+
+### orbit schedule update
+
+```text
+Change a schedule's timing, input or policies (other settings are kept)
+
+Usage: orbit schedule update [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The schedule id
+
+Options:
+      --cron <CRON>                New cron expression (replaces an interval)
+      --every <EVERY>              New interval (replaces a cron expression)
+      --timezone <TIMEZONE>        IANA time zone for the cron expression
+  -i, --input <INPUT>              New workflow input as JSON
+      --version <VERSION>          Pin a workflow version
+      --overlap <OVERLAP>          New overlap policy [possible values: skip, allow, cancel-previous]
+      --catchup <CATCHUP>          New catch-up policy [possible values: skip-missed, run-once]
+      --jitter <JITTER>            New maximum fire delay, e.g. 30s
+      --server <SERVER>            Runtime API address [env: ORBIT_SERVER=] [default: http://127.0.0.1:7233]
+      --token <TOKEN>              Bearer token for the runtime API [env: ORBIT_TOKEN]
+      --ca-cert <CA_CERT>          Extra PEM CA certificate to trust (for a runtime with a private certificate) [env: ORBIT_CA_CERT=]
+      --client-cert <CLIENT_CERT>  PEM client certificate for mutual TLS (with --client-key) [env: ORBIT_CLIENT_CERT=]
+      --client-key <CLIENT_KEY>    PEM private key for --client-cert [env: ORBIT_CLIENT_KEY=]
+  -h, --help                       Print help (see more with '--help')
+```
+
+Sends `PATCH /v1/schedules/{id}` with the given fields. The next occurrence is recomputed from now; the counters are kept. Other fields (start and end times, description) are changed through the API.
+
+### orbit schedule list
+
+```text
+List schedules with their next fire time
+
+Usage: orbit schedule list [OPTIONS]
+
+Options:
+      --server <SERVER>            Runtime API address [env: ORBIT_SERVER=] [default: http://127.0.0.1:7233]
+      --token <TOKEN>              Bearer token for the runtime API [env: ORBIT_TOKEN]
+      --ca-cert <CA_CERT>          Extra PEM CA certificate to trust (for a runtime with a private certificate) [env: ORBIT_CA_CERT=]
+      --client-cert <CLIENT_CERT>  PEM client certificate for mutual TLS (with --client-key) [env: ORBIT_CLIENT_CERT=]
+      --client-key <CLIENT_KEY>    PEM private key for --client-cert [env: ORBIT_CLIENT_KEY=]
+  -h, --help                       Print help
+```
+
+`STATE` is `active`, `paused`, or `ended` (no occurrence left before `end_at`). `NEXT FIRE` includes the jitter.
+
+```console
+$ orbit schedule list
+SCHEDULE                 WORKFLOW             TIMING                           STATE    NEXT FIRE              LAST EXECUTION
+hourly-check             OrderProcessing      every 1h                         active   2026-11-15T19:00:12.359Z -
+nightly-orders           OrderProcessing      cron "0 2 * * *" Europe/Berlin   active   2026-11-16T01:00:00Z   -
+```
+
+### orbit schedule get
+
+```text
+Show a schedule, its state and its next fire times
+
+Usage: orbit schedule get [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The schedule id
+
+Options:
+      --json                       Print the schedule as JSON
+      --server <SERVER>            Runtime API address [env: ORBIT_SERVER=] [default: http://127.0.0.1:7233]
+      --token <TOKEN>              Bearer token for the runtime API [env: ORBIT_TOKEN]
+      --ca-cert <CA_CERT>          Extra PEM CA certificate to trust (for a runtime with a private certificate) [env: ORBIT_CA_CERT=]
+      --client-cert <CLIENT_CERT>  PEM client certificate for mutual TLS (with --client-key) [env: ORBIT_CLIENT_CERT=]
+      --client-key <CLIENT_KEY>    PEM private key for --client-cert [env: ORBIT_CLIENT_KEY=]
+  -h, --help                       Print help
+```
+
+`--json` prints the document of [`GET /v1/schedules/{id}`](http-api.md#get-v1schedulesid).
+
+```console
+$ orbit schedule get nightly-orders
+active nightly-orders  cron "0 2 * * *" Europe/Berlin
+  workflow:   OrderProcessing (latest version)
+  input:      {"order_id":"N-1","customer_id":"cust-1","amount":120.0,"items":[{"sku":"BOOK-1","quantity":1}]}
+  overlap:    skip   catchup: skip_missed
+  description: Nightly reconciliation order
+  fired:      1   skipped: 0
+  last fire:  -
+  last run:   nightly-orders:manual:2026-11-15T18:52:22.296Z
+  next fires:
+    2026-11-16T01:00:00Z
+    2026-11-17T01:00:00Z
+    2026-11-18T01:00:00Z
+    2026-11-19T01:00:00Z
+    2026-11-20T01:00:00Z
+```
+
+### orbit schedule pause, resume, trigger and delete
+
+Each takes the schedule id and the runtime connection options:
+
+```text
+Stop firing a schedule until it is resumed
+
+Usage: orbit schedule pause [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The schedule id
+
+Options:
+      --server <SERVER>            Runtime API address [env: ORBIT_SERVER=] [default: http://127.0.0.1:7233]
+      --token <TOKEN>              Bearer token for the runtime API [env: ORBIT_TOKEN]
+      --ca-cert <CA_CERT>          Extra PEM CA certificate to trust (for a runtime with a private certificate) [env: ORBIT_CA_CERT=]
+      --client-cert <CLIENT_CERT>  PEM client certificate for mutual TLS (with --client-key) [env: ORBIT_CLIENT_CERT=]
+      --client-key <CLIENT_KEY>    PEM private key for --client-cert [env: ORBIT_CLIENT_KEY=]
+  -h, --help                       Print help
+```
+
+`orbit schedule resume --help`, `trigger --help` and `delete --help` are the same with their own first line: `Resume a paused schedule from its next occurrence (missed ones are skipped)`, `Start an execution of the schedule now (the overlap policy applies)` and `Delete a schedule (executions it started keep running)`.
+
+```console
+$ orbit schedule trigger nightly-orders
+started execution nightly-orders:manual:2026-11-15T18:52:22.296Z
+$ orbit schedule trigger nightly-orders
+not started: the previous execution of nightly-orders is still running (overlap: skip)
+$ orbit schedule pause hourly-check
+schedule hourly-check paused
+$ orbit schedule resume hourly-check
+schedule hourly-check resumed; next fire 2026-11-15T19:00:12.359Z
+$ orbit schedule delete hourly-check
+schedule hourly-check deleted
+```
+
+A trigger that the overlap policy skips still exits `0`.
 
 ## See also
 

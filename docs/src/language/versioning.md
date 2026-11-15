@@ -127,7 +127,7 @@ chooses the lowest version that can express the workflow:
 | IR version | Used for |
 |---|---|
 | `orbit-ir/1` | Every workflow that uses none of the features below. |
-| `orbit-ir/2` | A workflow that declares a `signal` or a `query`, has an `await` or `compute` step, uses a lambda in any expression (`with`, `when`, `for`, `idempotency_key`, `compensate`, `return`), or declares an `on failure`, `on cancel` or `on timeout` handler. |
+| `orbit-ir/2` | A workflow that declares a `signal` or a `query`, has an `await` or `compute` step, uses a lambda in any expression (`with`, `when`, `for`, `idempotency_key`, `compensate`, `return`), declares an `on failure`, `on cancel`, `on timeout` or `on event` handler or a `limits` block, or has a [`continue_as_new`](continue-as-new.md) member. |
 
 A workflow that does not use these features compiles exactly as before: it
 keeps `orbit-ir/1` and the same definition hash, so upgrading the compiler
@@ -144,6 +144,8 @@ $ orbit compile --stdout examples/approval.orbit | grep ir_version
   "ir_version": "orbit-ir/2",
 $ orbit compile --stdout examples/checkout.orbit | grep ir_version
   "ir_version": "orbit-ir/2",
+$ orbit compile --stdout examples/subscription.orbit | grep ir_version
+  "ir_version": "orbit-ir/2",
 ```
 
 The runtime accepts every IR version it supports and rejects any other with
@@ -157,7 +159,7 @@ an `orbit-ir/2` feature. `GET /v1/health` lists the supported versions in
 ```
 
 A runtime that only lists `orbit-ir/1` (ORBIT 0.1) cannot register
-workflows that use signals, queries, `await`, `compute`, lambdas, outcome or event handlers, or a `limits` block. Upgrade
+workflows that use signals, queries, `await`, `compute`, lambdas, outcome or event handlers, or a `limits` block. A runtime from ORBIT 0.4.0 or earlier also rejects a workflow with `continue_as_new` (`400 INVALID_IR`, because it does not know the field, the definition hash it computes does not match). Upgrade
 the runtime before you deploy them; definitions already registered keep
 working after the upgrade.
 

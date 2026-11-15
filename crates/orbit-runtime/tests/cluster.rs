@@ -310,6 +310,97 @@ fn exactly_one_leader_and_standbys_redirect_writes() {
     assert_eq!(hist["events"][0]["type"], "WorkflowCreated");
 }
 
+fn metric(url: &str, name: &str) -> u64 {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let text = agent
+        .get(format!("{url}/v1/metrics"))
+        .call()
+        .unwrap()
+        .body_mut()
+        .read_to_string()
+        .unwrap();
+    text.lines()
+        .find_map(|l| l.strip_prefix(&format!("{name} ")))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn scheduled_ids(url: &str, prefix: &str) -> Vec<String> {
+    let mut ids: Vec<String> = ok("GET", &format!("{url}/v1/executions?limit=1000"), None)
+        ["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["execution_id"].as_str().map(str::to_string))
+        .filter(|id| id.starts_with(prefix))
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn only_the_leader_fires_schedules_and_a_new_leader_carries_on() {
+    let db = db_or_skip!("cluster_schedules");
+    let mut a = TestNode::spawn(&db.url, "node-a");
+    await_leader(&[&a], Duration::from_secs(10));
+    let b = TestNode::spawn(&db.url, "node-b");
+    assert_eq!(await_leader(&[&a, &b], Duration::from_secs(10)), 0);
+    ok(
+        "POST",
+        &format!("{}/v1/workflows", a.url),
+        Some(serde_json::to_value(workflow()).unwrap()),
+    );
+    let spec = json!({
+        "schedule_id": "tick",
+        "workflow": "One",
+        "interval": "1s",
+        "overlap": "allow",
+        "input": { "n": 1 }
+    });
+    // A standby refuses changes and points at the leader.
+    let (status, body, _) = call(
+        "POST",
+        &format!("{}/v1/schedules", b.url),
+        Some(spec.clone()),
+    )
+    .unwrap();
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "NOT_LEADER");
+    ok("POST", &format!("{}/v1/schedules", a.url), Some(spec));
+    std::thread::sleep(Duration::from_millis(3_500));
+    // Reads work on the standby, from the database.
+    let s = ok("GET", &format!("{}/v1/schedules/tick", b.url), None);
+    let fired = s["fired"].as_u64().unwrap();
+    assert!(fired >= 2, "{s}");
+    assert_eq!(metric(&b.url, "orbit_schedules_fired_total"), 0);
+    assert!(metric(&a.url, "orbit_schedules_fired_total") >= 2);
+    // Every occurrence was handled once: started or skipped.
+    let ids = scheduled_ids(&a.url, "tick:");
+    let s = ok("GET", &format!("{}/v1/schedules/tick", a.url), None);
+    assert_eq!(
+        s["fired"].as_u64().unwrap() as usize,
+        ids.len(),
+        "{s} {ids:?}"
+    );
+
+    // The leader goes away; the standby takes over and keeps firing.
+    a.kill();
+    assert_eq!(await_leader(&[&b], Duration::from_secs(10)), 0);
+    std::thread::sleep(Duration::from_millis(3_000));
+    assert!(metric(&b.url, "orbit_schedules_fired_total") >= 1);
+    let ids = scheduled_ids(&b.url, "tick:");
+    let s = ok("GET", &format!("{}/v1/schedules/tick", b.url), None);
+    assert_eq!(
+        s["fired"].as_u64().unwrap() as usize,
+        ids.len(),
+        "{s} {ids:?}"
+    );
+    assert!(ids.len() as u64 > fired);
+}
+
 #[test]
 fn standby_takes_over_and_recovers_in_flight_work() {
     let db = db_or_skip!("cluster_failover");

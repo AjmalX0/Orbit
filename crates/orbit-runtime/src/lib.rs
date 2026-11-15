@@ -10,6 +10,7 @@
 //! * [`testing`] — in-process simulation for `orbit test` and `orbit simulate`
 //! * [`ui`] — the built-in web UI served at `/ui/`
 //! * [`replay`] — re-run a recorded history through the current decider
+//! * [`schedule`] — cron and interval schedules that start executions
 
 // TaskError is returned by value on cold paths; boxing would only add noise.
 #![allow(clippy::result_large_err)]
@@ -23,6 +24,7 @@ pub mod identity;
 pub mod metrics;
 pub mod model;
 pub mod replay;
+pub mod schedule;
 pub mod server;
 pub mod shared;
 pub mod store;

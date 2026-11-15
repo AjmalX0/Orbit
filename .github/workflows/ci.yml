@@ -86,13 +86,13 @@ jobs:
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
           echo "NODE_PATH=$RUNNER_TEMP/pw/node_modules" >> "$GITHUB_ENV"
           echo "ORBIT_E2E_REQUIRE_BROWSER=1" >> "$GITHUB_ENV"
-      - name: End-to-end (six languages, crash recovery, TLS, mTLS identities, web UI)
+      - name: End-to-end (six languages, crash recovery, TLS, mTLS identities, web UI, schedules)
         run: cargo build && python3 -I tests/e2e/test_e2e.py
-      - name: End-to-end on PostgreSQL (incl. two-server failover, three active servers)
+      - name: End-to-end on PostgreSQL (incl. two-server failover, three active servers, schedules)
         env:
           ORBIT_E2E_POSTGRES_URL: postgres://orbit:orbit@127.0.0.1:5432/postgres
           PGPASSWORD: orbit
-        run: python3 -I tests/e2e/test_e2e.py EndToEnd HighAvailability SharedCluster
+        run: python3 -I tests/e2e/test_e2e.py EndToEnd HighAvailability SharedCluster Schedules
 
   msrv:
     name: minimum supported Rust (1.89)

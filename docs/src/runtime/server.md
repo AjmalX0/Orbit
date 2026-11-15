@@ -206,7 +206,7 @@ By default the server accepts as many executions, fan-out elements, history even
 |---|---|---|
 | `--max-active-executions` | Executions that are not terminal, held in memory. | A new start gets `429 RESOURCE_EXHAUSTED`. Nothing is recorded. |
 | `--max-fan-out` | Elements of one `for` step. | The step fails with `LIMIT_EXCEEDED` (not retried) before any element is scheduled. |
-| `--max-history-events` | Events in one execution's history. | A `LimitExceeded` event is recorded and the execution fails with `LIMIT_EXCEEDED`. |
+| `--max-history-events` | Events in one execution's history: in one run, for a workflow that uses [`continue_as_new`](../language/continue-as-new.md#combining-it-with-history-limits). | A `LimitExceeded` event is recorded and the execution fails with `LIMIT_EXCEEDED`. |
 | `--max-payload-bytes` | Serialized JSON size of an execution input (after defaults are applied), a task result, or a signal payload. | The request gets `413 PAYLOAD_TOO_LARGE`. Nothing is recorded. |
 
 ```bash

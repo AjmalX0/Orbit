@@ -131,6 +131,36 @@ Expectations are checked once the execution has finished, and every failed expec
 | `expect step <name> attempts <n>` | The step's last attempt was attempt `n` (`0` for a step that never ran). |
 | `expect step on_<kind>:<name> <STATUS>` | The same checks for a step of an [outcome handler](../language/handlers.md), for example `expect step on_failure:summary SUCCEEDED`. |
 | `expect compensated <name>` | The step's compensation ran and succeeded. For a `for` step, every element's compensation must have succeeded. The step must have a `compensate` block (`E0708`). |
+| `expect runs <n>` | The execution ended in run `n`: 1 plus one per [`continue_as_new`](../language/continue-as-new.md). At least 1 (`E0712`); more than 1 only for a workflow with `continue_as_new` (`E0713`). |
+
+For a workflow with `continue_as_new`, every expectation except `expect runs` is checked against the final run: its status, output, error and steps. The mocks answer every run's calls, and `times N` counts calls of a step across runs, so `returns { ... } times 2 then returns { ... }` can make the first two runs continue and the third stop:
+
+```orbit
+import "subscription.orbit"
+
+test "three periods are three runs" {
+    workflow Subscription
+    input { customer_id: "c-1", amount: 9.5, periods: 3 }
+    mock "payments.charge" returns { transaction_id: "tx-" + input.order_id, status: "captured" }
+    mock "notifications.send" returns { delivered: true }
+    expect status COMPLETED
+    expect runs 3
+    expect output { periods: 3, charged: 28.5 }
+    expect step charge output { transaction_id: "tx-c-1-3" }
+}
+```
+
+```console
+$ orbit test examples/subscription.test.orbit
+running 3 tests
+ok      three periods are three runs (90d 0h simulated)
+ok      a single period completes in the first run (30d 0h simulated)
+ok      a declined charge ends the subscription in that period (30d 0h simulated)
+
+test result: ok. 3 passed, 0 failed, 0 filtered out (0.02s)
+```
+
+The simulated time is measured across every run.
 
 Unknown step names are compile errors with a suggestion (`E0706`). Expected outputs are type-checked against the workflow's `output` (or the step's output type), with every field optional:
 

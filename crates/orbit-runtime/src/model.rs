@@ -60,6 +60,13 @@ pub enum Event {
         /// Set for child workflows started by a `workflow "Name"` step.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<ParentRef>,
+        /// Set for executions started by a schedule (`/v1/schedules`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schedule_id: Option<String>,
+        /// The run number, for runs after the first one (continue-as-new).
+        /// Absent means run 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<u32>,
     },
     /// A `for` step expanded into one unit per element (`step[0]`, `step[1]`, ...).
     StepFanOut {
@@ -188,6 +195,14 @@ pub enum Event {
         step: String,
         signal_seq: u64,
     },
+    /// `continue_as_new`: this run ended and run `next_run` of the same
+    /// execution starts with `input` and an empty history. The runtime
+    /// archives this run's history and writes the new run's first events in
+    /// the same transaction.
+    WorkflowContinuedAsNew {
+        next_run: u32,
+        input: Value,
+    },
 }
 
 impl Event {
@@ -222,6 +237,7 @@ impl Event {
             Event::LimitExceeded { .. } => "LimitExceeded",
             Event::SignalAwaitStarted { .. } => "SignalAwaitStarted",
             Event::SignalDelivered { .. } => "SignalDelivered",
+            Event::WorkflowContinuedAsNew { .. } => "WorkflowContinuedAsNew",
         }
     }
 
@@ -275,6 +291,9 @@ pub enum WorkflowStatus {
     Failed,
     Cancelled,
     TimedOut,
+    /// The run ended with `continue_as_new`; a newer run of the execution
+    /// carries on. Only archived runs have this status.
+    ContinuedAsNew,
 }
 
 impl WorkflowStatus {
@@ -285,6 +304,7 @@ impl WorkflowStatus {
                 | WorkflowStatus::Failed
                 | WorkflowStatus::Cancelled
                 | WorkflowStatus::TimedOut
+                | WorkflowStatus::ContinuedAsNew
         )
     }
 
@@ -296,6 +316,7 @@ impl WorkflowStatus {
             WorkflowStatus::Failed => "FAILED",
             WorkflowStatus::Cancelled => "CANCELLED",
             WorkflowStatus::TimedOut => "TIMED_OUT",
+            WorkflowStatus::ContinuedAsNew => "CONTINUED_AS_NEW",
         }
     }
 }
@@ -396,8 +417,15 @@ impl UnitState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionState {
     pub id: String,
+    /// Run number: 1, plus one for every `continue_as_new`. Each run has its
+    /// own history; this state describes the run named here.
+    #[serde(default = "first_run", skip_serializing_if = "is_first_run")]
+    pub run: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentRef>,
+    /// The schedule that started this execution, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
     pub workflow: String,
     pub version: String,
     pub definition_hash: String,
@@ -425,6 +453,14 @@ pub struct ExecutionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handlers: Option<HandlerPhase>,
     pub last_seq: u64,
+}
+
+fn first_run() -> u32 {
+    1
+}
+
+fn is_first_run(run: &u32) -> bool {
+    *run == 1
 }
 
 /// The handler block running while an execution finishes.
@@ -505,7 +541,9 @@ impl ExecutionState {
     pub fn new(id: &str) -> Self {
         ExecutionState {
             id: id.into(),
+            run: 1,
             parent: None,
+            schedule_id: None,
             workflow: String::new(),
             version: String::new(),
             definition_hash: String::new(),
@@ -553,8 +591,12 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             definition_hash,
             input,
             parent,
+            schedule_id,
+            run,
         } => {
             s.parent = parent.clone();
+            s.schedule_id = schedule_id.clone();
+            s.run = run.unwrap_or(1);
             s.workflow = workflow.clone();
             s.version = version.clone();
             s.definition_hash = definition_hash.clone();
@@ -762,6 +804,10 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             u.wake_at_ms = *deadline_ms;
             u.scheduled_at_ms = Some(ts);
             u.attempt = 1;
+        }
+        Event::WorkflowContinuedAsNew { .. } => {
+            s.status = WorkflowStatus::ContinuedAsNew;
+            s.finished_at_ms = Some(ts);
         }
         Event::SignalDelivered { step, signal_seq } => {
             let payload = match s.signals.iter_mut().find(|r| r.seq == *signal_seq) {
