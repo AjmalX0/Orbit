@@ -352,10 +352,9 @@ mod tests {
         assert!(Identities::parse(bad_action)
             .unwrap_err()
             .contains("unknown action"));
-        let dup = format!(
-            "[[worker]]\nid = \"x\"\nclient_cert = \"a\"\ntasks = [\"*\"]\n[[client]]\nid = \"x\"\nclient_cert = \"b\"\nworkflows = [\"*\"]"
-        );
-        assert!(Identities::parse(&dup)
+        let dup =
+            "[[worker]]\nid = \"x\"\nclient_cert = \"a\"\ntasks = [\"*\"]\n[[client]]\nid = \"x\"\nclient_cert = \"b\"\nworkflows = [\"*\"]";
+        assert!(Identities::parse(dup)
             .unwrap_err()
             .contains("declared twice"));
     }
