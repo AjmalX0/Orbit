@@ -310,7 +310,7 @@ Both record workflow history durably, recover by replaying it, deliver work
 to workers at least once, and support workers in several languages. The main
 differences:
 
-| | ORBIT 0.2 | Temporal |
+| | ORBIT 0.4 | Temporal |
 |---|---|---|
 | Workflow definition | A declarative `.orbit` file, compiled and type-checked against task contracts before deployment | Code in an SDK language, with determinism rules enforced at replay |
 | Business logic | Workers, one handler per task contract; small deterministic transformations as `compute` steps | Activities, called from workflow code |
@@ -319,9 +319,10 @@ differences:
 | Static checks | Type checking plus warnings for missing compensations, constant conditions, unused signals and unbounded waits (`orbit check --strict`) | The host language's type checker and tooling |
 | Changing a workflow | A new immutable `name@version`; running executions keep their definition; `orbit compat` reports breaking changes | Versioning APIs and worker build IDs |
 | Failure handling | Compensation per step, then `on failure`, `on cancel` and `on timeout` handler steps | Code in the workflow, such as `try`/`catch` and cancellation scopes |
+| Recurring messages | `on event <signal>` blocks run once per arriving signal, alongside the main steps | Signal handlers in workflow code |
 | Testing | `test` declarations run by `orbit test` with mocked tasks and simulated time; `orbit simulate` and `orbit replay` | SDK test frameworks with time skipping, and replay testing |
-| Deployment | One binary with SQLite or PostgreSQL; one server, or active/standby servers on PostgreSQL | A multi-service cluster with several supported databases |
-| Features not yet in ORBIT | | Updates, schedules, a web UI, horizontally scaled execution |
+| Deployment | One binary with SQLite or PostgreSQL; one server, active/standby servers, or several active servers sharing the work on PostgreSQL | A multi-service cluster with several supported databases |
+| Features not yet in ORBIT | | Updates, schedules, a web UI |
 
 ORBIT suits processes that you want to read, review and check as a whole,
 across services in different languages. Temporal is a mature platform that

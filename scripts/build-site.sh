@@ -5,7 +5,8 @@ set -eu
 cd "$(dirname "$0")/.."
 rm -rf target/site
 mkdir -p target/site
-cp website/index.html website/style.css website/favicon.svg target/site/
+cp website/index.html website/style.css website/favicon.svg website/og.png target/site/
 mdbook build docs
+python3 scripts/gen-sitemap.py target/site
 touch target/site/.nojekyll
 echo "site built in target/site (open target/site/index.html)"

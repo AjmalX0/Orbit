@@ -8,9 +8,10 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "Rust worker SDK for the ORBIT orchestration runtime"
-keywords = ["orbit", "workflow", "orchestration", "durable-execution", "saga"]
-categories = ["api-bindings"]
+keywords = ["workflow", "workflow-engine", "durable-execution", "orchestration", "saga"]
+categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+documentation = "https://ajmalx0.github.io/Orbit/docs/"
 
 [dependencies]
 serde.workspace = true

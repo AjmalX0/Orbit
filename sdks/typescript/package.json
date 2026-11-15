@@ -32,7 +32,7 @@
     "url": "git+https://github.com/AjmalX0/Orbit.git",
     "directory": "sdks/typescript"
   },
-  "homepage": "https://github.com/AjmalX0/Orbit/tree/main/sdks/typescript",
+  "homepage": "https://ajmalx0.github.io/Orbit/docs/sdks/typescript.html",
   "bugs": {
     "url": "https://github.com/AjmalX0/Orbit/issues"
   },
@@ -42,7 +42,10 @@
     "orchestration",
     "durable-execution",
     "saga",
-    "worker"
+    "worker",
+    "workflow-engine",
+    "temporal-alternative",
+    "microservices"
   ],
   "publishConfig": {
     "access": "public",

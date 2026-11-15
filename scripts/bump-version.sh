@@ -22,11 +22,13 @@ sdks/java/src/main/java/io/github/ajmalx0/orbit/Worker.java
 sdks/java/src/test/java/io/github/ajmalx0/orbit/WorkerTest.java
 sdks/csharp/OrbitLang.Sdk/OrbitLang.Sdk.csproj
 sdks/csharp/OrbitLang.Sdk/Worker.cs
-sdks/csharp/OrbitLang.Sdk.Tests/WorkerTests.cs"
+sdks/csharp/OrbitLang.Sdk.Tests/WorkerTests.cs
+CITATION.cff"
 esc=$(echo "$old" | sed 's/\./\\./g')
 for f in $files; do
   [ -f "$f" ] || continue
   sed "s/$esc/$new/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
+sed "s/^date-released: .*/date-released: $(date +%F)/" CITATION.cff > CITATION.cff.tmp && mv CITATION.cff.tmp CITATION.cff
 cargo update --workspace --quiet
 echo "version $old -> $new. Add a CHANGELOG.md entry, run ./scripts/check.sh, commit, then release."

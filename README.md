@@ -2,6 +2,18 @@
 
 **One workflow. Every language. Reliable execution.**
 
+[![CI](https://github.com/AjmalX0/Orbit/actions/workflows/ci.yml/badge.svg)](https://github.com/AjmalX0/Orbit/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/AjmalX0/Orbit)](https://github.com/AjmalX0/Orbit/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/orbit-lang?label=crates.io)](https://crates.io/crates/orbit-lang)
+[![PyPI](https://img.shields.io/pypi/v/orbit-lang-sdk?label=PyPI)](https://pypi.org/project/orbit-lang-sdk/)
+[![npm](https://img.shields.io/npm/v/orbit-lang?label=npm)](https://www.npmjs.com/package/orbit-lang)
+[![NuGet](https://img.shields.io/nuget/v/OrbitLang.Sdk?label=NuGet)](https://www.nuget.org/packages/OrbitLang.Sdk)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.ajmalx0/orbit-sdk?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.ajmalx0/orbit-sdk)
+[![Go Reference](https://pkg.go.dev/badge/github.com/AjmalX0/Orbit/sdks/go.svg)](https://pkg.go.dev/github.com/AjmalX0/Orbit/sdks/go)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+![ORBIT: durable workflows, declared once](website/og.png)
+
 ORBIT is a declarative programming language and durable runtime for
 orchestrating work across services written in different languages. You
 describe *what* should happen in a `.orbit` file. The compiler type-checks
@@ -273,4 +285,10 @@ Version 0.4. Next: grouping the commits of several executions into one
 transaction for higher durable throughput
 ([RFC-0001 Appendix A.5](specification/RFC-0001.md#a5-known-gaps)).
 
-Licensed under the [Apache License 2.0](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE). Created by
+[AjmalX0](https://github.com/AjmalX0).
+
+If ORBIT is useful to you, a star on GitHub helps other people find it.
+Questions, ideas and bug reports are welcome in
+[issues](https://github.com/AjmalX0/Orbit/issues); see
+[CONTRIBUTING.md](CONTRIBUTING.md) to send a change.

@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use ORBIT in your work, please cite it as below."
+title: "ORBIT: a declarative workflow language and durable runtime"
+type: software
+authors:
+  - alias: AjmalX0
+    website: "https://github.com/AjmalX0"
+repository-code: "https://github.com/AjmalX0/Orbit"
+url: "https://ajmalx0.github.io/Orbit/"
+license: Apache-2.0
+version: 0.4.0
+date-released: 2026-11-15
+keywords:
+  - workflow engine
+  - durable execution
+  - workflow orchestration
+  - saga
+  - programming language

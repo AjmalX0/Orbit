@@ -8,9 +8,10 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "ORBIT: a polyglot orchestration language. The orbit compiler, runtime server, language server and CLI"
-keywords = ["orbit", "workflow", "orchestration", "durable-execution", "saga"]
-categories = ["command-line-utilities"]
+keywords = ["workflow", "workflow-engine", "durable-execution", "orchestration", "saga"]
+categories = ["command-line-utilities", "development-tools", "compilers"]
 readme = "README.md"
+documentation = "https://ajmalx0.github.io/Orbit/docs/"
 
 [[bin]]
 name = "orbit"
