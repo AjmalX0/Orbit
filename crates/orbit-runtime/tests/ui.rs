@@ -194,8 +194,11 @@ fn the_api_still_requires_credentials() {
     );
     assert_eq!(r.status, 200);
     assert_eq!(r.header("x-orbit-api-version"), Some("orbit-api/1"));
-    // Health stays open, as before.
+    // Health and readiness stay open, as before, with the UI merged in.
     assert_eq!(get(&format!("{url}/v1/health"), &[]).status, 200);
+    let r = get(&format!("{url}/v1/ready"), &[]);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains("\"ready\":true"), "{}", r.body);
 }
 
 #[test]

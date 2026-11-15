@@ -64,6 +64,10 @@ pub(crate) fn engine(state: &Shared) -> std::sync::MutexGuard<'_, Engine> {
 pub fn router(state: Shared, body_limit: usize) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        // Answered by the cluster gate before authentication; the route
+        // exists so the gate wraps it even when other routers are merged in
+        // (the web UI), which would otherwise replace the gated fallback.
+        .route("/v1/ready", get(ready))
         .route("/v1/metrics", get(metrics))
         .route("/v1/workflows", post(register_workflow).get(list_workflows))
         .route("/v1/workflows/{name}", get(get_workflow_latest))
@@ -305,6 +309,10 @@ pub(crate) fn authorize_token(state: &Shared, caller: &Caller, token: &str) -> A
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+async fn ready() -> Json<Value> {
+    Json(json!({ "role": "single", "ready": true }))
 }
 
 async fn health(State(state): State<Shared>) -> Json<Value> {
