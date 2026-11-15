@@ -499,6 +499,51 @@ fn workflow_page(c: &Compilation, idx: &SourceIndex, wf: &WorkflowIr, opts: &Opt
         "In execution order. `After` lists direct dependencies, including those implied by reading another step's output.".into(),
     ));
     b.push(step_table(wf, src, Scope::Main));
+    if let Some(can) = &wf.continue_as_new {
+        b.push(Block::Heading(2, "Continue-as-new".into(), None));
+        b.push(Block::Para(match &can.condition {
+            Some(cond) => format!(
+                "When every step has finished and {} is true, the run ends with status `CONTINUED_AS_NEW` and the execution continues as a new run, under the same id, with the input below and an empty history. Otherwise the run completes{}.",
+                code(&pretty::expr(cond)),
+                if wf.result.is_some() { " with `return`" } else { "" }
+            ),
+            None => "When every step has finished, the run ends with status `CONTINUED_AS_NEW` and the execution always continues as a new run, under the same id, with the input below and an empty history: it never completes by itself.".into(),
+        }));
+        match &can.input {
+            orbit_ir::Expr::Object { fields } => {
+                let given: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                let mut rows: Vec<Vec<String>> = fields
+                    .iter()
+                    .map(|f| vec![code(&f.name), code(&pretty::expr(&f.value))])
+                    .collect();
+                if let Type::Record {
+                    fields: declared, ..
+                } = &wf.input
+                {
+                    for f in declared
+                        .iter()
+                        .filter(|f| !given.contains(&f.name.as_str()))
+                    {
+                        rows.push(vec![
+                            code(&f.name),
+                            match &f.default {
+                                Some(d) => format!("default {}", code(&pretty::literal(d))),
+                                None => "`null`".into(),
+                            },
+                        ]);
+                    }
+                }
+                b.push(Block::Table(
+                    vec!["Next run's input".into(), "Value".into()],
+                    rows,
+                ));
+            }
+            other => b.push(Block::Code(
+                "orbit".into(),
+                format!("continue_as_new with {}", pretty::expr(other)),
+            )),
+        }
+    }
     let handler_scopes: Vec<Scope> = scopes(wf)
         .into_iter()
         .filter(|s| matches!(s, Scope::Handler(_)))
@@ -963,6 +1008,81 @@ mod tests {
         assert!(!h.contains("{ext}"));
         assert!(h.contains("href=\"contracts.html#task-payments-charge\""));
         assert!(h.contains("schemas/workflow.Checkout.input.schema.json"));
+    }
+
+    #[test]
+    fn continue_as_new_is_documented() {
+        let c = compile("subscription.orbit");
+        let pages = generate(&c, &Options::default());
+        let md = markdown(&pages[1]);
+        assert!(md.contains("\n## Continue-as-new\n"), "{md}");
+        assert!(
+            md.contains("When every step has finished and `input.period < input.periods` is true, the run ends with status `CONTINUED_AS_NEW`"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Otherwise the run completes with `return`."),
+            "{md}"
+        );
+        assert!(md.contains("| Next run's input | Value |"), "{md}");
+        assert!(md.contains("| `period` | `input.period + 1` |"), "{md}");
+        assert!(
+            md.contains("| `charged` | `input.charged + input.amount` |"),
+            "{md}"
+        );
+        // The section comes after the steps and before the diagram, which shows it too.
+        let at = |s: &str| md.find(s).unwrap();
+        assert!(at("## Steps") < at("## Continue-as-new"));
+        assert!(at("## Continue-as-new") < at("## Diagram"));
+        assert!(
+            md.contains("continue_as_new -. next run .-> charge"),
+            "{md}"
+        );
+        let h = html(&pages[1]);
+        assert!(h.contains("Continue-as-new</h2>"), "{h}");
+        assert!(
+            h.contains("<code>input.period &lt; input.periods</code>"),
+            "{h}"
+        );
+        assert!(
+            h.contains("&gt;next run</text>") || h.contains(">next run</text>"),
+            "{h}"
+        );
+
+        // Without `when`, with a field left to its default, and a non-literal input.
+        let c = crate::compile_str(
+            "p.orbit",
+            r#"
+workflow Poll {
+    version "1.0.0"
+    input { cursor: Int = 0, page: Int = 10, note: String? }
+    step next { compute input.cursor + 1 }
+    continue_as_new with { cursor: next }
+}
+workflow Again {
+    version "1.0.0"
+    input { n: Int }
+    continue_as_new when input.n > 0 with input
+}
+"#,
+        );
+        assert!(!c.has_errors(), "{}", c.render_diagnostics(false));
+        let pages = generate(&c, &Options::default());
+        let md = markdown(&pages[1]);
+        assert!(md.contains("always continues as a new run"), "{md}");
+        assert!(md.contains("it never completes by itself"), "{md}");
+        assert!(md.contains("| `cursor` | `next` |"), "{md}");
+        assert!(md.contains("| `page` | default `10` |"), "{md}");
+        assert!(md.contains("| `note` | `null` |"), "{md}");
+        let md = markdown(&pages[2]);
+        assert!(md.contains("Otherwise the run completes."), "{md}");
+        assert!(
+            md.contains("```orbit\ncontinue_as_new with input\n```"),
+            "{md}"
+        );
+        // A workflow without it has no such section.
+        let c = compile("approval.orbit");
+        assert!(!markdown(&generate(&c, &Options::default())[1]).contains("Continue-as-new"));
     }
 
     #[test]

@@ -14,6 +14,10 @@
   const LIST_MAX = 1000; // the API returns at most 1000 executions per request
   const STATUSES = ['RUNNING', 'COMPENSATING', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
   const TERMINAL = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']);
+  // The status of a run that ended with `continue_as_new`. The API never
+  // lists a current execution with it (the execution goes on in its next
+  // run); it is the status of every earlier run.
+  const CONTINUED = 'CONTINUED_AS_NEW';
   // The UI is served at <base>/ui/; the API lives at <base>/v1/.
   const BASE = location.pathname.replace(/\/ui(\/.*)?$/, '');
 
@@ -108,7 +112,8 @@
   }
 
   const link = (href, ...kids) => h('a', { href }, ...kids);
-  const execHref = (id) => '#/executions/' + enc(id);
+  const execHref = (id, run) => '#/executions/' + enc(id) + (run ? '?run=' + run : '');
+  const schedHref = (id) => '#/schedules/' + enc(id);
   const wfHref = (name, version) => '#/workflows/' + enc(name) + (version ? '/' + enc(version) : '');
 
   // ---------------------------------------------------------- formatting
@@ -145,6 +150,13 @@
     return h('td', { class: 'nowrap', title: ms ? new Date(ms).toISOString() : null }, fmtTime(ms));
   }
 
+  /** An RFC 3339 time from the API (schedules) as epoch milliseconds, or null. */
+  function isoMs(s) {
+    if (!s) return null;
+    const t = Date.parse(s);
+    return Number.isFinite(t) ? t : null;
+  }
+
   function json(v) {
     return h('pre', { class: 'json' }, v === undefined ? '—' : JSON.stringify(v, null, 2));
   }
@@ -174,7 +186,61 @@
     }
   }
 
-  const WF_CLASS = { RUNNING: 's-run', COMPENSATING: 's-warn', COMPLETED: 's-ok', FAILED: 's-bad', CANCELLED: 's-idle', TIMED_OUT: 's-bad' };
+  // ORBIT source text of an IR expression (as `orbit graph` and `orbit docs`
+  // print it), for `continue_as_new` conditions and inputs.
+  const BINOPS = {
+    or: ['||', 1], and: ['&&', 2], eq: ['==', 3], ne: ['!=', 3], lt: ['<', 4], le: ['<=', 4], gt: ['>', 4], ge: ['>=', 4],
+    add: ['+', 5], sub: ['-', 5], mul: ['*', 6], div: ['/', 6], rem: ['%', 6],
+  };
+
+  function exprPrec(e) {
+    if (!e || typeof e !== 'object') return 8;
+    if (e.op === 'binary') return (BINOPS[e.operator] || ['', 5])[1];
+    if (e.op === 'if' || e.op === 'lambda') return 0;
+    if (e.op === 'unary') return 7;
+    return 8;
+  }
+
+  function literalStr(v) {
+    if (v === null || v === undefined) return 'null';
+    if (Array.isArray(v)) return '[' + v.map(literalStr).join(', ') + ']';
+    if (typeof v === 'object') {
+      const keys = Object.keys(v);
+      return keys.length ? '{ ' + keys.map((k) => k + ': ' + literalStr(v[k])).join(', ') + ' }' : '{}';
+    }
+    return typeof v === 'string' ? JSON.stringify(v) : String(v);
+  }
+
+  function exprStr(e) {
+    if (!e || typeof e !== 'object') return '';
+    const path = (root, p) => [root].concat(p || []).join('.');
+    const operand = (x, min) => (exprPrec(x) < min ? '(' + exprStr(x) + ')' : exprStr(x));
+    switch (e.op) {
+      case 'literal': return literalStr(e.value);
+      case 'input': return path('input', e.path);
+      case 'step': return path(e.step, e.path);
+      case 'execution': return 'execution.' + e.field;
+      case 'local': return path(e.name, e.path);
+      case 'index': return operand(e.target, 8) + '[' + exprStr(e.index) + ']';
+      case 'object': return (e.fields || []).length ? '{ ' + e.fields.map((f) => f.name + ': ' + exprStr(f.value)).join(', ') + ' }' : '{}';
+      case 'list': return '[' + (e.items || []).map(exprStr).join(', ') + ']';
+      case 'binary': {
+        const [sym, p] = BINOPS[e.operator] || [e.operator, 5];
+        return operand(e.left, p) + ' ' + sym + ' ' + operand(e.right, p + 1);
+      }
+      case 'unary': return (e.operator === 'not' ? '!' : '-') + operand(e.operand, 7);
+      case 'if': return 'if ' + exprStr(e.condition) + ' then ' + exprStr(e.then) + ' else ' + exprStr(e.otherwise);
+      case 'call': return e.function + '(' + (e.args || []).map(exprStr).join(', ') + ')';
+      case 'lambda': return e.param + ' => ' + exprStr(e.body);
+      default: return '…';
+    }
+  }
+
+  /** `when <condition>`, or `always` for a `continue_as_new` without `when`. */
+  function continueWhen(can) { return can.condition ? 'when ' + exprStr(can.condition) : 'always'; }
+
+  const WF_CLASS = { RUNNING: 's-run', COMPENSATING: 's-warn', COMPLETED: 's-ok', FAILED: 's-bad', CANCELLED: 's-idle', TIMED_OUT: 's-bad', CONTINUED_AS_NEW: 's-cont' };
+  const SCHED_CLASS = { ACTIVE: 's-ok', PAUSED: 's-warn', ENDED: 's-idle' };
   const UNIT_CLASS = {
     PENDING: 's-idle', RUNNING: 's-run', SCHEDULED: 's-run', DISPATCHED: 's-run', ATTEMPT_FAILED: 's-warn',
     UNCERTAIN: 's-warn', RETRY_WAIT: 's-warn', WAITING: 's-run', SUCCEEDED: 's-ok', SKIPPED: 's-idle',
@@ -315,10 +381,11 @@
     const body = h('div', { class: 'stack' });
     append(root, header('Overview', null, autoToggle()), body);
     const load = async () => {
-      const [health, lists, workers] = await Promise.all([
+      const [health, lists, workers, schedules] = await Promise.all([
         api('/v1/health').catch((e) => e),
         Promise.all(STATUSES.map((st) => api(`/v1/executions?status=${st}&limit=${LIST_MAX}`).then((r) => r.executions).catch((e) => e))),
         api('/v1/workers').catch((e) => e),
+        api('/v1/schedules').catch((e) => e),
       ]);
       if (gen !== view.gen) return;
       const failures = [];
@@ -328,7 +395,7 @@
       const details = await Promise.all(recent.map((f) => api('/v1/executions/' + enc(f.execution_id)).catch(() => null)));
       if (gen !== view.gen) return;
       replace(body,
-        h('div', { class: 'grid' }, healthPanel(health), workersSummary(workers)),
+        h('div', { class: 'grid' }, healthPanel(health), h('div', { class: 'stack' }, workersSummary(workers), schedulesSummary(schedules))),
         countsPanel(lists),
         failuresPanel(recent, details));
     };
@@ -383,6 +450,20 @@
     const tasks = new Set(online.flatMap((x) => x.contracts.map((c) => c.task_name)));
     append(panel, h('p', { class: 'small muted' }, tasks.size ? `Online workers serve ${tasks.size} task${tasks.size === 1 ? '' : 's'}: ` : 'No online worker serves any task.',
       [...tasks].sort().map((t) => h('span', { class: 'tag' }, t))));
+    return panel;
+  }
+
+  function schedulesSummary(r) {
+    const panel = h('section', { class: 'panel', 'data-test': 'schedules-summary' }, h('h2', null, 'Schedules'));
+    if (r instanceof Error) return append(panel, errorNotice(r));
+    const all = r.schedules || [];
+    const n = (state) => all.filter((sc) => scheduleState(sc) === state).length;
+    append(panel, h('div', { class: 'stats' },
+      stat(n('ACTIVE'), 'active', '#/schedules'),
+      stat(n('PAUSED'), 'paused', '#/schedules'),
+      stat(all.filter((sc) => sc.last_error).length, 'failing to start', '#/schedules')));
+    const next = all.map((sc) => isoMs(sc.next_fire_at)).filter((t) => t !== null).sort((a, b) => a - b)[0];
+    append(panel, h('p', { class: 'small muted' }, all.length ? (next ? 'Next fire ' + fmtTime(next) + ' (' + ago(next) + ').' : 'No schedule is due to fire.') : 'No schedules this credential may manage.'));
     return panel;
   }
 
@@ -554,8 +635,9 @@
     return step.for_each ? 'for ' + step.for_each.variable + ': ' + t : t;
   }
 
-  function childId(execId, key) {
-    return execId + '.' + key.replaceAll('compensate:', 'compensate.').replaceAll('[', '.').replaceAll(']', '');
+  /** Child execution id of a `workflow` unit: `<id>.<unit>`, or `<id>.run<N>.<unit>` in run N > 1. */
+  function childId(execId, key, run) {
+    return execId + (run > 1 ? '.run' + run : '') + '.' + key.replaceAll('compensate:', 'compensate.').replaceAll('[', '.').replaceAll(']', '');
   }
 
   /** Status of a graph node: the step's own unit, or the latest instance of an event step. */
@@ -614,8 +696,14 @@
 
   let graphSeq = 0;
 
-  /** SVG of a definition's steps: dependencies, compensations, outcome and event handlers. */
-  function graph(def, units) {
+  /**
+   * SVG of a definition's steps: dependencies, compensations, outcome and
+   * event handlers, and `continue_as_new` (a node after the final main steps
+   * with a dashed edge back to the first ones). `cont` is the status of the
+   * `continue_as_new` node: CONTINUED_AS_NEW (taken), SKIPPED (the run
+   * completed instead) or null.
+   */
+  function graph(def, units, cont = null) {
     const lanes = [{ group: 'main', name: null, title: null, steps: def.steps || [] }];
     for (const [kind, steps] of Object.entries(def.handlers || {})) lanes.push({ group: 'handler', name: kind, title: 'on ' + kind, steps });
     for (const [sig, steps] of Object.entries(def.events || {})) lanes.push({ group: 'event', name: sig, title: 'on event ' + sig, steps });
@@ -638,6 +726,18 @@
       for (const st of lane.steps) {
         for (const d of st.dependencies || []) if (at[d]) edges.push({ from: at[d], to: at[st.id], comp: false });
       }
+      let cols = L.cols;
+      if (lane.group === 'main' && def.continue_as_new) {
+        // Evaluated when every step has finished: after the steps nothing
+        // depends on; the next run starts again at the steps without dependencies.
+        const n = { lane, step: { id: 'continue_as_new' }, cont: def.continue_as_new, comp: false, x: PAD + L.cols * (NODE_W + GAP_X), y: top };
+        nodes.push(n);
+        for (const st of lane.steps) {
+          if (!lane.steps.some((o) => (o.dependencies || []).includes(st.id))) edges.push({ from: at[st.id], to: n, comp: false });
+          if (!(st.dependencies || []).length) edges.push({ from: n, to: at[st.id], back: true, top });
+        }
+        cols += 1;
+      }
       y = top + L.rows * (NODE_H + GAP_Y);
       // Compensations sit under the lane, in their step's column.
       const compRows = {};
@@ -655,7 +755,7 @@
       if (maxComp) y += 6 + maxComp * (NODE_H + GAP_Y);
       lane.top = top;
       lane.bottom = y - GAP_Y;
-      width = Math.max(width, PAD * 2 + L.cols * (NODE_W + GAP_X) - GAP_X);
+      width = Math.max(width, PAD * 2 + cols * (NODE_W + GAP_X) - GAP_X);
       y += 8;
     }
     const height = y + PAD - 8 - GAP_Y + 8;
@@ -670,7 +770,15 @@
     }
     for (const e of edges) {
       let d;
-      if (e.comp) {
+      if (e.back) {
+        // `next run`: up from the continue_as_new node, along the top, down
+        // the left margin and into the first step.
+        const x1 = e.from.x + NODE_W / 2;
+        const yt = e.top - 8;
+        const xl = PAD - 8;
+        const y2 = e.to.y + NODE_H / 2;
+        d = `M${x1},${e.from.y} L${x1},${yt} L${xl},${yt} L${xl},${y2} L${e.to.x - 1},${y2}`;
+      } else if (e.comp) {
         // Down the left edge of the column, clear of the steps in between.
         const x = e.from.x - 6 - 3 * (e.slot % 3);
         const y1 = e.from.y + NODE_H / 2;
@@ -684,9 +792,22 @@
         const c = Math.max(18, (x2 - x1) / 2);
         d = `M${x1},${y1} C${x1 + c},${y1} ${x2 - c},${y2} ${x2 - 1},${y2}`;
       }
-      append(svg, s('path', { d, class: 'edge' + (e.comp ? ' comp' : ''), 'marker-end': `url(#${mid})` }));
+      append(svg, s('path', { d, class: 'edge' + (e.comp ? ' comp' : '') + (e.back ? ' back' : ''), 'marker-end': `url(#${mid})`, 'data-edge': e.back ? 'next-run' : null }));
     }
     for (const n of nodes) {
+      if (n.cont) {
+        const when = continueWhen(n.cont);
+        const label = cont === CONTINUED ? 'continued as new' : cont === 'SKIPPED' ? 'not taken: the run completed' : null;
+        const tip = ['continue as new', when, 'next input: ' + exprStr(n.cont.input), label ? 'this run: ' + label : null].filter(Boolean).join('\n');
+        append(svg, s('g', { class: 'node cont' + (cont ? ' ' + (WF_CLASS[cont] || 's-idle').replace('s-', 'st-') : ''), transform: `translate(${n.x},${n.y})`,
+          'data-step': 'continue_as_new', 'data-continue': 'true', 'data-lane': 'main', 'data-status': cont || '' },
+        s('title', null, tip),
+        s('rect', { width: NODE_W, height: NODE_H, rx: 5 }),
+        s('rect', { class: 'inner', x: 3, y: 3, width: NODE_W - 6, height: NODE_H - 6, rx: 3 }),
+        s('text', { x: 10, y: 18 }, 'continue as new'),
+        s('text', { x: 10, y: 34, class: 'kind' }, clip(when, 26))));
+        continue;
+      }
       const st = nodeStatus(units, n.lane.group, n.lane.name, n.step.id, n.comp);
       const cls = st.status ? (UNIT_CLASS[st.status] || 's-idle').replace('s-', 'st-') : '';
       const name = n.comp ? 'compensate ' + n.step.id : n.step.id;
@@ -706,27 +827,55 @@
 
   function clip(t, n) { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; }
 
-  function legend() {
+  function legend(def) {
+    const cont = def && def.continue_as_new;
     return h('div', { class: 'legend' }, [['SUCCEEDED', 'succeeded'], ['RUNNING', 'running or waiting'], ['RETRY_WAIT', 'retrying'], ['FAILED', 'failed'], ['SKIPPED', 'skipped or cancelled']]
       .map(([st, label]) => h('span', null, h('span', { class: 'swatch ' + UNIT_CLASS[st] }), label)),
-    h('span', null, 'Dashed: compensation. Unfilled: not started.'));
+    cont ? h('span', null, h('span', { class: 'swatch s-cont' }), 'continued as new') : null,
+    h('span', null, 'Dashed: compensation' + (cont ? '; next run' : '') + '. Unfilled: not started.' + (cont ? ' Double border: continue-as-new.' : '')));
   }
 
   // ------------------------------------------------------ execution detail
 
-  async function viewExecution(root, gen, id) {
+  /** The run selector of an execution that continued as new; `shown` is the run on the page. */
+  function runSelect(ex, shown) {
+    const current = ex.run || 1;
+    if (current <= 1) return null;
+    const sel = h('select', { id: 'run-select', 'data-test': 'run-select', 'aria-label': 'Run' });
+    for (let r = current; r >= 1; r--) append(sel, h('option', { value: String(r) }, r === current ? `Run ${r} (current)` : `Run ${r}`));
+    sel.value = String(shown);
+    sel.addEventListener('change', () => {
+      const r = Number(sel.value);
+      location.hash = execHref(ex.id, r === current ? null : r);
+    });
+    return h('label', { class: 'check', for: 'run-select' }, 'Run', sel);
+  }
+
+  function scheduleLink(id) {
+    return link(schedHref(id), h('span', { class: 'tag', 'data-test': 'schedule-link' }, 'schedule ' + id));
+  }
+
+  async function viewExecution(root, gen, id, params) {
     let ex = await api('/v1/executions/' + enc(id));
     if (gen !== view.gen) return;
     let def = null;
     let defError = null;
     try { def = await api(`/v1/workflows/${enc(ex.workflow)}/${enc(ex.version)}`); } catch (e) { defError = e; }
     if (gen !== view.gen) return;
+    const current = ex.run || 1;
+    const wanted = parseInt(params.get('run') || '', 10);
+    if (Number.isFinite(wanted) && wanted !== current) {
+      await viewRun(root, gen, ex, def, defError, wanted);
+      return;
+    }
     const openEvents = new Set();
     let history = [];
     let lastSeq = -1;
 
     const badgeSlot = h('span');
-    const sub = h('span', null, link(wfHref(ex.workflow, ex.version), ex.workflow), ' ', h('span', { class: 'faint' }, ex.version), ' ', badgeSlot);
+    const sub = h('span', null, link(wfHref(ex.workflow, ex.version), ex.workflow), ' ', h('span', { class: 'faint' }, ex.version), ' ', badgeSlot,
+      current > 1 ? [' ', h('span', { class: 'tag', 'data-test': 'run' }, 'run ' + current)] : null,
+      ex.schedule_id ? [' ', scheduleLink(ex.schedule_id)] : null);
     const summary = h('section', { class: 'panel' });
     const io = h('section', { class: 'panel' });
     const graphPanel = h('section', { class: 'panel' });
@@ -736,7 +885,7 @@
     const historyPanel = h('section', { class: 'panel', 'data-test': 'history' });
     const actions = h('section', { class: 'panel', 'data-test': 'actions' });
 
-    append(root, header(ex.id, sub, autoToggle()),
+    append(root, header(ex.id, sub, runSelect(ex, current), autoToggle()),
       defError ? errorNotice(defError) : null,
       h('div', { class: 'grid' }, summary, actions),
       io, graphPanel, steps, children, signals, historyPanel);
@@ -744,6 +893,8 @@
     const refresh = async () => {
       const [e2, hist] = await Promise.all([api('/v1/executions/' + enc(id)), api(`/v1/executions/${enc(id)}/history`)]);
       if (gen !== view.gen) return;
+      // The execution went on to its next run: show that one.
+      if ((e2.run || 1) !== current) { route(); return; }
       ex = e2;
       history = hist.events;
       if (ex.last_seq === lastSeq) return;
@@ -755,11 +906,11 @@
       replace(badgeSlot, badge(ex.status));
       renderSummary(summary, ex);
       renderIo(io, ex);
-      replace(graphPanel, h('h2', null, 'Graph'), def ? [graph(def, ex.units), legend()] : h('p', { class: 'muted' }, 'The definition is not available.'));
+      replace(graphPanel, h('h2', null, 'Graph'), def ? [graph(def, ex.units, ex.status === 'COMPLETED' ? 'SKIPPED' : null), legend(def)] : h('p', { class: 'muted' }, 'The definition is not available.'));
       renderSteps(steps, ex, def);
       renderChildren(children, ex, def, gen);
       renderSignals(signals, ex);
-      renderHistory(historyPanel, history, openEvents);
+      renderHistory(historyPanel, history, openEvents, current);
       updateActions();
     };
 
@@ -768,6 +919,99 @@
     every(2000, () => {
       if (autoRefresh() && !TERMINAL.has(ex.status)) refresh().catch(() => {});
     });
+  }
+
+  /** Unit state rebuilt from a run's history (an earlier run has no live state). */
+  function unitsFromHistory(events) {
+    const units = {};
+    const u = (k) => (units[k] = units[k] || { attempt: 0, dispatch_count: 0 });
+    for (const e of events) {
+      if (!e.step) continue;
+      const x = u(e.step);
+      switch (e.type) {
+        case 'StepFanOut': x.status = 'RUNNING'; x.input = e.items; break;
+        case 'StepScheduled': Object.assign(x, { status: 'SCHEDULED', attempt: e.attempt, input: e.input, idempotency_key: e.idempotency_key, scheduled_at_ms: e.timestamp_ms }); break;
+        case 'StepDispatched': Object.assign(x, { status: 'DISPATCHED', attempt: e.attempt, worker_id: e.worker_id, dispatched_at_ms: e.timestamp_ms }); x.dispatch_count += 1; break;
+        case 'StepSucceeded': Object.assign(x, { status: 'SUCCEEDED', output: e.output, finished_at_ms: e.timestamp_ms }); break;
+        case 'StepAttemptFailed': Object.assign(x, { status: 'ATTEMPT_FAILED', last_error: e.error }); break;
+        case 'StepAttemptUncertain': x.status = 'UNCERTAIN'; break;
+        case 'RetryScheduled': Object.assign(x, { status: 'RETRY_WAIT', wake_at_ms: e.fire_at_ms }); break;
+        case 'StepFailed': Object.assign(x, { status: 'FAILED', error: e.error, finished_at_ms: e.timestamp_ms }); break;
+        case 'StepSkipped': Object.assign(x, { status: 'SKIPPED', finished_at_ms: e.timestamp_ms }); break;
+        case 'StepCancelled': Object.assign(x, { status: 'CANCELLED', finished_at_ms: e.timestamp_ms }); break;
+        case 'TimerStarted': Object.assign(x, { status: 'WAITING', wake_at_ms: e.fire_at_ms, scheduled_at_ms: x.scheduled_at_ms || e.timestamp_ms }); break;
+        case 'SignalAwaitStarted': Object.assign(x, { status: 'WAITING', wake_at_ms: e.deadline_ms, scheduled_at_ms: x.scheduled_at_ms || e.timestamp_ms }); break;
+        // A timer that fired and a signal that was taken finish their step.
+        case 'TimerFired': Object.assign(x, { status: 'SUCCEEDED', finished_at_ms: e.timestamp_ms, wake_at_ms: undefined }); break;
+        case 'SignalDelivered': Object.assign(x, { status: 'SUCCEEDED', finished_at_ms: e.timestamp_ms, wake_at_ms: undefined }); break;
+        default: break;
+      }
+    }
+    return units;
+  }
+
+  /** What an earlier run's history says: status, input, next input, units, signals. */
+  function runState(events) {
+    const first = events[0] || {};
+    const last = events[events.length - 1] || {};
+    const ends = { WorkflowContinuedAsNew: CONTINUED, WorkflowCompleted: 'COMPLETED', WorkflowFailed: 'FAILED', WorkflowCancelled: 'CANCELLED', WorkflowTimedOut: 'TIMED_OUT' };
+    const signals = [];
+    for (const e of events) {
+      if (e.type === 'SignalReceived') signals.push({ seq: e.seq, name: e.name, payload: e.payload, received_at_ms: e.timestamp_ms });
+      if (e.type === 'SignalDelivered') { const sg = signals.find((x) => x.seq === e.signal_seq); if (sg) sg.delivered_to = e.step; }
+    }
+    return {
+      status: ends[last.type] || 'RUNNING',
+      input: first.input,
+      next: last.type === 'WorkflowContinuedAsNew' ? last : null,
+      created_at_ms: first.timestamp_ms,
+      finished_at_ms: ends[last.type] ? last.timestamp_ms : null,
+      definition_hash: first.definition_hash,
+      units: unitsFromHistory(events),
+      signals,
+    };
+  }
+
+  /** An earlier run of an execution that continued as new: read-only, from `history?run=N`. */
+  async function viewRun(root, gen, ex, def, defError, run) {
+    const current = ex.run || 1;
+    const hist = await api(`/v1/executions/${enc(ex.id)}/history?run=${run}`);
+    if (gen !== view.gen) return;
+    const events = hist.events || [];
+    const st = runState(events);
+    const sub = h('span', null, link(wfHref(ex.workflow, ex.version), ex.workflow), ' ', h('span', { class: 'faint' }, ex.version), ' ', badge(st.status),
+      ' ', h('span', { class: 'tag', 'data-test': 'run' }, `run ${run} of ${current}`), ex.schedule_id ? [' ', scheduleLink(ex.schedule_id)] : null);
+    const kv = [
+      ['Run', `${run} of ${current}`],
+      ['Status', badge(st.status)],
+      ['Workflow', [link(wfHref(ex.workflow, ex.version), ex.workflow), ' ', ex.version]],
+      ['Definition', h('span', { class: 'mono' }, st.definition_hash || ex.definition_hash)],
+      ['Started', fmtTime(st.created_at_ms)],
+      ['Ended', st.finished_at_ms ? fmtTime(st.finished_at_ms) : '—'],
+      ['Duration', st.finished_at_ms ? fmtDur(st.finished_at_ms - st.created_at_ms) : '—'],
+      ['History events', String(events.length)],
+    ];
+    if (st.next) kv.push(['Continued as', link(execHref(ex.id, st.next.next_run === current ? null : st.next.next_run), 'run ' + st.next.next_run)]);
+    if (ex.schedule_id) kv.push(['Schedule', link(schedHref(ex.schedule_id), ex.schedule_id)]);
+    const steps = h('section', { class: 'panel', 'data-test': 'steps' });
+    const signals = h('section', { class: 'panel', 'data-test': 'signals-received' });
+    const historyPanel = h('section', { class: 'panel', 'data-test': 'history' });
+    const pseudo = { id: ex.id, run, units: st.units, signals: st.signals };
+    append(root, header(ex.id, sub, runSelect(ex, run)),
+      notice('', `Run ${run} of ${current}.`, ['An earlier run of this execution, rebuilt from its archived history. It is read-only: ',
+        link(execHref(ex.id), 'open the current run'), ' to query, signal or cancel the execution.']),
+      defError ? errorNotice(defError) : null,
+      h('div', { class: 'grid' },
+        h('section', { class: 'panel', 'data-test': 'run-summary' }, h('h2', null, 'Run'), h('dl', { class: 'kv' }, kv.map(([k, v]) => [h('dt', null, k), h('dd', null, v)]))),
+        h('section', { class: 'panel' }, h('h2', null, 'Input and next input'), h('div', { class: 'io' },
+          h('div', null, h('h3', null, 'Input'), json(st.input)),
+          h('div', { 'data-test': 'next-input' }, h('h3', null, st.next ? `Input of run ${st.next.next_run}` : 'Next input'),
+            st.next ? json(st.next.input) : h('p', { class: 'muted' }, 'This run did not continue as new.'))))),
+      h('section', { class: 'panel' }, h('h2', null, 'Graph'), def ? [graph(def, st.units, st.status === CONTINUED ? CONTINUED : st.status === 'COMPLETED' ? 'SKIPPED' : null), legend(def)] : h('p', { class: 'muted' }, 'The definition is not available.')),
+      steps, signals, historyPanel);
+    if (def) renderSteps(steps, pseudo, def); else steps.hidden = true;
+    renderSignals(signals, pseudo);
+    renderHistory(historyPanel, events, new Set(), run);
   }
 
   function renderSummary(panel, ex) {
@@ -781,6 +1025,10 @@
       ['Updated', ago(ex.updated_at_ms)],
       ['History events', String(ex.last_seq)],
     ];
+    if ((ex.run || 1) > 1) {
+      kv.splice(1, 0, ['Run', [String(ex.run), ' (continue-as-new; ', link(execHref(ex.id, ex.run - 1), 'previous run'), ')']]);
+    }
+    if (ex.schedule_id) kv.push(['Schedule', link(schedHref(ex.schedule_id), ex.schedule_id)]);
     if (ex.parent) kv.push(['Parent', [link(execHref(ex.parent.execution_id), ex.parent.execution_id), ' step ', h('span', { class: 'mono' }, ex.parent.step)]]);
     if (ex.abort) kv.push(['Winding down', ex.abort.kind + (ex.abort.reason ? ': ' + ex.abort.reason : '')]);
     if (ex.compensation) kv.push(['Compensation', String(ex.compensation)]);
@@ -853,7 +1101,7 @@
       if (u.idempotency_key) data.idempotency_key = u.idempotency_key;
       return h('tr', { 'data-unit': k },
         h('td', { class: 'id' }, k),
-        h('td', { class: 'small' }, unitKind(def, p), isChild ? [' ', link(execHref(childId(ex.id, k)), 'child')] : null),
+        h('td', { class: 'small' }, unitKind(def, p), isChild ? [' ', link(execHref(childId(ex.id, k, ex.run)), 'child')] : null),
         h('td', null, badge(u.status, UNIT_CLASS)),
         h('td', { class: 'num' }, u.attempt ? String(u.attempt) + (u.dispatch_count > u.attempt ? ` (${u.dispatch_count} deliveries)` : '') : '—'),
         h('td', { class: 'small' }, u.worker_id || '—'),
@@ -880,7 +1128,7 @@
     replace(panel, h('h2', null, 'Child executions'), h('div', { class: 'table-wrap' }, h('table', null,
       h('thead', null, h('tr', null, h('th', null, 'Execution'), h('th', null, 'Unit'), h('th', null, 'Workflow'), h('th', null, 'Status'))), body)));
     for (const k of kids.slice(0, 100)) {
-      const cid = childId(ex.id, k);
+      const cid = childId(ex.id, k, ex.run);
       const cell = h('td', null, '…');
       const wf = h('td', null, '');
       append(body, h('tr', { 'data-child': cid }, h('td', { class: 'id' }, link(execHref(cid), cid)), h('td', { class: 'id' }, k), wf, cell));
@@ -901,13 +1149,14 @@
   }
 
   function eventClass(type) {
+    if (type === 'WorkflowContinuedAsNew') return 'ev-cont';
     if (/Failed|TimedOut|LimitExceeded|TimeoutReached/.test(type)) return 'ev-bad';
     if (/Succeeded|Completed|Delivered/.test(type)) return 'ev-ok';
     if (/Retry|Uncertain|Cancel|Compensation|Stale|HandlersStarted/.test(type)) return 'ev-warn';
     return '';
   }
 
-  function renderHistory(panel, events, openEvents) {
+  function renderHistory(panel, events, openEvents, run = 1) {
     const t0 = events.length ? events[0].timestamp_ms : 0;
     const items = events.map((e) => {
       const d = h('details', { 'data-seq': e.seq }, h('summary', null,
@@ -920,7 +1169,7 @@
       d.addEventListener('toggle', () => { if (d.open) openEvents.add(e.seq); else openEvents.delete(e.seq); });
       return h('li', null, d);
     });
-    replace(panel, h('div', { class: 'row spread' }, h('h2', null, `History (${events.length} events)`)),
+    replace(panel, h('div', { class: 'row spread' }, h('h2', null, run > 1 ? `History of run ${run} (${events.length} events)` : `History (${events.length} events)`)),
       items.length ? h('ol', { class: 'timeline' }, items) : h('p', { class: 'muted' }, 'No events.'));
   }
 
@@ -1108,6 +1357,29 @@
     return table([{ label: 'Step' }, { label: 'Block' }, { label: 'Action' }, { label: 'After' }, { label: 'When' }, { label: 'Retry' }, { label: 'Timeout' }, { label: 'Compensation' }], rows);
   }
 
+  /** A definition's `continue_as_new`: when it applies and the next run's input. */
+  function continuePanel(def) {
+    const can = def.continue_as_new;
+    const declared = def.input && def.input.kind === 'record' ? def.input.fields || [] : [];
+    let input;
+    if (can.input && can.input.op === 'object') {
+      const given = can.input.fields.map((f) => f.name);
+      input = table([{ label: 'Next run’s input' }, { label: 'Value' }],
+        can.input.fields.map((f) => h('tr', null, h('td', { class: 'mono' }, f.name), h('td', { class: 'mono small wrap-any' }, exprStr(f.value))))
+          .concat(declared.filter((f) => !given.includes(f.name)).map((f) => h('tr', null, h('td', { class: 'mono' }, f.name),
+            h('td', { class: 'small muted' }, f.default !== undefined ? 'default ' + JSON.stringify(f.default) : 'null')))));
+    } else {
+      input = h('p', { class: 'mono' }, 'with ' + exprStr(can.input));
+    }
+    return h('section', { class: 'panel', 'data-test': 'continue-as-new' }, h('h2', null, 'Continue-as-new'),
+      h('p', null, can.condition
+        ? ['When every step has finished and ', h('code', null, exprStr(can.condition)), ' is true, the run ends with status ', badge(CONTINUED),
+          ' and the execution continues as a new run, under the same id, with the input below and an empty history. Otherwise the run completes.']
+        : ['When every step has finished, the run ends with status ', badge(CONTINUED),
+          ' and the execution always continues as a new run with the input below: it never completes by itself.']),
+      input);
+  }
+
   async function viewWorkflow(root, gen, name, version) {
     const [def, all] = await Promise.all([
       api('/v1/workflows/' + enc(name) + (version ? '/' + enc(version) : '')),
@@ -1134,14 +1406,239 @@
       h('div', { class: 'grid' },
         h('section', { class: 'panel' }, h('h2', null, 'Input'), fieldsTable(def.input)),
         h('section', { class: 'panel' }, h('h2', null, 'Output'), fieldsTable(def.output))),
-      h('section', { class: 'panel' }, h('h2', null, 'Graph'), graph(def, null)),
+      h('section', { class: 'panel' }, h('h2', null, 'Graph'), graph(def, null), def.continue_as_new ? legend(def) : null),
       h('section', { class: 'panel' }, h('h2', null, 'Steps'), stepRows(def)),
+      def.continue_as_new ? continuePanel(def) : null,
       h('section', { class: 'panel' }, h('h2', null, 'Task contracts'),
         table([{ label: 'Task' }, { label: 'Version' }, { label: 'Input' }, { label: 'Output' }, { label: 'Notes' }],
           contracts.map((c) => h('tr', null, h('td', { class: 'mono' }, c.name), h('td', { class: 'mono' }, c.version),
             h('td', { class: 'mono small wrap-any' }, typeStr(c.input)), h('td', { class: 'mono small wrap-any' }, typeStr(c.output)),
             h('td', { class: 'small' }, [c.builtin ? 'built in' : '', c.compensated_by ? 'compensated by ' + c.compensated_by : '', c.workflow_hash ? 'child workflow' : ''].filter(Boolean).join('; '))))))
     );
+  }
+
+  // -------------------------------------------------------------- schedules
+
+  function scheduleTiming(sc) {
+    if (sc.cron) return `cron "${sc.cron}"` + (sc.timezone ? ' ' + sc.timezone : ' UTC');
+    if (sc.interval) return 'every ' + sc.interval;
+    return '—';
+  }
+
+  /** ACTIVE, PAUSED or ENDED (past `end_at`: no next occurrence). */
+  function scheduleState(sc) {
+    if (sc.paused) return 'PAUSED';
+    return sc.next_fire_at ? 'ACTIVE' : 'ENDED';
+  }
+
+  function isoCell(s) { return timeCell(isoMs(s)); }
+
+  async function viewSchedules(root, gen) {
+    const body = h('div');
+    append(root, header('Schedules', null, h('a', { class: 'btn btn-small', href: '#/schedules?new=1', 'data-test': 'schedule-new' }, 'New schedule'), autoToggle()), body);
+    const load = async () => {
+      let r;
+      try { r = await api('/v1/schedules'); } catch (e) { if (gen === view.gen) replace(body, errorNotice(e)); return; }
+      if (gen !== view.gen) return;
+      const rows = r.schedules.map((sc) => h('tr', { 'data-schedule': sc.schedule_id },
+        h('td', { class: 'id nowrap' }, link(schedHref(sc.schedule_id), sc.schedule_id)),
+        h('td', null, link(wfHref(sc.workflow, sc.version), sc.workflow), h('span', { class: 'faint' }, ' ' + (sc.version || 'latest'))),
+        h('td', { class: 'mono small' }, scheduleTiming(sc)),
+        h('td', null, badge(scheduleState(sc), SCHED_CLASS)),
+        isoCell(sc.next_fire_at),
+        isoCell(sc.last_fire_at),
+        h('td', { class: 'id' }, sc.last_execution_id ? link(execHref(sc.last_execution_id), sc.last_execution_id) : '—'),
+        h('td', { class: 'num' }, String(sc.fired)),
+        h('td', { class: 'num' }, String(sc.skipped)),
+        h('td', { class: 'small wrap-any' }, sc.last_error ? h('span', { class: 'ev-bad' }, sc.last_error) : '')));
+      replace(body,
+        table([{ label: 'Schedule' }, { label: 'Workflow' }, { label: 'Timing' }, { label: 'State' }, { label: 'Next fire' }, { label: 'Last fire' }, { label: 'Last execution' }, { label: 'Fired', cls: 'num' }, { label: 'Skipped', cls: 'num' }, { label: 'Last error' }],
+          rows, 'No schedules. Create one with New schedule, orbit schedule create or POST /v1/schedules.'),
+        h('p', { class: 'small faint' }, 'Times are in this browser’s time zone. A client identity sees the schedules of the workflows it may schedule.'));
+    };
+    await load();
+    every(5000, () => { if (autoRefresh()) load(); });
+  }
+
+  async function viewSchedule(root, gen, id) {
+    let sc = await api('/v1/schedules/' + enc(id));
+    if (gen !== view.gen) return;
+    const badgeSlot = h('span');
+    const spec = h('section', { class: 'panel', 'data-test': 'schedule-spec' });
+    const state = h('section', { class: 'panel', 'data-test': 'schedule-state' });
+    const inputPanel = h('section', { class: 'panel' });
+    const actions = h('section', { class: 'panel', 'data-test': 'schedule-actions' });
+    const runs = h('section', { class: 'panel', 'data-test': 'schedule-executions' });
+    append(root, header(id, h('span', null, link(wfHref(sc.workflow, sc.version), sc.workflow), ' ', h('span', { class: 'faint' }, sc.version || 'latest version'), ' ', badgeSlot), autoToggle()),
+      h('div', { class: 'grid' }, spec, actions),
+      h('div', { class: 'grid' }, state, inputPanel),
+      runs);
+
+    const out = h('div', { class: 'result', 'data-test': 'schedule-result' });
+    const pauseBtn = h('button', { type: 'button', class: 'btn btn-small', 'data-test': 'schedule-pause' }, 'Pause');
+    const resumeBtn = h('button', { type: 'button', class: 'btn btn-small', 'data-test': 'schedule-resume' }, 'Resume');
+    const triggerBtn = h('button', { type: 'button', class: 'btn btn-primary btn-small', 'data-test': 'schedule-trigger' }, 'Trigger now');
+    const deleteBtn = h('button', { type: 'button', class: 'btn btn-danger btn-small', 'data-test': 'schedule-delete' }, 'Delete schedule…');
+    const confirmBox = h('div', { class: 'confirm', hidden: true });
+    const yes = h('button', { type: 'button', class: 'btn btn-danger btn-small', 'data-test': 'schedule-delete-confirm' }, 'Confirm delete');
+    const no = h('button', { type: 'button', class: 'btn btn-small' }, 'Keep it');
+    append(confirmBox, h('div', null, `Delete schedule ${id}? It stops firing at once. Executions it started are not affected. This cannot be undone.`), h('div', { class: 'row' }, yes, no));
+    replace(actions, h('h2', null, 'Actions'), h('div', { class: 'actions-list' },
+      h('div', null, h('div', { class: 'row spread' }, h('span', null, 'Pause or resume firing'), h('span', { class: 'row' }, pauseBtn, resumeBtn)),
+        h('div', { class: 'small faint' }, 'Resuming continues with the next occurrence after now; occurrences missed while paused are not started.')),
+      h('div', null, h('div', { class: 'row spread' }, h('span', null, 'Start an execution now'), triggerBtn),
+        h('div', { class: 'small faint' }, 'With the schedule’s workflow, version and input, also while paused. The overlap policy applies.')),
+      h('div', null, h('div', { class: 'row spread' }, h('span', null, 'Delete'), deleteBtn), confirmBox),
+      out));
+
+    const render = () => {
+      replace(badgeSlot, badge(scheduleState(sc), SCHED_CLASS));
+      pauseBtn.hidden = sc.paused;
+      resumeBtn.hidden = !sc.paused;
+      const kv = [
+        ['Workflow', [link(wfHref(sc.workflow, sc.version), sc.workflow), ' ', sc.version || '(latest version at each fire)']],
+        ['Timing', h('span', { class: 'mono' }, scheduleTiming(sc))],
+        ['Overlap', sc.overlap], ['Catch-up', sc.catchup],
+      ];
+      if (sc.start_at) kv.push(['Start at', fmtTime(isoMs(sc.start_at))]);
+      if (sc.end_at) kv.push(['End at', fmtTime(isoMs(sc.end_at))]);
+      if (sc.jitter) kv.push(['Jitter', sc.jitter]);
+      if (sc.description) kv.push(['Description', sc.description]);
+      kv.push(['Created', fmtTime(isoMs(sc.created_at))], ['Updated', fmtTime(isoMs(sc.updated_at))]);
+      replace(spec, h('h2', null, 'Schedule'), h('dl', { class: 'kv' }, kv.map(([k, v]) => [h('dt', null, k), h('dd', null, v)])));
+      const next = isoMs(sc.next_fire_at);
+      const kv2 = [
+        ['State', badge(scheduleState(sc), SCHED_CLASS)],
+        ['Next fire', next ? [fmtTime(next), h('span', { class: 'faint' }, ' (' + ago(next) + ')')] : '—'],
+        ['Next occurrences', (sc.next_fire_times || []).length ? h('div', { class: 'small mono' }, sc.next_fire_times.map((t) => h('div', null, fmtTime(isoMs(t))))) : '—'],
+        ['Last fire', fmtTime(isoMs(sc.last_fire_at))],
+        ['Last execution', sc.last_execution_id ? link(execHref(sc.last_execution_id), sc.last_execution_id) : '—'],
+        ['Fired', String(sc.fired)], ['Skipped', String(sc.skipped)],
+        ['Last error', sc.last_error ? h('span', { class: 'ev-bad', 'data-test': 'schedule-error' }, sc.last_error) : '—'],
+      ];
+      replace(state, h('h2', null, 'State'), h('dl', { class: 'kv' }, kv2.map(([k, v]) => [h('dt', null, k), h('dd', null, v)])));
+      replace(inputPanel, h('h2', null, 'Input'), json(sc.input));
+    };
+
+    const loadRuns = async () => {
+      let list;
+      try {
+        list = (await api(`/v1/executions?workflow=${enc(sc.workflow)}&limit=${LIST_MAX}`)).executions;
+      } catch (e) {
+        if (gen === view.gen) replace(runs, h('h2', null, 'Executions started'), errorNotice(e));
+        return;
+      }
+      if (gen !== view.gen) return;
+      const mine = list.filter((e) => e.execution_id.startsWith(id + ':'));
+      replace(runs, h('h2', null, 'Executions started'),
+        table([{ label: 'Execution' }, { label: 'Status' }, { label: 'Started' }, { label: 'Duration', cls: 'num' }],
+          mine.slice(0, PAGE_SIZE).map((e) => h('tr', { 'data-execution': e.execution_id },
+            h('td', { class: 'id' }, link(execHref(e.execution_id), e.execution_id)), h('td', null, badge(e.status)), timeCell(e.created_at_ms),
+            h('td', { class: 'num nowrap' }, fmtDur(durationOf(e))))), 'No executions of this schedule among the newest ' + LIST_MAX + ' of ' + sc.workflow + '.'),
+        h('p', { class: 'small faint' }, 'Executions of ', sc.workflow, ' whose id starts with ', h('code', null, id + ':'), ' (occurrences and triggers), newest first.'));
+    };
+
+    const reload = async () => {
+      const r = await api('/v1/schedules/' + enc(id));
+      if (gen !== view.gen) return;
+      sc = r;
+      render();
+      await loadRuns();
+    };
+
+    const act = async (btn, fn) => {
+      btn.disabled = true;
+      try { await fn(); } catch (e) { replace(out, errorNotice(e)); } finally { btn.disabled = false; }
+    };
+    pauseBtn.addEventListener('click', () => act(pauseBtn, async () => {
+      sc = await api(`/v1/schedules/${enc(id)}/pause`, { method: 'POST' });
+      replace(out, notice('', 'Paused.', 'The schedule does not fire until it is resumed.'));
+      render();
+    }));
+    resumeBtn.addEventListener('click', () => act(resumeBtn, async () => {
+      sc = await api(`/v1/schedules/${enc(id)}/resume`, { method: 'POST' });
+      replace(out, notice('', 'Resumed.', sc.next_fire_at ? 'Next fire ' + fmtTime(isoMs(sc.next_fire_at)) + '.' : 'There is no next occurrence.'));
+      render();
+    }));
+    triggerBtn.addEventListener('click', () => act(triggerBtn, async () => {
+      const r = await api(`/v1/schedules/${enc(id)}/trigger`, { method: 'POST' });
+      replace(out, r.started
+        ? notice('', 'Started.', ['Execution ', link(execHref(r.execution_id), r.execution_id), '.'])
+        : notice('denied', 'Not started.', `The previous execution of ${id} is still running (overlap: ${sc.overlap}).`));
+      await reload();
+    }));
+    deleteBtn.addEventListener('click', () => { confirmBox.hidden = false; deleteBtn.hidden = true; });
+    no.addEventListener('click', () => { confirmBox.hidden = true; deleteBtn.hidden = false; });
+    yes.addEventListener('click', () => act(yes, async () => {
+      await api(`/v1/schedules/${enc(id)}`, { method: 'DELETE' });
+      stopView();
+      replace(root, header(id, 'Deleted'), notice('', 'Deleted.', ['Schedule ', id, ' was deleted. ', link('#/schedules', 'All schedules')]));
+    }));
+
+    render();
+    await loadRuns();
+    every(3000, () => { if (autoRefresh()) reload().catch(() => {}); });
+  }
+
+  /** Create a schedule. The server validates everything (timing, time zone, input). */
+  async function viewNewSchedule(root, gen) {
+    const names = await api('/v1/workflows').then((r) => [...new Set(r.workflows.map((w) => w.name))].sort()).catch(() => []);
+    if (gen !== view.gen) return;
+    const f = (id, el, label, note) => [h('label', { for: id, class: 'field-label' }, label), h('div', { class: 'field-input' }, el, note ? h('span', { class: 'type' }, note) : null)];
+    const sid = h('input', { type: 'text', id: 'ns-id', autocomplete: 'off', spellcheck: 'false', placeholder: 'nightly-report' });
+    const wf = names.length ? h('select', { id: 'ns-workflow' }, names.map((n) => h('option', { value: n }, n))) : h('input', { type: 'text', id: 'ns-workflow', autocomplete: 'off' });
+    const version = h('input', { type: 'text', id: 'ns-version', autocomplete: 'off', placeholder: 'latest' });
+    const kind = h('select', { id: 'ns-kind' }, h('option', { value: 'cron' }, 'cron'), h('option', { value: 'interval' }, 'interval'));
+    const timing = h('input', { type: 'text', id: 'ns-timing', autocomplete: 'off', spellcheck: 'false', placeholder: '0 2 * * *' });
+    const tz = h('input', { type: 'text', id: 'ns-tz', autocomplete: 'off', placeholder: 'UTC' });
+    const overlap = h('select', { id: 'ns-overlap' }, ['skip', 'allow', 'cancel_previous'].map((o) => h('option', { value: o }, o)));
+    const catchup = h('select', { id: 'ns-catchup' }, ['skip_missed', 'run_once'].map((o) => h('option', { value: o }, o)));
+    const input = h('textarea', { id: 'ns-input', rows: 4, spellcheck: 'false', value: '{}' });
+    const desc = h('input', { type: 'text', id: 'ns-desc', autocomplete: 'off' });
+    const paused = h('input', { type: 'checkbox', id: 'ns-paused' });
+    kind.addEventListener('change', () => {
+      timing.placeholder = kind.value === 'cron' ? '0 2 * * *' : '15m';
+      tz.disabled = kind.value !== 'cron';
+    });
+    const out = h('div', { class: 'result' });
+    const submit = h('button', { type: 'submit', class: 'btn btn-primary' }, 'Create schedule');
+    const form = h('form', { class: 'panel form-panel', 'data-test': 'schedule-form', novalidate: true }, h('h2', null, 'New schedule'),
+      h('div', { class: 'form-grid' },
+        f('ns-id', sid, 'Schedule id', 'letters, digits, - _ . (at most 100)'),
+        f('ns-workflow', wf, 'Workflow'),
+        f('ns-version', version, 'Version', 'empty: the latest version at each fire'),
+        f('ns-kind', kind, 'Timing'),
+        f('ns-timing', timing, 'Cron or interval', 'cron: minute hour day-of-month month day-of-week; interval: 30s, 15m, 1h30m'),
+        f('ns-tz', tz, 'Time zone', 'IANA name for cron, e.g. Europe/Berlin; empty: UTC'),
+        f('ns-overlap', overlap, 'Overlap'),
+        f('ns-catchup', catchup, 'Catch-up'),
+        f('ns-input', input, 'Input', 'JSON, checked against the workflow input'),
+        f('ns-desc', desc, 'Description'),
+        f('ns-paused', paused, 'Create paused')),
+      h('div', { class: 'row' }, submit, link('#/schedules', 'Cancel')), out);
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      let body;
+      try {
+        body = { schedule_id: sid.value.trim(), workflow: wf.value.trim(), input: JSON.parse(input.value.trim() || '{}'), overlap: overlap.value, catchup: catchup.value, paused: paused.checked };
+      } catch (e) {
+        replace(out, notice('error', 'Invalid input.', 'Input: not valid JSON (' + e.message + ')'));
+        return;
+      }
+      body[kind.value] = timing.value.trim();
+      if (version.value.trim()) body.version = version.value.trim();
+      if (kind.value === 'cron' && tz.value.trim()) body.timezone = tz.value.trim();
+      if (desc.value.trim()) body.description = desc.value.trim();
+      submit.disabled = true;
+      try {
+        const r = await api('/v1/schedules', { method: 'POST', body });
+        location.hash = schedHref(r.schedule_id);
+      } catch (e) {
+        replace(out, errorNotice(e));
+      } finally { submit.disabled = false; }
+    });
+    append(root, header('New schedule', 'Validated by the server: the workflow must be registered, and the timing, time zone and input must be valid.'), form);
+    sid.focus();
   }
 
   // ---------------------------------------------------------------- workers
@@ -1202,14 +1699,17 @@
     });
     const root = h('div', { 'data-view': section });
     replace(main(), root);
-    const titles = { overview: 'Overview', executions: 'Executions', workflows: 'Workflows', workers: 'Workers' };
+    const titles = { overview: 'Overview', executions: 'Executions', workflows: 'Workflows', schedules: 'Schedules', workers: 'Workers' };
     document.title = (parts[1] ? parts[1] + ' · ' : '') + (titles[section] || 'ORBIT') + ' · ORBIT';
     try {
       if (section === 'overview') await viewOverview(root, gen);
-      else if (section === 'executions' && parts[1]) await viewExecution(root, gen, parts[1]);
+      else if (section === 'executions' && parts[1]) await viewExecution(root, gen, parts[1], params);
       else if (section === 'executions') await viewExecutions(root, gen, params);
       else if (section === 'workflows' && parts[1]) await viewWorkflow(root, gen, parts[1], parts[2]);
       else if (section === 'workflows') await viewWorkflows(root, gen);
+      else if (section === 'schedules' && parts[1]) await viewSchedule(root, gen, parts[1]);
+      else if (section === 'schedules' && params.has('new')) await viewNewSchedule(root, gen);
+      else if (section === 'schedules') await viewSchedules(root, gen);
       else if (section === 'workers') await viewWorkers(root, gen);
       else append(root, notice('error', 'Not found.', 'There is no page at ' + location.hash));
     } catch (e) {

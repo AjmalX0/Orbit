@@ -206,7 +206,7 @@ COMPLETED inbox-1  Inbox@1.0.0
 | Question | Answer |
 |---|---|
 | What does `GET /v1/executions/{id}` (and `orbit status`, `orbit inspect`) return? | The latest run's state. It has `run` (absent for run 1); `input`, `units`, `signals` and `created_at_ms` are the run's. |
-| How do I read an earlier run? | `GET /v1/executions/{id}/history?run=N`, `orbit logs <id> --run N`, `orbit replay <id> --run N`. Each run's `seq` starts at 1. |
+| How do I read an earlier run? | `GET /v1/executions/{id}/history?run=N`, `orbit logs <id> --run N`, `orbit replay <id> --run N`, or the run selector of the [web UI](../runtime/web-ui.md#runs). Each run's `seq` starts at 1. |
 | What does `wait` wait for? | The final run: it returns when the latest run ends with a status other than `CONTINUED_AS_NEW`. |
 | Where do signals go? | To the current run. Signals the finished run received but no step took are carried into the next run, in arrival order. A signal sent during the switch is recorded either before it (and carried over if nobody took it) or after it. |
 | Queries? | They evaluate against the current run, and can read its `input`. |
@@ -297,5 +297,7 @@ test "three periods are three runs" {
 - [Signals and queries](signals.md)
 - [Running the server: resource limits](../runtime/server.md#resource-limits)
 - [Schedules](../runtime/schedules.md)
+- [Web UI: runs](../runtime/web-ui.md#runs)
+- [Workflow graphs](../tooling/graph.md#continue-as-new), [documentation](../tooling/docs-generation.md#continue-as-new) and [process diffs](../tooling/diff.md) show `continue_as_new`
 - [HTTP API: history](../reference/http-api.md#get-v1executionsidhistory)
 - [Testing workflows](../tooling/testing.md)

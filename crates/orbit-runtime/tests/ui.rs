@@ -142,6 +142,41 @@ fn ui_assets_are_served_without_credentials_with_security_headers() {
 }
 
 #[test]
+fn ui_covers_schedules_and_runs() {
+    let url = start(true);
+    let index = get(&format!("{url}/ui/"), &[]).body;
+    assert!(index.contains(r##"<a href="#/schedules" data-nav="schedules">Schedules</a>"##));
+    let js = get(&format!("{url}/ui/app.js"), &[]).body;
+    // The schedule endpoints the Schedules view calls, and the run views.
+    for needle in [
+        "'/v1/schedules'",
+        "/v1/schedules/${enc(id)}/pause",
+        "/v1/schedules/${enc(id)}/resume",
+        "/v1/schedules/${enc(id)}/trigger",
+        "method: 'DELETE'",
+        "/history?run=${run}",
+        "'CONTINUED_AS_NEW'",
+        "continue_as_new",
+        "schedule_id",
+    ] {
+        assert!(js.contains(needle), "app.js lacks {needle}");
+    }
+    let css = get(&format!("{url}/ui/app.css"), &[]).body;
+    assert!(css.contains(".s-cont"), "a colour for CONTINUED_AS_NEW");
+    // The endpoints the views call answer the admin token as the UI sends it.
+    let r = get(&format!("{url}/v1/schedules"), &[("authorization", BEARER)]);
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, r#"{"schedules":[]}"#);
+    let r = get(
+        &format!("{url}/v1/schedules/nope"),
+        &[("authorization", BEARER)],
+    );
+    assert_eq!(r.status, 404);
+    assert!(r.body.contains("SCHEDULE_NOT_FOUND"), "{}", r.body);
+    assert_eq!(get(&format!("{url}/v1/schedules"), &[]).status, 401);
+}
+
+#[test]
 fn the_api_still_requires_credentials() {
     let url = start(true);
     let r = get(&format!("{url}/v1/executions"), &[]);

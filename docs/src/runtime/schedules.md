@@ -232,6 +232,8 @@ $ orbit schedule trigger nightly-orders
 not started: the previous execution of nightly-orders is still running (overlap: skip)
 ```
 
+The [web UI](web-ui.md#schedules) lists schedules and can create, pause, resume, trigger and delete them.
+
 A change recomputes the next occurrence from now and keeps the counters and
 the last execution. Deleting a schedule does not affect the executions it
 started.
@@ -325,3 +327,4 @@ and start from zero when it starts. See [Observability](observability.md#metric-
 - [Running several servers](cluster.md)
 - [Storage: schedule table](storage.md#schedule-table)
 - [Continue-as-new](../language/continue-as-new.md)
+- [Web UI: schedules](web-ui.md#schedules)

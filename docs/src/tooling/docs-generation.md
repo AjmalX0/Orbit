@@ -40,6 +40,7 @@ A workflow page contains, in order:
 | Signals | For each signal: doc comment, the steps that await it (or the `on event` block that handles it), and its fields. |
 | Queries | Name, result type, expression and doc comment. |
 | Steps | One row per step in execution order: action (task and contract version with a link to the contract, `using` language, child workflow, `sleep`, `await`, or the `compute` expression), fan-out (`for each ... in ...`, `max_parallel`), direct dependencies (explicit and implied), `when` condition, retry policy, timeouts and idempotency key, compensation, doc comment. |
+| Continue-as-new | For a workflow with [`continue_as_new`](../language/continue-as-new.md): when it applies (its condition, or always), and a table of the next run's input, field by field, including the fields left to their defaults. See [below](#continue-as-new). |
 | Outcome handlers | One steps table per `on failure`, `on cancel`, `on timeout` block. |
 | Event handlers | One steps table per `on event <signal>` block. |
 | Diagram | Markdown: the Mermaid flowchart from [`orbit graph`](graph.md) in a `mermaid` code block. HTML: the SVG rendering from `orbit graph --format svg`, inline, with the Mermaid source in a collapsed section. |
@@ -51,6 +52,33 @@ Expressions (conditions, step inputs, queries, `return`) are printed back as ORB
 ### HTML
 
 Each HTML page is a single file with its stylesheet and diagram inline: no scripts, no fonts, no images or stylesheets loaded from elsewhere, so a page can be attached to a ticket or archived as it is. Pages link to each other with relative links (`contracts.html#task-payments-charge`, `index.html`). Typography uses the system font stack; colours follow the light and dark tokens of the ORBIT website and switch with `prefers-color-scheme`.
+
+### Continue-as-new
+
+For [`examples/subscription.orbit`](https://github.com/AjmalX0/Orbit/blob/main/examples/subscription.orbit), the section after the steps reads:
+
+```console
+$ orbit docs examples/subscription.orbit --output reference
+wrote reference/index.md
+wrote reference/Subscription.md
+wrote reference/contracts.md
+```
+
+```markdown
+## Continue-as-new
+
+When every step has finished and `input.period < input.periods` is true, the run ends with status `CONTINUED_AS_NEW` and the execution continues as a new run, under the same id, with the input below and an empty history. Otherwise the run completes with `return`.
+
+| Next run's input | Value |
+|---|---|
+| `customer_id` | `input.customer_id` |
+| `amount` | `input.amount` |
+| `periods` | `input.periods` |
+| `period` | `input.period + 1` |
+| `charged` | `input.charged + input.amount` |
+```
+
+Fields of the workflow input that the `with` object leaves out are listed with `default <value>` (or `null` for an optional field without a default). Without `when`, the text says that the execution always continues and never completes by itself. When the next input is not an object literal (`continue_as_new with input`), it is shown as an `orbit` code block. The diagram shows the `continue_as_new` node and its `next run` edge ([Workflow graphs](graph.md#continue-as-new)).
 
 ## Doc comments
 

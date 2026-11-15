@@ -768,12 +768,27 @@ def browser_available():
         return False
 
 
+COUNTDOWN = """
+workflow Countdown {
+    version "1.0.0"
+    input { n: Int }
+    output { done: Bool }
+    step tick { compute { left: input.n - 1 } }
+    step rest { sleep 200ms after tick }
+    continue_as_new when tick.left > 0 with { n: tick.left }
+    return { done: true }
+}
+"""
+
+
 @unittest.skipUnless(os.environ.get("ORBIT_E2E_REQUIRE_BROWSER") or browser_available(),
                      "needs Node with the playwright library and Chromium")
 class WebUI(unittest.TestCase):
     """The built-in web UI in a real browser (tests/e2e/ui_smoke.js): sign-in,
-    executions, graph, queries, a signal sent through the form, cancel, and a
-    client identity's restricted view."""
+    executions, graph, queries, a signal sent through the form, cancel, an
+    execution that continued as new (runs and the continue_as_new node), the
+    schedules view (pause, resume, trigger, create, delete), and a client
+    identity's restricted view."""
 
     @classmethod
     def setUpClass(cls):
@@ -783,10 +798,13 @@ class WebUI(unittest.TestCase):
         workers = os.path.join(d, "workers.toml")
         with open(workers, "w") as f:
             f.write(f'[[client]]\nid = "billing"\ntoken_sha256 = "{h}"\nworkflows = ["OrderApproval"]\nactions = ["start", "signal", "query", "read"]\n')
+        countdown = os.path.join(d, "countdown.orbit")
+        with open(countdown, "w") as f:
+            f.write(COUNTDOWN)
         cls.c = Cluster(server_args=["--token", "ui-admin-token", "--workers-file", workers], admin_token="ui-admin-token")
         cls.c.start_server()
         cls.c.start_workers()
-        cls.c.cli("deploy", os.path.join(ROOT, "examples", "approval.orbit"), WORKFLOW)
+        cls.c.cli("deploy", os.path.join(ROOT, "examples", "approval.orbit"), WORKFLOW, countdown)
 
     @classmethod
     def tearDownClass(cls):
@@ -796,9 +814,15 @@ class WebUI(unittest.TestCase):
         approval = lambda oid, amount: self.c.post("/v1/executions", {"workflow": "OrderApproval", "input": {"order_id": oid, "customer_id": "c-1", "amount": amount}})["execution_id"]
         ids = {"big": approval("UI-1", 2500.0), "small": approval("UI-2", 40.0), "cancel": approval("UI-3", 3000.0),
                "pending": approval("UI-4", 5000.0),
-               "other": self.c.post("/v1/executions", {"workflow": "OrderProcessing", "input": order("UI-5")})["execution_id"]}
+               "other": self.c.post("/v1/executions", {"workflow": "OrderProcessing", "input": order("UI-5")})["execution_id"],
+               "count": self.c.post("/v1/executions", {"workflow": "Countdown", "input": {"n": 3}, "execution_id": "count-ui"})["execution_id"],
+               # Created through the API, managed through the UI; 03:00 does not come during the test.
+               "schedule": self.c.post("/v1/schedules", {"schedule_id": "ui-orders", "workflow": "OrderProcessing", "cron": "0 3 * * *",
+                                                         "input": order("UI-S")})["schedule_id"]}
         self.assertEqual(self.c.wait(ids["small"])["status"], "COMPLETED")
         self.assertEqual(self.c.wait(ids["other"])["status"], "COMPLETED")
+        counted = self.c.wait(ids["count"])
+        self.assertEqual((counted["status"], counted.get("run")), ("COMPLETED", 3))
         for ex in (ids["big"], ids["cancel"], ids["pending"]):
             deadline = time.time() + 10
             while self.c.get(f"/v1/executions/{ex}")["units"].get("decision", {}).get("status") != "WAITING":
@@ -815,6 +839,16 @@ class WebUI(unittest.TestCase):
         self.assertEqual(s["signals"][0]["payload"], {"approved": True, "reviewer": "dana", "comment": "looks fine"})
         self.assertEqual(self.c.get(f"/v1/executions/{ids['cancel']}")["status"], "CANCELLED")
         self.assertEqual(self.c.get(f"/v1/executions/{ids['pending']}")["status"], "RUNNING")
+        # Paused and resumed, and triggered once, through the UI.
+        sc = self.c.get("/v1/schedules/ui-orders")
+        self.assertEqual((sc["paused"], sc["fired"]), (False, 1), sc)
+        self.assertRegex(sc["last_execution_id"], r"^ui-orders:manual:")
+        triggered = self.c.wait(sc["last_execution_id"])
+        self.assertEqual((triggered["status"], triggered["schedule_id"]), ("COMPLETED", "ui-orders"))
+        # The schedule created through the form was deleted through the UI.
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.c.get("/v1/schedules/ui-form")
+        self.assertEqual(e.exception.code, 404)
 
 
 @unittest.skipUnless(os.environ.get("ORBIT_E2E_POSTGRES_URL"), "set ORBIT_E2E_POSTGRES_URL to run the multi-server tests")

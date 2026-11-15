@@ -20,6 +20,8 @@
   --run-bg: #dbeafe;
   --idle: #57534e;
   --idle-bg: #ece9e4;
+  --cont: #6d28d9;
+  --cont-bg: #ede9fe;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: light;
@@ -46,6 +48,8 @@
     --run-bg: #172554;
     --idle: #a8a29e;
     --idle-bg: #24211e;
+    --cont: #c4b5fd;
+    --cont-bg: #2e1065;
     color-scheme: dark;
   }
 }
@@ -134,6 +138,7 @@ td.id { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; mi
 .s-warn { background: var(--warn-bg); color: var(--warn); }
 .s-run { background: var(--run-bg); color: var(--run); }
 .s-idle { background: var(--idle-bg); color: var(--idle); }
+.s-cont { background: var(--cont-bg); color: var(--cont); }
 .tag { display: inline-block; font: 500 11px/1.6 var(--mono); padding: 0 6px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); margin: 1px 4px 1px 0; white-space: nowrap; }
 
 /* Forms */
@@ -158,6 +163,8 @@ label { color: var(--muted); font-size: 12.5px; }
 .form-grid .type { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
 .form-grid .field-label { color: var(--ink); font-size: 13px; }
 .field-input { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.field-input input[type="checkbox"] { align-self: flex-start; margin: 4px 0; }
+.form-panel { max-width: 820px; }
 
 .login { max-width: 440px; margin: 60px auto; }
 .login input { width: 100%; margin: 6px 0 12px; }
@@ -181,6 +188,7 @@ pre.json { margin: 0; padding: 8px 10px; background: var(--code-bg); border-radi
 .ev-ok { color: var(--ok); }
 .ev-bad { color: var(--bad); }
 .ev-warn { color: var(--warn); }
+.ev-cont { color: var(--cont); }
 
 /* Graph */
 .graph-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
@@ -194,8 +202,11 @@ pre.json { margin: 0; padding: 8px 10px; background: var(--code-bg); border-radi
 .graph .node.st-warn rect { fill: var(--warn-bg); stroke: var(--warn); }
 .graph .node.st-run rect { fill: var(--run-bg); stroke: var(--run); stroke-width: 2; }
 .graph .node.st-idle rect { fill: var(--idle-bg); stroke: var(--faint); }
+.graph .node.cont rect.inner { fill: none; }
+.graph .node.st-cont rect { fill: var(--cont-bg); stroke: var(--cont); }
+.graph .node.st-cont rect.inner { fill: none; }
 .graph .edge { fill: none; stroke: var(--faint); stroke-width: 1.2; }
-.graph .edge.comp { stroke-dasharray: 4 3; }
+.graph .edge.comp, .graph .edge.back { stroke-dasharray: 4 3; }
 .graph .arrow { fill: var(--faint); }
 .graph .lane-label { fill: var(--muted); font: 600 11px var(--sans); letter-spacing: 0.05em; text-transform: uppercase; }
 .graph .lane { fill: none; stroke: var(--line); }
@@ -205,6 +216,7 @@ pre.json { margin: 0; padding: 8px 10px; background: var(--code-bg); border-radi
 .swatch.s-bad { border-color: var(--bad); }
 .swatch.s-warn { border-color: var(--warn); }
 .swatch.s-run { border-color: var(--run); }
+.swatch.s-cont { border-color: var(--cont); }
 
 .result { margin-top: 8px; }
 .result .type { font-family: var(--mono); font-size: 11.5px; color: var(--faint); margin-bottom: 4px; }

@@ -8,9 +8,12 @@
 //! layer. Each outcome handler and event block is laid out the same way in
 //! its own labelled panel below the main graph. Edges are drawn as curves
 //! from the bottom of a step to the top of its dependent; edges that skip
-//! layers may cross other nodes. The result is deterministic.
+//! layers may cross other nodes. A `continue_as_new` node sits on a layer
+//! below the final steps, and its dashed `next run` edges go up the right
+//! side of the main graph and into the top of the first steps. The result is
+//! deterministic.
 
-use super::graph::{scope_graph, Node, NodeKind};
+use super::graph::{scope_graph, Node, NodeKind, CONTINUE_ID};
 use super::{scopes, Scope};
 use orbit_ir::WorkflowIr;
 use std::collections::HashMap;
@@ -27,6 +30,12 @@ const GAP_Y: f64 = 46.0;
 const MARGIN: f64 = 16.0;
 const PANEL_GAP: f64 = 28.0;
 const TITLE_H: f64 = 26.0;
+/// Room right of the main graph for the `next run` edges and their label.
+const LOOP_W: f64 = 92.0;
+/// How far right of the main graph the `next run` edges run.
+const LOOP_X: f64 = 18.0;
+/// How far above the first layer the `next run` edges come in.
+const LOOP_TOP: f64 = 12.0;
 
 struct Placed {
     node: Node,
@@ -138,6 +147,8 @@ const STYLE: &str = r#"<style>
 .orbit-graph .node { fill: var(--bg); stroke: var(--ink); stroke-width: 1.2; }
 .orbit-graph .conditional { stroke: var(--accent); }
 .orbit-graph .compensation { stroke-dasharray: 5 3; stroke: var(--muted); }
+.orbit-graph .continue { stroke: var(--accent); }
+.orbit-graph .continue.inner { fill: none; }
 .orbit-graph .edge { fill: none; stroke: var(--line); stroke-width: 1.3; }
 .orbit-graph .edge.dashed { stroke-dasharray: 5 3; }
 .orbit-graph .panel { fill: var(--band); stroke: var(--line); stroke-dasharray: 4 3; }
@@ -151,11 +162,14 @@ pub fn svg(wf: &WorkflowIr) -> String {
     for scope in scopes(wf) {
         panels.push((scope, layout(wf, scope)));
     }
+    let looped = wf.continue_as_new.is_some();
+    // The main graph's width, with the room its `next run` edges take.
+    let main_w = |w: f64| if looped { w + LOOP_W } else { w };
     let width = panels
         .iter()
         .map(|(s, (_, _, w, _))| {
             if *s == Scope::Main {
-                *w
+                main_w(*w)
             } else {
                 w + 2.0 * MARGIN
             }
@@ -163,10 +177,10 @@ pub fn svg(wf: &WorkflowIr) -> String {
         .fold(0.0, f64::max)
         + 2.0 * MARGIN;
     let mut body = String::new();
-    let mut y = MARGIN;
+    let mut y = MARGIN + if looped { LOOP_TOP } else { 0.0 };
     for (scope, (placed, edges, w, h)) in &panels {
         let (ox, oy) = if *scope == Scope::Main {
-            ((width - w) / 2.0, y)
+            ((width - main_w(*w)) / 2.0, y)
         } else {
             let px = (width - w - 2.0 * MARGIN) / 2.0;
             let _ = writeln!(
@@ -190,6 +204,29 @@ pub fn svg(wf: &WorkflowIr) -> String {
                 continue;
             };
             let class = if *dashed { "edge dashed" } else { "edge" };
+            if from == CONTINUE_ID {
+                // `next run`: out of the right side of the node, up past the
+                // graph, and down into the top of a first step.
+                let (x1, y1) = (ox + a.x + a.w, oy + a.y + a.h / 2.0);
+                let xr = ox + w + LOOP_X;
+                let yt = oy - LOOP_TOP;
+                let x2 = ox + b.x + b.w / 2.0;
+                let _ = writeln!(
+                    body,
+                    "<path class=\"{class}\" d=\"M{x1:.1},{y1:.1} L{xr:.1},{y1:.1} L{xr:.1},{yt:.1} L{x2:.1},{yt:.1} L{x2:.1},{:.1}\" marker-end=\"url(#arrow)\"/>",
+                    oy + b.y - 2.0
+                );
+                if let Some(l) = label {
+                    let _ = writeln!(
+                        body,
+                        "<text x=\"{:.1}\" y=\"{:.1}\">{}</text>",
+                        xr + 5.0,
+                        (y1 + yt) / 2.0,
+                        esc(l)
+                    );
+                }
+                continue;
+            }
             if b.node.kind == NodeKind::Compensation {
                 // Same layer: a horizontal link from the step to its compensation.
                 let (x1, y1) = (ox + a.x + a.w, oy + a.y + a.h / 2.0);
@@ -224,6 +261,7 @@ pub fn svg(wf: &WorkflowIr) -> String {
                 NodeKind::Step | NodeKind::Signal => "node",
                 NodeKind::Conditional => "node conditional",
                 NodeKind::Compensation => "node compensation",
+                NodeKind::ContinueAsNew => "node continue",
             };
             let _ = writeln!(
                 body,
@@ -234,6 +272,17 @@ pub fn svg(wf: &WorkflowIr) -> String {
                 p.h,
                 if p.node.kind == NodeKind::Compensation { 14 } else { 5 }
             );
+            if p.node.kind == NodeKind::ContinueAsNew {
+                // A double border, like Mermaid's subroutine shape.
+                let _ = writeln!(
+                    body,
+                    "<rect class=\"node continue inner\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"3\"/>",
+                    ox + p.x + 3.0,
+                    oy + p.y + 3.0,
+                    p.w - 6.0,
+                    p.h - 6.0
+                );
+            }
             for (i, line) in p.node.lines.iter().enumerate() {
                 let cls = if i == 0 { " class=\"name\"" } else { "" };
                 let _ = writeln!(
@@ -282,5 +331,49 @@ mod tests {
         // Every opened element is closed (a cheap well-formedness check).
         assert_eq!(s.matches("<text").count(), s.matches("</text>").count());
         assert!(!s.contains("NaN"));
+    }
+
+    #[test]
+    fn continue_as_new_has_a_node_and_a_back_edge() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/subscription.orbit");
+        let c = compile_files(&[p]);
+        let s = svg(&c.workflows[0]);
+        assert_eq!(s, svg(&c.workflows[0]));
+        assert!(s.contains(">continue as new</text>"), "{s}");
+        assert!(
+            s.contains(">when input.period &lt; input.periods</text>"),
+            "{s}"
+        );
+        assert!(s.contains(">next run</text>"), "{s}");
+        assert_eq!(
+            s.matches("class=\"node continue").count(),
+            2,
+            "double border"
+        );
+        // The `next run` edge is dashed and goes around the graph.
+        let back = s
+            .lines()
+            .find(|l| l.contains("edge dashed"))
+            .expect("a dashed edge");
+        assert_eq!(back.matches(" L").count(), 4, "{back}");
+        assert!(!s.contains("NaN"));
+        assert_eq!(s.matches("<text").count(), s.matches("</text>").count());
+        // Every path point is inside the canvas.
+        let num = |k: &str| -> f64 {
+            let i = s.find(k).unwrap() + k.len();
+            s[i..].split('"').next().unwrap().parse().unwrap()
+        };
+        let (w, h) = (num("width=\""), num("height=\""));
+        for d in s.split(" d=\"M").skip(2) {
+            for pt in d.split('"').next().unwrap().split([' ', 'L', 'C']) {
+                if let Some((x, y)) = pt.split_once(',') {
+                    let (x, y): (f64, f64) = (x.parse().unwrap(), y.parse().unwrap());
+                    assert!(
+                        x >= 0.0 && x <= w && y >= 0.0 && y <= h,
+                        "{pt} outside {w}x{h}"
+                    );
+                }
+            }
+        }
     }
 }

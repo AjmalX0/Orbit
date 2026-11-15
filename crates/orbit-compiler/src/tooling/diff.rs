@@ -53,7 +53,7 @@ impl Kind {
 /// One change. `area` is one of: `workflow`, `input`, `output`, `signal`,
 /// `query`, `step`, `action`, `step input`, `dependency`, `condition`,
 /// `fan-out`, `retry`, `timeout`, `idempotency`, `compensation`, `handler`,
-/// `event`, `limits`, `result`, `contract`.
+/// `event`, `limits`, `result`, `continue_as_new`, `contract`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Change {
     pub kind: Kind,
@@ -379,6 +379,7 @@ fn workflow_changes(o: &WorkflowIr, n: &WorkflowIr) -> Vec<Change> {
     if rs(o) != rs(n) {
         out.push(Change::new(kind, "result", "return").values(rs(o), rs(n)));
     }
+    continue_changes(o, n, &mut out);
 
     // Signals and queries.
     for (sig, t) in &o.signals {
@@ -503,6 +504,38 @@ fn workflow_changes(o: &WorkflowIr, n: &WorkflowIr) -> Vec<Change> {
         }
     }
     out
+}
+
+/// `continue_as_new`: added or removed as a whole, otherwise its condition
+/// and its next input compared separately.
+fn continue_changes(o: &WorkflowIr, n: &WorkflowIr, out: &mut Vec<Change>) {
+    const AREA: &str = "continue_as_new";
+    let cond = |c: &orbit_ir::ContinueAsNewIr| match &c.condition {
+        Some(e) => format!("when {}", pretty::expr(e)),
+        None => "always".to_string(),
+    };
+    let whole =
+        |c: &orbit_ir::ContinueAsNewIr| format!("{} with {}", cond(c), pretty::expr(&c.input));
+    match (&o.continue_as_new, &n.continue_as_new) {
+        (None, None) => {}
+        (None, Some(b)) => {
+            out.push(Change::new(Kind::Added, AREA, "continue_as_new").values(None, Some(whole(b))))
+        }
+        (Some(a), None) => out
+            .push(Change::new(Kind::Removed, AREA, "continue_as_new").values(Some(whole(a)), None)),
+        (Some(a), Some(b)) => {
+            if cond(a) != cond(b) {
+                out.push(
+                    Change::new(Kind::Changed, AREA, "condition")
+                        .values(Some(cond(a)), Some(cond(b))),
+                );
+            }
+            let (ia, ib) = (pretty::expr(&a.input), pretty::expr(&b.input));
+            if ia != ib {
+                out.push(Change::new(Kind::Changed, AREA, "input").values(Some(ia), Some(ib)));
+            }
+        }
+    }
 }
 
 fn step_changes(scope: Scope, os: &[StepIr], ns: &[StepIr], out: &mut Vec<Change>) {
@@ -1062,6 +1095,61 @@ workflow Pay {
         );
         let c = changes(new, &newer);
         assert_eq!(c, ["+ timeout: on failure: tell: timeout 5s"]);
+    }
+
+    #[test]
+    fn continue_as_new_added_removed_and_changed() {
+        const LOOP: &str = r#"
+workflow Pay {
+    version "1.0.0"
+    input { amount: Float, to: String }
+    step charge { worker "pay.charge" with { amount: input.amount } }
+    step mail { worker "mail.send" after charge with { to: input.to } }
+    continue_as_new when input.amount > 1.0 with { amount: input.amount / 2.0, to: input.to }
+}
+"#;
+        let c = changes(BASE, LOOP);
+        assert_eq!(
+            c,
+            ["+ continue_as_new: continue_as_new: when input.amount > 1.0 with { amount: input.amount / 2.0, to: input.to }"]
+        );
+        let c = changes(LOOP, BASE);
+        assert_eq!(
+            c,
+            ["- continue_as_new: continue_as_new: when input.amount > 1.0 with { amount: input.amount / 2.0, to: input.to }"]
+        );
+        let cond = LOOP.replace("when input.amount > 1.0 ", "when input.amount > 5.0 ");
+        assert_eq!(
+            changes(LOOP, &cond),
+            ["~ continue_as_new: condition: when input.amount > 1.0 → when input.amount > 5.0"]
+        );
+        let always = LOOP.replace("when input.amount > 1.0 ", "");
+        assert_eq!(
+            changes(LOOP, &always),
+            ["~ continue_as_new: condition: when input.amount > 1.0 → always"]
+        );
+        let input = LOOP.replace("input.amount / 2.0", "input.amount - 1.0");
+        assert_eq!(
+            changes(LOOP, &input),
+            ["~ continue_as_new: input: { amount: input.amount / 2.0, to: input.to } → { amount: input.amount - 1.0, to: input.to }"]
+        );
+        // In the Markdown and JSON reports too.
+        let d = diff(&snap(LOOP), &snap(&input), None);
+        assert!(
+            d.markdown()
+                .contains("| changed | continue_as_new | `input` |"),
+            "{}",
+            d.markdown()
+        );
+        let j = d.to_json();
+        assert_eq!(j["workflows"][0]["changes"][0]["area"], "continue_as_new");
+        assert_eq!(j["workflows"][0]["changes"][0]["subject"], "input");
+        // Formatting is not a change.
+        let reformatted = LOOP.replace(
+            "with { amount: input.amount / 2.0, to: input.to }",
+            "with {\n        amount: input.amount / 2.0\n        to: input.to\n    }",
+        );
+        assert!(changes(LOOP, &reformatted).is_empty());
     }
 
     #[test]
