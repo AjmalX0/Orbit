@@ -1,0 +1,26 @@
+name: maintenance-retag
+
+# One-off: points the v0.1.0 release tags at the rewritten commit (same files,
+# commit message without a session link) and deletes a stale branch. Removed
+# after use.
+on: workflow_dispatch
+
+permissions:
+  contents: write
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Move tags
+        run: |
+          new=69011327eb778e7a7b728f26fc61a6f43ee6a844
+          test "$(git cat-file -t $new)" = commit
+          test "$(git rev-parse $new^{tree})" = "$(git rev-parse refs/tags/v0.1.0^{tree})"
+          git tag -f v0.1.0 $new
+          git tag -f sdks/go/v0.1.0 $new
+          git push --force origin refs/tags/v0.1.0 refs/tags/sdks/go/v0.1.0
+      - name: Delete stale Dependabot branch
+        run: git push origin --delete dependabot/github_actions/actions-4d911ab12e || true
