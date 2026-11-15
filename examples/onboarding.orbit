@@ -1,0 +1,148 @@
+// Customer onboarding (KYC) as a typed business process contract.
+//
+// Every external call is a typed task contract, every side effect that must
+// be undone has a compensation, a compliance officer's decision is a typed
+// signal with a deadline, and the outcome handlers record what happened.
+// `orbit check --strict` passes, and examples/onboarding.test.orbit covers
+// each path.
+
+task "identity.verify" {
+    version "1.0.0"
+    input { customer_id: String, document_id: String, country: String }
+    output { verified: Bool, confidence: Float, reasons: List<String> }
+}
+
+task "sanctions.screen" {
+    version "1.0.0"
+    input { full_name: String, country: String }
+    output { hits: Int, lists: List<String> }
+}
+
+task "accounts.open" {
+    version "1.0.0"
+    input { customer_id: String, product: String, risk: String }
+    output { account_id: String }
+    compensated_by "accounts.close"
+}
+
+task "accounts.close" {
+    version "1.0.0"
+    input { account_id: String, reason: String }
+    output { closed: Bool }
+}
+
+task "audit.record" {
+    version "1.0.0"
+    input { customer_id: String, event: String, detail: String }
+    output { recorded: Bool }
+}
+
+task "customers.notify" {
+    version "1.0.0"
+    input { customer_id: String, message: String }
+    output { delivered: Bool }
+}
+
+workflow Onboarding {
+    version "1.0.0"
+    description "Verify a customer's identity, screen them, review high-risk cases and open the account"
+    input {
+        customer_id: String
+        full_name: String
+        document_id: String
+        country: String
+        product: String = "current_account"
+    }
+    output { status: String, account_id: String?, risk: String }
+    timeout 14d
+
+    limits { max_history_events: 2000 }
+
+    // The compliance officer's decision for cases that need a human.
+    signal review { approved: Bool, officer: String, note: String? }
+
+    step identity {
+        worker "identity.verify"
+        with { customer_id: input.customer_id, document_id: input.document_id, country: input.country }
+        retry { attempts: 5, backoff: exponential, initial_delay: 2s, max_delay: 1m }
+        timeout 30s
+    }
+
+    step screening {
+        worker "sanctions.screen"
+        with { full_name: input.full_name, country: input.country }
+        retry { attempts: 5, backoff: exponential, initial_delay: 2s }
+        timeout 30s
+    }
+
+    // Deterministic risk rules, evaluated by the runtime and kept in the
+    // process definition where reviewers and auditors can read them.
+    step risk {
+        compute {
+            level: if !identity.verified || screening.hits > 0 then "high"
+                else if identity.confidence < 0.9 then "medium"
+                else "low"
+            needs_review: !identity.verified || screening.hits > 0 || identity.confidence < 0.9
+        }
+    }
+
+    step decision {
+        await review
+        when risk.needs_review
+        timeout 5d
+    }
+
+    step open_account {
+        worker "accounts.open"
+        when !risk.needs_review || coalesce(decision.approved, false)
+        with { customer_id: input.customer_id, product: input.product, risk: risk.level }
+        idempotency_key: "open-" + input.customer_id
+        compensate {
+            worker "accounts.close"
+            with { account_id: open_account.account_id, reason: "onboarding did not complete" }
+        }
+    }
+
+    step audit {
+        worker "audit.record"
+        after open_account
+        with {
+            customer_id: input.customer_id
+            event: if is_null(open_account) then "rejected" else "opened"
+            detail: "risk=" + risk.level + " officer=" + coalesce(decision.officer, "automatic")
+        }
+    }
+
+    step welcome {
+        worker "customers.notify"
+        after audit
+        when !is_null(open_account)
+        with { customer_id: input.customer_id, message: "Your account is ready" }
+    }
+
+    on failure {
+        step record_failure {
+            worker "audit.record"
+            with { customer_id: input.customer_id, event: "failed", detail: failure.code + ": " + failure.message }
+        }
+    }
+
+    on timeout {
+        step record_timeout {
+            worker "audit.record"
+            with { customer_id: input.customer_id, event: "timed_out", detail: failure.message }
+        }
+    }
+
+    query state = {
+        risk: risk.level
+        waiting_for_review: coalesce(risk.needs_review, false) && is_null(decision)
+        account_id: open_account.account_id
+    }
+
+    return {
+        status: if is_null(open_account) then "rejected" else "opened"
+        account_id: open_account.account_id
+        risk: risk.level
+    }
+}

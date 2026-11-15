@@ -1,0 +1,76 @@
+// Expense claims with two levels of approval, comments and escalation.
+//
+// Claims of 100 or more need the employee's manager; claims of 5000 or more
+// also need finance, after the manager. Anyone can comment at any time (each
+// comment is forwarded to the employee by the `on event comment` block). A
+// review that nobody answers fails the claim and escalates to the manager.
+
+task "payments.pay" {
+    version "1.0.0"
+    input { claim_id: String, amount: Float }
+    output { payment_id: String }
+}
+
+task "people.notify" {
+    version "1.0.0"
+    input { to: String, message: String }
+    output { delivered: Bool }
+}
+
+workflow ExpenseClaim {
+    version "1.0.0"
+    input { claim_id: String, employee: String, manager: String, amount: Float }
+
+    signal manager_review { approved: Bool, by: String }
+    signal finance_review { approved: Bool, by: String }
+    signal comment { by: String, text: String }
+
+    step rules {
+        compute {
+            needs_manager: input.amount >= 100.0
+            needs_finance: input.amount >= 5000.0
+        }
+    }
+
+    step manager {
+        await manager_review
+        when rules.needs_manager
+        timeout 3d
+    }
+
+    step finance {
+        await finance_review
+        when rules.needs_finance && coalesce(manager.approved, false)
+        timeout 5d
+    }
+
+    step pay {
+        worker "payments.pay"
+        when (!rules.needs_manager || coalesce(manager.approved, false))
+            && (!rules.needs_finance || coalesce(finance.approved, false))
+        with { claim_id: input.claim_id, amount: input.amount }
+    }
+
+    on event comment {
+        step forward {
+            worker "people.notify"
+            with { to: input.employee, message: event.by + " commented: " + event.text }
+        }
+    }
+
+    on failure {
+        step escalate {
+            worker "people.notify"
+            with { to: input.manager, message: "Claim " + input.claim_id + " was not decided in time: " + failure.message }
+        }
+    }
+
+    query status = {
+        waiting_for: if coalesce(rules.needs_manager, false) && is_null(manager) then "manager"
+            else if coalesce(rules.needs_finance, false) && coalesce(manager.approved, false) && is_null(finance) then "finance"
+            else "nobody"
+        paid: !is_null(pay)
+    }
+
+    return { paid: !is_null(pay), payment_id: pay.payment_id }
+}

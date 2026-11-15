@@ -549,6 +549,9 @@ fn lower_workflow(
     // reported before lowering, so it must stop IR generation explicitly.
     let mut missing_child = false;
     let mut step_types: BTreeMap<String, Type> = BTreeMap::new();
+    // Output types of conditional steps before `when` made them optional,
+    // for condition-based narrowing (see `narrowed_steps`).
+    let mut base_types: BTreeMap<String, Type> = BTreeMap::new();
     let mut step_contracts: HashMap<&str, Option<&TaskContract>> = HashMap::new();
     for (name, s) in &by_name {
         let out = match &s.action {
@@ -604,6 +607,7 @@ fn lower_workflow(
         } else {
             out
         };
+        base_types.insert(name.to_string(), out.clone());
         let out = if s.body.condition.is_some() {
             out.optional()
         } else {
@@ -737,12 +741,14 @@ fn lower_workflow(
         let s = by_name[name];
         let mut computed_type: Option<Type> = None;
         source_map.insert(name.to_string(), loc(s.name.span));
+        // Steps that cannot be null while this step runs, given its `when`.
+        let step_view = narrowed_steps(s, &by_name, &step_types, &base_types);
         // `for item in <list>`: type the list and bind the loop variable.
         let mut locals: Vec<(String, Type)> = vec![];
         let for_each = s.body.for_each.as_ref().map(|f| {
             let env = Env {
                 input: Some(&input_ty),
-                steps: &step_types,
+                steps: &step_view,
                 allowed: None,
                 context: "a step",
                 locals: &[],
@@ -822,7 +828,7 @@ fn lower_workflow(
         }
         let env = Env {
             input: Some(&input_ty),
-            steps: &step_types,
+            steps: &step_view,
             allowed: None,
             context: "a step",
             locals: &locals,
@@ -963,7 +969,7 @@ fn lower_workflow(
             }
             let mut allowed = ancestors(name);
             allowed.insert(name.to_string());
-            let mut comp_types = step_types.clone();
+            let mut comp_types = step_view.clone();
             if let Some(Some(contract)) = step_contracts.get(name) {
                 comp_types.insert(name.to_string(), contract.output.clone());
             }
@@ -1022,6 +1028,7 @@ fn lower_workflow(
             } else {
                 t
             };
+            base_types.insert(name.to_string(), t.clone());
             let t = if s.body.condition.is_some() {
                 t.optional()
             } else {
@@ -1951,4 +1958,109 @@ fn find_cycle<'a>(deps: &BTreeMap<&'a str, BTreeMap<&'a str, Span>>) -> Option<V
         }
     }
     None
+}
+
+/// The step types a step sees while it runs: a conditional dependency reads as
+/// non-null when this step's `when` guarantees it ran, that is when the
+/// condition has a conjunct `!is_null(dep)`, or contains every conjunct of the
+/// dependency's own `when`. The second rule is sound because a condition only
+/// reads values that were final before the dependency was decided (its own
+/// dependencies, `input`, `execution`), so the same expression evaluates the
+/// same way for both steps.
+fn narrowed_steps(
+    step: &ast::Step,
+    by_name: &BTreeMap<&str, &ast::Step>,
+    step_types: &BTreeMap<String, Type>,
+    base_types: &BTreeMap<String, Type>,
+) -> BTreeMap<String, Type> {
+    let mut view = step_types.clone();
+    let Some(cond) = &step.body.condition else {
+        return view;
+    };
+    let mut mine = vec![];
+    conjuncts(cond, &mut mine);
+    let keys: HashSet<String> = mine.iter().map(|e| expr_key(e)).collect();
+    let mut not_null: HashSet<&str> = HashSet::new();
+    for c in &mine {
+        if let ast::Expr::Unary(ast::UnOp::Not, inner, _) = c {
+            if let ast::Expr::Call(f, args, _) = &**inner {
+                if f.name == "is_null" && args.len() == 1 {
+                    if let ast::Expr::Path(segs, _) = &args[0] {
+                        if segs.len() == 1 {
+                            not_null.insert(segs[0].name.as_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (name, other) in by_name {
+        if std::ptr::eq(*other, step) {
+            continue;
+        }
+        let Some(base) = base_types.get(*name) else {
+            continue;
+        };
+        let guaranteed = not_null.contains(name)
+            || other.body.condition.as_ref().is_some_and(|dc| {
+                let mut theirs = vec![];
+                conjuncts(dc, &mut theirs);
+                theirs.iter().all(|e| keys.contains(&expr_key(e)))
+            });
+        if guaranteed && other.body.condition.is_some() {
+            view.insert(name.to_string(), base.clone());
+        }
+    }
+    view
+}
+
+/// The operands of a chain of `&&`.
+fn conjuncts<'a>(e: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
+    match e {
+        ast::Expr::Binary(ast::BinOp::And, l, r, _) => {
+            conjuncts(l, out);
+            conjuncts(r, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// A canonical rendering of an expression that ignores spans and layout.
+fn expr_key(e: &ast::Expr) -> String {
+    use ast::Expr as E;
+    let list = |items: &[E]| items.iter().map(expr_key).collect::<Vec<_>>().join(",");
+    match e {
+        E::Null(_) => "null".into(),
+        E::Bool(b, _) => b.to_string(),
+        E::Int(i, _) => format!("i{i}"),
+        E::Float(f, _) => format!("f{:?}", f),
+        E::Str(s, _) => format!("{s:?}"),
+        E::Duration(d, _) => format!("d{d}"),
+        E::Path(segs, _) => segs
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join("."),
+        E::Index(a, b, _) => format!("({})[{}]", expr_key(a), expr_key(b)),
+        E::Call(f, args, _) => format!("{}({})", f.name, list(args)),
+        E::Object(fields, _) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(k, v)| format!("{}:{}", k.name, expr_key(v)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        E::List(items, _) => format!("[{}]", list(items)),
+        E::Binary(op, l, r, _) => format!("({}{}{})", expr_key(l), op.symbol(), expr_key(r)),
+        E::Unary(op, x, _) => format!("({:?}{})", op, expr_key(x)),
+        E::If(c, a, b, _) => format!(
+            "(if {} then {} else {})",
+            expr_key(c),
+            expr_key(a),
+            expr_key(b)
+        ),
+        E::Lambda(v, body, _) => format!("({}=>{})", v.name, expr_key(body)),
+        E::Error(_) => "<error>".into(),
+    }
 }

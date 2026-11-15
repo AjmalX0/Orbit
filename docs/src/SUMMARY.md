@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](introduction.md)
+[Why ORBIT](why-orbit.md)
 
 # Getting started
 
@@ -74,6 +75,9 @@
 - [Polyglot workflows](guides/polyglot.md)
 - [Fan-out and child workflows](guides/fulfilment.md)
 - [Calling HTTP services](guides/http.md)
+- [Typed business process contracts](guides/business-processes.md)
+- [Human approvals](guides/approvals.md)
+- [AI agents with guardrails](guides/ai-agents.md)
 
 # Reference
 
@@ -88,3 +92,4 @@
 - [FAQ and troubleshooting](faq.md)
 - [Contributing](contributing.md)
 - [Changelog](changelog.md)
+- [About the project](about.md)

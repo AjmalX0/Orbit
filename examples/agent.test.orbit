@@ -1,0 +1,84 @@
+// Tests for the ResearchAgent workflow (agent.orbit).
+//
+// Run them with `orbit test examples/agent.test.orbit`.
+
+import "agent.orbit"
+
+test "a confident, unflagged draft is published without an editor" {
+    workflow ResearchAgent
+    input { question: "What is durable execution?", slug: "durable-execution" }
+    mock "llm.plan" returns { queries: ["durable execution", "event sourcing"], estimated_cost_usd: 0.4 }
+    mock "tools.search" returns { query: input.query, snippets: ["about " + input.query], sources: ["https://example.org"] }
+    mock "llm.draft" returns { text: "Durable execution records every step.", citations: ["https://example.org"], cost_usd: 0.3 }
+    mock "guardrails.check" returns { confidence: 0.93, flags: [] }
+    mock "content.publish" returns { url: "https://example.org/" + input.slug }
+    mock "content.notify" returns { delivered: true }
+    expect status COMPLETED
+    expect output { status: "published", url: "https://example.org/durable-execution", confidence: 0.93 }
+    expect step review SKIPPED
+    expect step search output [{ query: "durable execution" }, { query: "event sourcing" }]
+}
+
+test "a low-confidence draft waits for an editor, who approves an edited text" {
+    workflow ResearchAgent
+    input { question: "Is the moon made of cheese?", slug: "moon" }
+    mock "llm.plan" returns { queries: ["moon composition"], estimated_cost_usd: 0.2 }
+    mock "tools.search" returns { query: input.query, snippets: ["basalt and anorthosite"], sources: ["https://example.org"] }
+    mock "llm.draft" returns { text: "Possibly cheese.", citations: [], cost_usd: 0.2 }
+    mock "guardrails.check" returns { confidence: 0.41, flags: ["uncited claim"] }
+    mock "content.publish" returns { url: "https://example.org/" + input.slug }
+    mock "content.notify" returns { delivered: true }
+    signal editor_review { approved: true, editor: "lee", edited_text: "No: the moon is rock." }
+    expect status COMPLETED
+    expect output { status: "published", confidence: 0.41 }
+    expect step review output { editor: "lee" }
+}
+
+test "an editor rejection publishes nothing" {
+    workflow ResearchAgent
+    input { question: "Q", slug: "q" }
+    mock "llm.plan" returns { queries: ["q"], estimated_cost_usd: 0.1 }
+    mock "tools.search" returns { query: input.query, snippets: [], sources: [] }
+    mock "llm.draft" returns { text: "?", citations: [], cost_usd: 0.1 }
+    mock "guardrails.check" returns { confidence: 0.2, flags: ["no sources"] }
+    signal editor_review { approved: false, editor: "sam" }
+    expect status COMPLETED
+    expect output { status: "rejected", url: null }
+    expect step publish SKIPPED
+}
+
+test "a plan over budget stops before any tool is called" {
+    workflow ResearchAgent
+    input { question: "Everything about everything", slug: "all", budget_usd: 1.0 }
+    mock "llm.plan" returns { queries: ["a", "b", "c"], estimated_cost_usd: 7.5 }
+    expect status COMPLETED
+    expect output { status: "over_budget", url: null, confidence: 0.0 }
+    expect step search SKIPPED
+    expect step draft SKIPPED
+    expect step publish SKIPPED
+}
+
+test "a model error fails the run and alerts the team" {
+    workflow ResearchAgent
+    input { question: "Q", slug: "q" }
+    mock "llm.plan" fails "MODEL_REFUSED" "the model declined to plan"
+    mock "content.notify" returns { delivered: true }
+    expect status FAILED
+    expect step plan FAILED
+    expect step on_failure: alert SUCCEEDED
+}
+
+test "a failure after publishing withdraws the article" {
+    workflow ResearchAgent
+    input { question: "Q", slug: "q" }
+    mock "llm.plan" returns { queries: ["q"], estimated_cost_usd: 0.1 }
+    mock "tools.search" returns { query: input.query, snippets: ["s"], sources: ["https://example.org"] }
+    mock "llm.draft" returns { text: "Answer.", citations: ["https://example.org"], cost_usd: 0.1 }
+    mock "guardrails.check" returns { confidence: 0.95, flags: [] }
+    mock "content.publish" returns { url: "https://example.org/q" }
+    mock "content.notify" fails "CHANNEL_GONE" "the channel was archived"
+    mock "content.unpublish" returns { removed: true }
+    expect status FAILED
+    expect error "CHANNEL_GONE"
+    expect compensated publish
+}

@@ -1,0 +1,157 @@
+// A research agent with guardrails.
+//
+// The model and every tool are typed tasks, so a model that returns the wrong
+// shape fails the step instead of flowing on. The plan is capped (the fan-out
+// limit and an explicit budget check), the draft is scored by a guardrail
+// task, low-confidence or flagged drafts wait for a human editor, and
+// publishing is undone if anything after it fails. Workers can call any model
+// provider; the workflow does not depend on one.
+//
+// Steps guarded by `when budget.within` read each other without `coalesce`:
+// the compiler knows a step that shares a condition has run.
+
+task "llm.plan" {
+    version "1.0.0"
+    input { question: String, max_queries: Int }
+    output { queries: List<String>, estimated_cost_usd: Float }
+}
+
+task "tools.search" {
+    version "1.0.0"
+    input { query: String }
+    output { query: String, snippets: List<String>, sources: List<String> }
+}
+
+task "llm.draft" {
+    version "1.0.0"
+    input { question: String, evidence: List<String> }
+    output { text: String, citations: List<String>, cost_usd: Float }
+}
+
+task "guardrails.check" {
+    version "1.0.0"
+    input { text: String, citations: List<String> }
+    output { confidence: Float, flags: List<String> }
+}
+
+task "content.publish" {
+    version "1.0.0"
+    input { slug: String, text: String }
+    output { url: String }
+    compensated_by "content.unpublish"
+}
+
+task "content.unpublish" {
+    version "1.0.0"
+    input { slug: String }
+    output { removed: Bool }
+}
+
+task "content.notify" {
+    version "1.0.0"
+    input { channel: String, message: String }
+    output { delivered: Bool }
+}
+
+workflow ResearchAgent {
+    version "1.0.0"
+    description "Answer a question from searched sources, with a budget, guardrails and human review"
+    input { question: String, slug: String, budget_usd: Float = 2.0, max_queries: Int = 5 }
+    output { status: String, url: String?, confidence: Float }
+    timeout 3d
+
+    // Hard ceilings, whatever the model plans.
+    limits { max_fan_out: 10, max_history_events: 1000 }
+
+    signal editor_review { approved: Bool, editor: String, edited_text: String? }
+
+    step plan {
+        worker "llm.plan"
+        with { question: input.question, max_queries: input.max_queries }
+        retry { attempts: 3, backoff: exponential, initial_delay: 1s }
+        timeout 1m
+    }
+
+    // Deterministic guardrail: refuse plans over the budget or the query cap.
+    step budget {
+        compute {
+            within: plan.estimated_cost_usd <= input.budget_usd && len(plan.queries) <= input.max_queries
+        }
+    }
+
+    step search {
+        for query in plan.queries
+        max_parallel 4
+        worker "tools.search"
+        when budget.within
+        with { query: query }
+        retry { attempts: 3, backoff: exponential, initial_delay: 1s }
+        timeout 30s
+    }
+
+    step draft {
+        worker "llm.draft"
+        when budget.within
+        with { question: input.question, evidence: map(search, r => join(r.snippets, " ")) }
+        timeout 2m
+    }
+
+    step check {
+        worker "guardrails.check"
+        when budget.within
+        with { text: draft.text, citations: draft.citations }
+    }
+
+    step gate {
+        compute {
+            needs_editor: check.confidence < 0.8 || len(check.flags) > 0
+        }
+        when budget.within
+    }
+
+    step review {
+        await editor_review
+        when coalesce(gate.needs_editor, false)
+        timeout 2d
+    }
+
+    step publish {
+        worker "content.publish"
+        when budget.within && (!coalesce(gate.needs_editor, true) || coalesce(review.approved, false))
+        with { slug: input.slug, text: coalesce(review.edited_text, draft.text) }
+        idempotency_key: "publish-" + input.slug
+        compensate {
+            worker "content.unpublish"
+            with { slug: input.slug }
+        }
+    }
+
+    step announce {
+        worker "content.notify"
+        after publish
+        when !is_null(publish)
+        with { channel: "research", message: "Published " + publish.url }
+    }
+
+    on failure {
+        step alert {
+            worker "content.notify"
+            with { channel: "research-alerts", message: "Agent run failed: " + failure.code + ": " + failure.message }
+        }
+    }
+
+    query progress = {
+        planned_queries: len(coalesce(plan.queries, []))
+        within_budget: budget.within
+        confidence: check.confidence
+        waiting_for_editor: coalesce(gate.needs_editor, false) && is_null(review)
+    }
+
+    return {
+        status: if !budget.within then "over_budget"
+            else if is_null(publish) then "rejected"
+            else "published"
+        url: publish.url
+        confidence: coalesce(check.confidence, 0.0)
+    }
+}

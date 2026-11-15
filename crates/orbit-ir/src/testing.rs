@@ -122,6 +122,10 @@ pub fn value_matches(expected: &Value, actual: &Value) -> bool {
         (Value::Object(want), Value::Object(have)) => want
             .iter()
             .all(|(k, v)| value_matches(v, have.get(k).unwrap_or(&Value::Null))),
+        // Lists match element by element (same length), each element partially.
+        (Value::Array(want), Value::Array(have)) => {
+            want.len() == have.len() && want.iter().zip(have).all(|(w, h)| value_matches(w, h))
+        }
         _ => crate::expr::values_equal(expected, actual),
     }
 }
@@ -138,6 +142,10 @@ mod tests {
         assert!(value_matches(&json!({ "a": 1.0 }), &actual));
         assert!(value_matches(&json!({ "b": { "d": [1, 2] } }), &actual));
         assert!(!value_matches(&json!({ "b": { "d": [1] } }), &actual));
+        let rows = json!([{ "q": "a", "n": 1 }, { "q": "b", "n": 2 }]);
+        assert!(value_matches(&json!([{ "q": "a" }, { "q": "b" }]), &rows));
+        assert!(!value_matches(&json!([{ "q": "a" }]), &rows));
+        assert!(!value_matches(&json!([{ "q": "b" }, { "q": "a" }]), &rows));
         assert!(!value_matches(&json!({ "z": 1 }), &actual));
         assert!(value_matches(&json!({ "z": null }), &actual));
     }

@@ -1,0 +1,66 @@
+// Tests for the ExpenseClaim workflow (expense.orbit).
+//
+// Run them with `orbit test examples/expense.test.orbit`.
+
+import "expense.orbit"
+
+test "a small claim is paid without review" {
+    workflow ExpenseClaim
+    input { claim_id: "x-1", employee: "ana", manager: "bo", amount: 42.0 }
+    mock "payments.pay" returns { payment_id: "pay-" + input.claim_id }
+    expect status COMPLETED
+    expect output { paid: true, payment_id: "pay-x-1" }
+    expect step manager SKIPPED
+    expect step finance SKIPPED
+}
+
+test "a medium claim needs the manager only" {
+    workflow ExpenseClaim
+    input { claim_id: "x-2", employee: "ana", manager: "bo", amount: 800.0 }
+    mock "payments.pay" returns { payment_id: "pay-" + input.claim_id }
+    signal manager_review { approved: true, by: "bo" }
+    expect status COMPLETED
+    expect output { paid: true }
+    expect step finance SKIPPED
+}
+
+test "a large claim needs the manager, then finance" {
+    workflow ExpenseClaim
+    input { claim_id: "x-3", employee: "ana", manager: "bo", amount: 9000.0 }
+    mock "payments.pay" returns { payment_id: "pay-" + input.claim_id }
+    signal manager_review { approved: true, by: "bo" }
+    signal finance_review { approved: true, by: "cy" }
+    expect status COMPLETED
+    expect output { paid: true }
+    expect step finance output { by: "cy" }
+}
+
+test "finance can refuse what the manager approved" {
+    workflow ExpenseClaim
+    input { claim_id: "x-4", employee: "ana", manager: "bo", amount: 9000.0 }
+    signal manager_review { approved: true, by: "bo" }
+    signal finance_review { approved: false, by: "cy" }
+    expect status COMPLETED
+    expect output { paid: false, payment_id: null }
+    expect step pay SKIPPED
+}
+
+test "comments are forwarded while the claim waits" {
+    workflow ExpenseClaim
+    input { claim_id: "x-5", employee: "ana", manager: "bo", amount: 800.0 }
+    mock "payments.pay" returns { payment_id: "pay-" + input.claim_id }
+    mock "people.notify" returns { delivered: true }
+    signal comment { by: "bo", text: "Please attach the receipt" }
+    signal manager_review { approved: true, by: "bo" }
+    expect status COMPLETED
+    expect step on_event: comment: forward SUCCEEDED
+}
+
+test "a claim nobody reviews fails after three days and escalates" {
+    workflow ExpenseClaim
+    input { claim_id: "x-6", employee: "ana", manager: "bo", amount: 800.0 }
+    mock "people.notify" returns { delivered: true }
+    expect status FAILED
+    expect error "SIGNAL_TIMEOUT"
+    expect step on_failure: escalate SUCCEEDED
+}

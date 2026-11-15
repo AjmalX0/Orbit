@@ -804,7 +804,10 @@ impl Parser {
     }
 
     fn binop(&self) -> Option<(BinOp, u8)> {
-        if self.tok().newline_before {
+        // A line that starts with a binary operator continues the expression
+        // (nothing else can start with one). `-` is the exception: at the
+        // start of a line it is a negative number.
+        if self.tok().newline_before && matches!(self.kind(), TokenKind::Minus) {
             return None;
         }
         Some(match self.kind() {

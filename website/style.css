@@ -112,7 +112,9 @@ section { padding: 84px 0; }
 .features > div { padding: 28px 28px 30px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .features h3 { font-size: 17px; font-weight: 600; margin: 0 0 8px; }
 .features p { margin: 0; color: var(--muted); font-size: 15.5px; }
-.features code { color: var(--ink); }
+.features code { color: var(--ink); white-space: nowrap; }
+.features h3 a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--line); }
+.features h3 a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
 .sdks { width: 100%; border-collapse: collapse; font-size: 15.5px; background: var(--bg); border: 1px solid var(--line); }
 .sdks th { text-align: left; font: 500 12.5px var(--mono); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding: 12px 18px; border-bottom: 1px solid var(--line); }

@@ -433,6 +433,9 @@ fn partial(ty: &Type) -> Type {
                 .collect(),
         },
         Type::Optional { inner } => partial(inner).optional(),
+        Type::List { item } => Type::List {
+            item: Box::new(partial(item)),
+        },
         other => other.clone(),
     }
 }

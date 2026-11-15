@@ -238,6 +238,8 @@ fn needs_space(
         (Dot | LParen | LBracket, _) => false,
         (Bang, _) => false,
         (Ident(w), LParen) if !NO_CALL_WORDS.contains(&w.as_str()) => false,
+        // `expect step s output [...]` and `mock "t" returns [...]` are not indexing.
+        (Ident(w), LBracket) if w == "output" || w == "returns" => true,
         (Ident(_) | RParen | RBracket | Str(_), LBracket) => false,
         (LBrace, RBrace) => false,
         _ => true,

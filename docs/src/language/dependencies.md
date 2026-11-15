@@ -157,7 +157,6 @@ error[E0304]: circular dependency between steps
   |
 8 |     step first { worker "a.run" with { n: second.v } }
   |          ^^^^^
-8 |     step first { worker "a.run" with { n: second.v } }
   |                                           ------ `first` depends on `second`
 9 |     step second { worker "a.run" with { n: first.v } }
   |                                            ----- `second` depends on `first`

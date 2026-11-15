@@ -1,0 +1,72 @@
+// Tests for the Onboarding workflow (onboarding.orbit), one per path.
+//
+// Run them with `orbit test examples/onboarding.test.orbit`.
+
+import "onboarding.orbit"
+
+test "a verified, clean customer is opened without review" {
+    workflow Onboarding
+    input { customer_id: "c-1", full_name: "Ada Lovelace", document_id: "P123", country: "GB" }
+    mock "identity.verify" returns { verified: true, confidence: 0.97, reasons: [] }
+    mock "sanctions.screen" returns { hits: 0, lists: [] }
+    mock "accounts.open" returns { account_id: "acc-" + input.customer_id }
+    mock "audit.record" returns { recorded: true }
+    mock "customers.notify" returns { delivered: true }
+    expect status COMPLETED
+    expect output { status: "opened", account_id: "acc-c-1", risk: "low" }
+    expect step decision SKIPPED
+    expect step audit SUCCEEDED
+    expect step welcome SUCCEEDED
+}
+
+test "a sanctions hit waits for an officer, who approves" {
+    workflow Onboarding
+    input { customer_id: "c-2", full_name: "J. Doe", document_id: "P456", country: "FR" }
+    mock "identity.verify" returns { verified: true, confidence: 0.95, reasons: [] }
+    mock "sanctions.screen" returns { hits: 1, lists: ["EU-consolidated"] }
+    mock "accounts.open" returns { account_id: "acc-" + input.customer_id }
+    mock "audit.record" returns { recorded: true }
+    mock "customers.notify" returns { delivered: true }
+    signal review { approved: true, officer: "m.ruiz", note: "false positive, different date of birth" }
+    expect status COMPLETED
+    expect output { status: "opened", risk: "high" }
+    expect step decision output { officer: "m.ruiz" }
+}
+
+test "an officer rejection opens nothing and is audited" {
+    workflow Onboarding
+    input { customer_id: "c-3", full_name: "R. Roe", document_id: "P789", country: "DE" }
+    mock "identity.verify" returns { verified: false, confidence: 0.4, reasons: ["document expired"] }
+    mock "sanctions.screen" returns { hits: 0, lists: [] }
+    mock "audit.record" returns { recorded: true }
+    signal review { approved: false, officer: "k.osei" }
+    expect status COMPLETED
+    expect output { status: "rejected", account_id: null, risk: "high" }
+    expect step open_account SKIPPED
+    expect step welcome SKIPPED
+    expect step audit SUCCEEDED
+}
+
+test "a review nobody answers fails after five days and is recorded" {
+    workflow Onboarding
+    input { customer_id: "c-4", full_name: "S. Poe", document_id: "P000", country: "NL" }
+    mock "identity.verify" returns { verified: true, confidence: 0.8, reasons: ["blurry photo"] }
+    mock "sanctions.screen" returns { hits: 0, lists: [] }
+    mock "audit.record" returns { recorded: true }
+    expect status FAILED
+    expect error "SIGNAL_TIMEOUT"
+    expect step on_failure: record_failure SUCCEEDED
+}
+
+test "a failure after the account is opened closes it again" {
+    workflow Onboarding
+    input { customer_id: "c-5", full_name: "T. Hoe", document_id: "P111", country: "BE" }
+    mock "identity.verify" returns { verified: true, confidence: 0.99, reasons: [] }
+    mock "sanctions.screen" returns { hits: 0, lists: [] }
+    mock "accounts.open" returns { account_id: "acc-" + input.customer_id }
+    mock "audit.record" fails "AUDIT_UNAVAILABLE" "the audit store rejected the write"
+    mock "accounts.close" returns { closed: true }
+    expect status FAILED
+    expect error "AUDIT_UNAVAILABLE"
+    expect compensated open_account
+}

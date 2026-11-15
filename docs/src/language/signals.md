@@ -486,9 +486,7 @@ error[E0406]: operator `+` cannot be applied to `Int?` and `Int`
   |
 5 |     query remaining = count + 1
   |                       ^^^^^^^^^
-5 |     query remaining = count + 1
   |                       ----- `Int?`
-5 |     query remaining = count + 1
   |                               - `Int`
   = help: one operand may be `null`; use `coalesce(value, default)` first
 

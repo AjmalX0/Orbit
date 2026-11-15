@@ -106,6 +106,8 @@ impl Diagnostic {
         for l in &self.labels {
             snippets.push((l.span, Some(l.message.as_str()), false));
         }
+        // A source line is printed once; every marker on it goes underneath.
+        let mut last_line: Option<usize> = None;
         for (span, msg, primary) in snippets {
             if span.file != self.span.file {
                 let l = sources.location(span);
@@ -126,7 +128,10 @@ impl Diagnostic {
             };
             let marker = if primary { "^" } else { "-" };
             let c = if primary { sev_color } else { blue };
-            let _ = writeln!(out, "{blue}{:>gutter$} |{reset} {text}", line);
+            if last_line != Some(line) {
+                let _ = writeln!(out, "{blue}{:>gutter$} |{reset} {text}", line);
+                last_line = Some(line);
+            }
             let _ = writeln!(
                 out,
                 "{pad} {blue}|{reset} {}{c}{}{}{reset}",

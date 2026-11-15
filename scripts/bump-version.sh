@@ -23,7 +23,8 @@ sdks/java/src/test/java/io/github/ajmalx0/orbit/WorkerTest.java
 sdks/csharp/OrbitLang.Sdk/OrbitLang.Sdk.csproj
 sdks/csharp/OrbitLang.Sdk/Worker.cs
 sdks/csharp/OrbitLang.Sdk.Tests/WorkerTests.cs
-CITATION.cff"
+CITATION.cff
+website/index.html"
 esc=$(echo "$old" | sed 's/\./\\./g')
 for f in $files; do
   [ -f "$f" ] || continue

@@ -836,3 +836,99 @@ fn on_event_handlers() {
         vec!["E0401"]
     );
 }
+
+#[test]
+fn shared_conditions_narrow_optional_steps() {
+    // `charge` shares `validate.valid`, so `check` sees it as non-optional.
+    let ir = ok(r#"workflow W { version "1.0.0"
+        input { amount: Float, rush: Bool }
+        step validate { worker "orders.validate" with { order_id: "o" } }
+        step charge { worker "payments.charge" when validate.valid with { order_id: "o", amount: input.amount } }
+        step check { compute charge.transaction_id when validate.valid && input.rush }
+        step guarded { compute charge.transaction_id when !is_null(charge) }
+    }"#);
+    let ty = |id: &str| {
+        ir.steps
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .output_type
+            .to_string()
+    };
+    // The steps' own outputs are still optional (they have a `when`).
+    assert_eq!(ty("check"), "String?");
+    assert_eq!(ty("guarded"), "String?");
+    // A step without the dependency's condition still sees it as optional.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0"
+            input { amount: Float, rush: Bool }
+            step validate { worker "orders.validate" with { order_id: "o" } }
+            step charge { worker "payments.charge" when validate.valid with { order_id: "o", amount: input.amount } }
+            step refund { worker "payments.refund" when input.rush with { transaction_id: charge.transaction_id } }
+        }"#
+        ),
+        vec!["E0405"]
+    );
+    // A different condition (here `||`) does not narrow.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0"
+            input { amount: Float, rush: Bool }
+            step validate { worker "orders.validate" with { order_id: "o" } }
+            step charge { worker "payments.charge" when validate.valid with { order_id: "o", amount: input.amount } }
+            step refund { worker "payments.refund" when validate.valid || input.rush with { transaction_id: charge.transaction_id } }
+        }"#
+        ),
+        vec!["E0405"]
+    );
+    // Narrowing also applies in the compensation of the guarded step.
+    ok(r#"workflow W { version "1.0.0"
+        input { amount: Float }
+        step validate { worker "orders.validate" with { order_id: "o" } }
+        step charge { worker "payments.charge" when validate.valid with { order_id: "o", amount: input.amount } }
+        step settle {
+            worker "payments.charge"
+            when validate.valid
+            with { order_id: charge.transaction_id, amount: input.amount }
+            compensate { worker "payments.refund" with { transaction_id: charge.transaction_id } }
+        }
+    }"#);
+    // Formatting does not matter: conditions are compared structurally.
+    ok(r#"workflow W { version "1.0.0"
+        input { amount: Float }
+        step charge { worker "payments.charge" when input.amount  >  10.0 with { order_id: "o", amount: input.amount } }
+        step use_it { compute charge.transaction_id when input.amount > 10.0 }
+    }"#);
+}
+
+#[test]
+fn a_line_starting_with_an_operator_continues_the_expression() {
+    let ir = ok(r#"workflow W { version "1.0.0"
+        input { a: Bool, b: Bool, n: Int }
+        step x {
+            compute input.n
+                + 1
+            when input.a
+                && input.b
+                || input.n > 3
+        }
+        step y { compute 1 }
+    }"#);
+    let x = ir.steps.iter().find(|s| s.id == "x").unwrap();
+    assert!(x.condition.is_some());
+    assert_eq!(x.output_type.to_string(), "Int?");
+    // A line starting with `-` is a new member or value, not a subtraction.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0"
+            input { n: Int }
+            step x {
+                compute input.n
+                - 1
+            }
+        }"#
+        ),
+        vec!["E0102"]
+    );
+}

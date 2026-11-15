@@ -137,6 +137,59 @@ return {
 **Declare the target as optional.** If a contract field or a workflow output
 field is `T?`, an optional value can be passed to it directly.
 
+## Steps that share a condition
+
+A step that can only run when a conditional step ran reads that step's output
+as non-optional. The compiler recognizes two cases in the reading step's
+`when`, which it splits at `&&`:
+
+- a conjunct `!is_null(step)`, or
+- every conjunct of the other step's own `when`, written in any order and
+  with any spacing (conditions are compared by structure, not by text).
+
+```orbit
+task "payments.charge" {
+    input { order_id: String, amount: Float }
+    output { transaction_id: String }
+}
+
+task "receipts.send" {
+    input { order_id: String, transaction_id: String }
+    output { sent: Bool }
+}
+
+workflow Pay {
+    version "1.0.0"
+    input { order_id: String, amount: Float, email_receipt: Bool }
+
+    step charge {
+        worker "payments.charge"
+        when input.amount > 0.0
+        with { order_id: input.order_id, amount: input.amount }
+    }
+
+    // Shares `input.amount > 0.0`: `charge` has run, so no `coalesce`.
+    step receipt {
+        worker "receipts.send"
+        when input.amount > 0.0 && input.email_receipt
+        with { order_id: input.order_id, transaction_id: charge.transaction_id }
+    }
+}
+```
+
+This is sound because a condition can only read values that were final before
+the step it guards was decided: `input`, `execution` and the step's
+dependencies, which never change afterwards. When `receipt` runs, the same
+expression that made `charge` run is true again, and `charge` succeeded (had
+it failed, the execution would have stopped).
+
+The rule applies to the step's `with`, `compute`, `idempotency_key`, `for`
+list and `compensate` block. It does not apply to the `when` condition
+itself, which still reads conditional steps as optional, or to queries and
+`return`, which can be evaluated when the step has not run. A condition joined
+with `||`, or one that differs in any other way, does not narrow; the step's
+own output stays optional either way because it has a `when`.
+
 ## Conditions and fan-out
 
 On a `for` step, `when` decides once whether the whole step runs, before the
