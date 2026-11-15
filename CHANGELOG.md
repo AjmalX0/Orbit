@@ -5,6 +5,40 @@ All notable changes are listed here. The project follows
 and the worker protocol (`orbit.worker.v1`) are versioned separately, as
 described in RFC-0001 §17.
 
+## [0.4.0] — 2026-11-15
+
+### Language
+- **Event handlers.** `on event <signal> { steps }` runs a block once per
+  arriving signal of that name, alongside the main steps, with the payload as
+  `event`. The execution finishes when the main steps and every started block
+  are done; a failing event step fails the execution. New diagnostic E0322
+  (a signal both awaited and handled); E0315 and E0319 cover unknown signals
+  and duplicate blocks.
+- **Per-workflow limits.** `limits { max_fan_out, max_history_events,
+  max_payload_bytes }` tightens the server's limits for one workflow; the
+  stricter value applies. New diagnostics E0320 and E0321.
+
+### Tooling
+- `orbit test`: signals handled by `on event` are sent as soon as the
+  execution is idle; `expect step on_event:<signal>:<step>` checks every
+  instance of the block.
+- `orbit token --client <id>` prints a `[[client]]` entry (`--workflow`,
+  `--action`).
+- `orbit inspect` lists `on event` blocks and the `limits` block.
+- New benchmark programs, `bench_engine` and `bench_http`, and a Performance
+  page with measured numbers.
+
+### Runtime
+- Workers are handed work from an index of scheduled steps, so polling no
+  longer scans every running execution: throughput stays flat as the number
+  of executions in flight grows (about 20 times faster with 5000 running).
+- Worker last-seen times are persisted at most once a second instead of on
+  every poll; PostgreSQL commits write the events and the execution row in
+  one statement.
+- Child workflows no longer count toward `--max-active-executions`.
+- A client identity's execution list fills its page with executions it may
+  read.
+
 ## [0.3.0] — 2026-11-15
 
 ### Language
