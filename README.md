@@ -65,10 +65,42 @@ error[E0405]: value may be `null` but `String` is required
    = help: provide a fallback with `coalesce(value, default)`, or declare the target as optional with `?`
 ```
 
+## Install
+
+**From source** (works today; Rust 1.89+):
+
+```bash
+cargo install --path crates/orbit-cli
+```
+
+**Container:**
+
+```bash
+docker build -t orbit .
+docker run -p 7233:7233 -e ORBIT_TOKEN=change-me -v orbit-data:/data orbit
+```
+
+**After the first tagged release** (see [RELEASING.md](RELEASING.md)), prebuilt
+binaries and packages are published:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AjmalX0/Orbit/main/install.sh | sh
+```
+
+| | Package |
+|---|---|
+| CLI / runtime | `cargo install orbit-lang`, the install script, GitHub Releases, `ghcr.io/ajmalx0/orbit` |
+| Python | `pip install orbit-lang-sdk` |
+| TypeScript / JavaScript | `npm install @orbit-lang/sdk` |
+| Go | `go get github.com/AjmalX0/Orbit/sdks/go` |
+| Rust | `cargo add orbit-worker` |
+| Java | `io.github.ajmalx0:orbit-sdk` (Maven Central) |
+| C# / .NET | `dotnet add package OrbitLang.Sdk` |
+| VS Code | the *ORBIT* extension (`orbit-lang.orbit-lang`) |
+
 ## Quick start
 
-Requirements: Rust 1.89+ (or a prebuilt binary), plus Python 3.9+ and/or Node.js 22.18+ for the
-example workers.
+Run the order example with Python and TypeScript workers, from a clone:
 
 ```bash
 cargo build --release
@@ -76,7 +108,7 @@ export PATH="$PWD/target/release:$PATH"
 ```
 
 ```bash
-orbit server --db orbit.db &
+orbit server &
 ```
 
 ```bash
@@ -126,41 +158,53 @@ inventory reservation that already succeeded and records every decision
 +    28ms  #22  WorkflowFailed            error=CARD_DECLINED step `process_payment` failed: charge of 9000 USD declined
 ```
 
-With `"customer_id": "risky-1"` the payment is skipped by `when` and the order
-is held for review. Other commands:
+More examples: [`examples/fulfilment.orbit`](examples/fulfilment.orbit) (fan-out
+and a child workflow), [`examples/polyglot.orbit`](examples/polyglot.orbit)
+(Python, TypeScript, Go and Rust in one workflow), `java_hello.orbit`,
+`csharp_hello.orbit`, and `http_ping.orbit` (the built-in HTTP adapter). Start
+your own project with `orbit init my-project`.
 
-```bash
-orbit ps
-orbit status <execution-id>
-orbit workers list
-orbit graph examples/order_processing.orbit
-```
+## Features
 
-Or start a new project with `orbit init my-project`.
+**Language:** typed task contracts and schemas, imports, optional types with
+`coalesce`, dependencies from data references, conditions (`when`), retries
+with `non_retryable` codes, attempt, queue and workflow timeouts, idempotency
+keys, durable `sleep`, compensation (Saga), fan-out (`for item in list`,
+`max_parallel`), and child workflows (`workflow "Name"`). Errors come with
+stable codes, source locations and suggestions.
+
+**Runtime:** event-sourced and crash-safe. SQLite or PostgreSQL storage.
+At-least-once delivery with reconciliation of uncertain attempts. The worker
+protocol is served over HTTP/JSON and gRPC. Admin, shared-worker and per-worker
+credentials, TLS and mutual TLS. OpenTelemetry traces, Prometheus metrics,
+structured logs, and an opt-in HTTP adapter.
+
+**Tooling:** the `orbit` CLI, a comment-preserving formatter (`orbit fmt`), a
+language server (`orbit lsp`) with a VS Code extension, a Mermaid/Graphviz step
+graph, and `orbit init` scaffolding.
+
+**SDKs:** Python, TypeScript, Go, Rust, Java and C#. All six are tested
+against the real runtime, including over mutual TLS.
 
 ## What's in the box
 
 | Component | Path | |
 |---|---|---|
-| Language front end | `crates/orbit-syntax` | lexer, parser with error recovery, AST, rustc-style diagnostics |
-| Compiler | `crates/orbit-compiler` | imports, name resolution, structural type checker, dependency graph, cycle detection, IR lowering |
-| IR | `crates/orbit-ir` | `orbit-ir/1`: types, payload validation, pure expression evaluator, invariants, SHA-256 definition hash |
-| Runtime | `crates/orbit-runtime` | event-sourced engine with a pure decider, SQLite, worker registry, dispatch, retries, timeouts, compensation, recovery, HTTP API, metrics |
-| CLI | `crates/orbit-cli` | `init check validate compile graph server deploy run status inspect logs cancel ps workers` |
-| Python SDK | `sdks/python` | standard library only |
-| TypeScript SDK | `sdks/typescript` | zero dependencies, runs on Node.js and anything with `fetch` |
-| Go SDK | `sdks/go` | standard library only, context-based cancellation |
-| Rust SDK | `crates/orbit-worker` | typed handlers via serde, blocking threads |
-| Worker protocol | `protocol/` | canonical `.proto`, plus the HTTP/JSON binding spec |
-| Specification | `specification/` | RFC-0001 with implementation record, EBNF grammar |
+| Language front end | `crates/orbit-syntax` | lexer, parser with error recovery, AST, diagnostics, formatter |
+| Compiler | `crates/orbit-compiler` | imports, name resolution, type checker, dependency graph, child-workflow ordering, IR lowering |
+| IR | `crates/orbit-ir` | `orbit-ir/1`: types, payload validation, pure expression evaluator, invariants, definition hash |
+| Runtime | `crates/orbit-runtime` | engine and pure decider, SQLite/PostgreSQL, dispatch, fan-out, children, recovery, HTTP API, gRPC, identities, TLS/mTLS, OpenTelemetry |
+| CLI | `crates/orbit-cli` (crate `orbit-lang`) | `init check validate compile fmt graph server deploy run status inspect logs cancel ps workers token lsp` |
+| SDKs | `sdks/python`, `sdks/typescript`, `sdks/go`, `sdks/java`, `sdks/csharp`, `crates/orbit-worker` | one per language |
+| Worker protocol | `protocol/` | canonical `.proto`; HTTP/JSON and gRPC bindings |
+| Specification | `specification/` | RFC-0001 with the implementation record, EBNF grammar |
 | Docs | `docs/` | [language](docs/language.md), [runtime semantics](docs/runtime.md), [diagnostics](docs/diagnostics.md) |
-| Editor support | `editors/vscode` | syntax highlighting for `.orbit` |
+| VS Code extension | `editors/vscode` | language client for `orbit lsp` |
 
 ## Guarantees, precisely
 
-* **Durable.** Every state change is an event committed to SQLite (WAL,
-  `synchronous=FULL`) before it takes effect. State is rebuilt from history on
-  restart.
+* **Durable.** Every state change is an event committed to the database before
+  it takes effect. State is rebuilt from history on restart.
 * **At-least-once delivery, never "exactly-once".** Every task carries an
   idempotency key that is stable across retries and redeliveries. If a worker
   or the runtime crashes mid-task, the outcome counts as *unknown, possibly
@@ -174,40 +218,28 @@ Or start a new project with `orbit init my-project`.
 
 Details: [docs/runtime.md](docs/runtime.md).
 
-## Testing
+## Developing
+
+Open the repository in VS Code. `.vscode/` recommends extensions and provides
+build, test and debug configurations, and `.devcontainer/` gives a container
+with every toolchain preinstalled. One command runs every check CI runs:
 
 ```bash
-cargo test
+./scripts/check.sh
 ```
 
-```bash
-cargo build && python3 -I tests/e2e/test_e2e.py
-```
+That covers Rust format, lint and tests (including PostgreSQL when
+`ORBIT_TEST_POSTGRES_URL` is set), each SDK's own tests, the formatter check,
+and the end-to-end suite. The end-to-end tests start a real server and real
+workers in six languages, `kill -9` the runtime mid-task, and exercise HTTPS,
+mutual TLS and per-worker identities. Acceptance criteria are mapped to tests
+in [RFC-0001 §15](specification/RFC-0001.md#15-testing-strategy-and-acceptance-criteria).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`cargo test` runs the compiler, IR and runtime suites. The second command is
-the end-to-end suite: a real server with real Python, TypeScript, Go and Rust
-workers, a SIGKILL crash-recovery scenario, and HTTPS with admin and worker
-credentials. The SDKs also have their own protocol tests:
+## Status and license
 
-```bash
-PYTHONPATH=sdks/python python3 -m unittest discover -s sdks/python/tests
-```
+Version 0.1: a single-node runtime. Next: multi-node execution sharing
+PostgreSQL, signals and queries, and `orbit test` / `replay` / `simulate`
+([RFC-0001 Appendix A.3](specification/RFC-0001.md#a3-known-gaps-tracked-for-v02)).
 
-```bash
-(cd sdks/typescript && npm test)
-```
-
-```bash
-(cd sdks/go && go test ./...)
-```
-
-The Rust SDK's tests run as part of `cargo test`. Acceptance criteria are mapped to tests in
-[RFC-0001 §15](specification/RFC-0001.md#15-testing-strategy-and-acceptance-criteria).
-
-## Status
-
-v0.1: single-node, SQLite, HTTP/JSON worker protocol over HTTP or HTTPS, admin
-and restricted worker credentials, Python, TypeScript, Go and Rust SDKs
-([four-language example](examples/polyglot.orbit)). Next: gRPC binding, PostgreSQL, OpenTelemetry, `orbit fmt` and an LSP,
-fan-out (`for each`), child workflows, then multi-node execution. See
-[RFC-0001 Appendix A](specification/RFC-0001.md#appendix-a--v010-implementation-record).
+Licensed under the [Apache License 2.0](LICENSE).

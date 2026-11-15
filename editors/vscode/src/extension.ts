@@ -4,6 +4,16 @@ import * as vscode from "vscode";
 import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
+let restarting: Promise<void> = Promise.resolve();
+
+/** Restart the language server; restarts run one at a time so only one client is ever live. */
+function restart(context: vscode.ExtensionContext): Promise<void> {
+  restarting = restarting.then(async () => {
+    await stopClient();
+    await startClient(context);
+  });
+  return restarting;
+}
 
 function config() {
   const c = vscode.workspace.getConfiguration("orbit");
@@ -24,7 +34,20 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
       `ORBIT: could not start \`${config().server} lsp\` (${(e as Error).message}). Install orbit or set "orbit.serverPath".`,
     );
   }
-  context.subscriptions.push({ dispose: () => client?.stop() });
+  context.subscriptions.push({ dispose: () => void stopClient() });
+}
+
+/** Stop the language server if it is running. A client that failed to start cannot be stopped. */
+async function stopClient(): Promise<void> {
+  const c = client;
+  client = undefined;
+  if (!c) return;
+  try {
+    if (c.isRunning()) await c.stop();
+    else await c.dispose();
+  } catch {
+    // already stopped or never started
+  }
 }
 
 /** Run an orbit subcommand for the active file in an integrated terminal. */
@@ -44,7 +67,8 @@ function inTerminal(args: (file: string) => string[]): void {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  await startClient(context);
+  restarting = startClient(context);
+  await restarting;
   context.subscriptions.push(
     vscode.commands.registerCommand("orbit.run", async () => {
       const input = await vscode.window.showInputBox({
@@ -76,13 +100,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
       });
     }),
-    vscode.commands.registerCommand("orbit.restartServer", async () => {
-      await client?.stop();
-      await startClient(context);
+    vscode.commands.registerCommand("orbit.restartServer", () => restart(context)),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("orbit.serverPath")) void restart(context);
     }),
   );
 }
 
 export async function deactivate(): Promise<void> {
-  await client?.stop();
+  await stopClient();
 }

@@ -105,7 +105,7 @@ types and unknown fields are rejected before the execution is created.
 
 ```orbit
 step process_payment {
-    worker "payments.charge"          // the task to run (or: sleep 10s)
+    worker "payments.charge"          // the task (or: workflow "Child", or: sleep 10s)
     using python                      // optional: only route to python workers
     after reserve_inventory           // explicit ordering
     when analyze_risk.score < 0.8     // run only if true; otherwise skipped
@@ -162,6 +162,56 @@ step follow_up { worker "emails.send" after cool_off with { ... } }
 `sleep` is a durable timer kept by the runtime. It survives restarts and needs
 no worker.
 
+### Fan-out: `for`
+
+```orbit
+step reserve {
+    for item in input.items          // any List<T> expression
+    max_parallel 4                   // optional concurrency limit
+    worker "inventory.reserve"
+    with { sku: item.sku, quantity: item.quantity }
+    compensate {
+        worker "inventory.release"
+        with { reservation_id: reserve.reservation_id }   // this element's output
+    }
+}
+```
+
+A `for` step runs once per element. Each element is its own unit (`reserve[0]`,
+`reserve[1]`, ...) with its own retries, timeouts and idempotency key
+(`<execution>/reserve[i]`). The step's output is the **list** of element outputs,
+in input order (`List<Out>`), and it succeeds when every element succeeds. If
+an element fails permanently, the step fails; on compensation, every element
+that *succeeded* is compensated individually.
+
+The loop variable is in scope in `with`, `idempotency_key` and `compensate`.
+It is not in scope in `when`, which decides once whether the whole step runs.
+An empty list succeeds immediately with `[]`.
+
+### Child workflows
+
+```orbit
+step ship {
+    workflow "Shipping"              // defined in, or imported into, this compilation
+    with { order_id: input.order_id, items: len(input.items) }
+    timeout 1h
+}
+```
+
+A `workflow` step starts another workflow as a durable **child execution** with
+the deterministic id `<parent>.<step>` (`<parent>.<step>.<i>` inside a `for`), so
+restarting after a crash never starts it twice. Its input and output are
+type-checked against the child's `input`/`output`. Its result arrives when the
+child completes. If the child fails, is cancelled or times out, the step fails
+(`CHILD_CANCELLED`, `CHILD_TIMED_OUT`, or the child's own error code).
+Cancelling or aborting the parent cancels its running children.
+
+Child steps take no `using`, `retry`, `idempotency_key` or `queue_timeout`:
+the child is durable on its own, so put retries on the child's steps.
+Workflows that start each other in a cycle are rejected (`E0311`). The compiler
+orders callees before callers, and `orbit deploy` / `orbit run` register them in
+that order.
+
 ### Compensation
 
 `compensate` declares the business action that undoes a step (Saga pattern).
@@ -182,6 +232,7 @@ decision replayable from history.
 | literals | `"text"`, `42`, `3.14`, `true`, `null`, `30s` |
 | workflow input | `input.order_id` |
 | step output | `analyze_risk.score`, `charge` (the whole record) |
+| loop variable | `item.sku` inside a `for` step |
 | execution metadata | `execution.id`, `execution.workflow`, `execution.version` |
 | objects and lists | `{ id: input.id, tags: ["a", "b"] }` |
 | indexing | `input.items[0]`, `headers["content-type"]` (optional result) |
@@ -233,6 +284,18 @@ step fetch {
 
 `5xx` and `429` responses are retryable failures. Other statuses are returned
 to the workflow.
+
+## Tooling
+
+- `orbit check` / `orbit compile`: diagnostics and IR. `--format json` gives
+  machine-readable diagnostics.
+- `orbit fmt [--check] files...`: formats indentation and spacing, and keeps your
+  comments and line breaks. It verifies that its output lexes to the same token
+  stream before writing, so formatting can never change meaning.
+- `orbit lsp`: the language server behind the VS Code extension
+  (`editors/vscode`). It provides diagnostics as you type, hover,
+  go to definition, completion, outline and formatting.
+- `orbit graph`: Mermaid or Graphviz view of the step graph.
 
 ## Versioning
 

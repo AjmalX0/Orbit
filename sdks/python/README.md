@@ -3,6 +3,10 @@
 Python worker SDK for the [ORBIT](../../README.md) runtime. Standard library
 only, Python 3.9+.
 
+```bash
+pip install orbit-lang-sdk
+```
+
 ```python
 from orbit_sdk import Worker, TaskError
 
@@ -37,3 +41,12 @@ c = Client()
 eid = c.start("OrderProcessing", {"order_id": "A-1", ...}, execution_id="order-A-1")
 print(c.wait(eid)["status"])
 ```
+
+## Credentials and TLS
+
+| Variable | Purpose |
+|---|---|
+| `ORBIT_SERVER` | runtime URL (default `http://127.0.0.1:7233`) |
+| `ORBIT_WORKER_TOKEN` (or `ORBIT_TOKEN`) | bearer token: a per-worker token from `orbit token`, or the shared worker token |
+| `ORBIT_CA_CERT` | PEM CA to trust when the runtime uses a private certificate |
+| `ORBIT_CLIENT_CERT`, `ORBIT_CLIENT_KEY` | PEM client certificate and key for mutual TLS |

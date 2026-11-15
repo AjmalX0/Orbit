@@ -3,6 +3,10 @@
 Worker SDK for the [ORBIT](https://github.com/AjmalX0/Orbit) runtime. .NET 8+, no
 dependencies beyond the base class library (`System.Net.Http`, `System.Text.Json`).
 
+```bash
+dotnet add package OrbitLang.Sdk
+```
+
 ```csharp
 using OrbitLang.Sdk;
 
