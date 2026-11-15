@@ -6,6 +6,7 @@
 //! * [`engine`] — dispatch, worker registry, reconciliation and recovery
 //! * [`server`] — HTTP API and the HTTP/JSON worker protocol binding
 //! * [`cluster`] — active/standby operation of several servers on PostgreSQL
+//! * [`shared`] — several active servers sharing the work on PostgreSQL
 //! * [`testing`] — in-process simulation for `orbit test` and `orbit simulate`
 //! * [`replay`] — re-run a recorded history through the current decider
 
@@ -22,6 +23,7 @@ pub mod metrics;
 pub mod model;
 pub mod replay;
 pub mod server;
+pub mod shared;
 pub mod store;
 pub mod telemetry;
 pub mod testing;

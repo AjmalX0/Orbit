@@ -117,10 +117,35 @@ The decider is a pure function of the history, the definition and the current ti
 - **Stopping external work.** Cancellation and timeouts are cooperative. The worker is told through the heartbeat `cancel` list, but the runtime cannot stop an operation that is already running in another system.
 - **Ordering between independent steps.** Steps without a dependency between them may run in any order or concurrently. Among queued tasks, a worker receives the oldest matching one, but this is not a fairness guarantee across executions.
 - **Timing precision.** Timers, retries and timeouts are checked every 100 ms and fire after their due time, not exactly at it. During an outage they fire when the runtime is back.
-- **High availability.** A single server is a single node: while it is down, no steps are scheduled and no results are accepted; workers retry. With PostgreSQL, run several servers with `--cluster` so a standby takes over within seconds; one leader still does all the work. See [Running several servers](cluster.md).
+- **High availability.** A single server is a single node: while it is down, no steps are scheduled and no results are accepted; workers retry. With PostgreSQL, run several servers with `--cluster` so a standby takes over within seconds; one leader still does all the work. With `--cluster-mode shared` every server works, and the others take over a failed server's executions. See [Running several servers](cluster.md).
 - **Exactly-once compensation.** Compensations are tasks with the same at-least-once delivery, and need idempotent workers too.
 - **Telemetry delivery.** Spans are exported on a best-effort basis; they are dropped if the collector is unreachable or the queue is full. Metrics are in-memory counters that reset when the runtime restarts.
 - **Capability-based permissions beyond task patterns, and per-execution resource limits.** These are not implemented.
+
+## Shared mode
+
+With `--cluster --cluster-mode shared`, several servers execute workflows at once. See [Shared mode](cluster.md#shared-mode-several-active-servers) for how it works.
+
+What stays the same:
+
+- **One writer per execution.** Each running execution has one owner. Only the owner appends to its history, and every append checks the owner's epoch in the same transaction, so a server that lost an execution to another one cannot write to it (`STORAGE_ERROR` starting with `fenced:`).
+- **Events before effects.** History, projection, queue rows and consumed inbox entries are written in one transaction.
+- **At-least-once delivery with stable idempotency keys**, uncertain attempts redelivered and never assumed failed, late results accepted for unresolved steps.
+- **Commands are applied once and in order.** A signal, cancellation, result or dispatch that reaches a server that does not own the execution goes to the owner's inbox, and the owner deletes the entry in the same transaction as the events it causes. A server that dies after applying an entry has also deleted it.
+- **Deterministic decisions, immutable definitions, idempotent starts.**
+
+What changes:
+
+| Topic | One server | Shared mode |
+|---|---|---|
+| Task handed out | After `StepDispatched` is committed. | After the claim of the queue row and its inbox entry are committed. The owner records `StepDispatched` a moment later; a result that arrives first waits behind it in the inbox. |
+| Result acknowledged | After `StepSucceeded` or `StepAttemptFailed` is committed; `accepted` reflects the outcome. | The same on the owner. On another server: once the result is stored in the owner's inbox, with `{"accepted": true}`; the owner records a contract violation or a duplicate in history as usual. |
+| Signal `seq` | Always set. | `null` when the owner has not recorded the signal within 10 seconds; the signal is still recorded once. |
+| Extra redelivery cause | | A server that handed out a task died, and the result did not arrive within `--node-timeout` plus `--session-timeout`: the worker may never have received the task. The original attempt's late result is still accepted. |
+| Lost worker detected | One `--session-timeout` after its last contact. | About one second later: contact is written to the database every 250 ms and read by owners every 500 ms. |
+| Timers, retries, timeouts | Fired by the server's clock. | Fired by the owner's clock, after a takeover by the new owner's. Keep server clocks synchronized (NTP). |
+| `--max-active-executions` | Running executions. | Running executions this server owns. Each server applies its own limit. |
+| Metrics | The server's. | Per server. Sum them across servers. |
 
 ## See also
 

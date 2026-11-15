@@ -9,8 +9,10 @@ servers in cluster mode (with ORBIT_E2E_POSTGRES_URL).
     cargo build && python3 -I tests/e2e/test_e2e.py
 """
 
+import http.client
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -893,6 +895,271 @@ class HighAvailability(unittest.TestCase):
         self.assertEqual(len(of("StepAttemptUncertain")), 1, json.dumps(history, indent=1))
         self.assertEqual(len(of("StepDispatched")), 2, "the charge was redelivered")
         self.assertEqual(len(of("StepSucceeded")), 1, "exactly one recorded success for the charge")
+
+
+class RoundRobinProxy:
+    """A minimal TCP load balancer: every new connection goes to the next
+    backend whose /v1/ready answers 200 (probed every 200ms), in turn."""
+
+    def __init__(self, backends):
+        self.backends = backends
+        self.ready = []
+        self.next = 0
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(256)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._probe, daemon=True).start()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _probe(self):
+        while not self.stopped.is_set():
+            ready = [b for b in self.backends if ReadyProxy._ready(None, b)]
+            with self.lock:
+                self.ready = ready
+            time.sleep(0.2)
+
+    def _accept(self):
+        while not self.stopped.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        # Like a load balancer's retry on connection errors: a backend that
+        # just died (refused) is skipped in favour of the next ready one.
+        up = None
+        for _ in range(len(self.backends)):
+            with self.lock:
+                if not self.ready:
+                    break
+                backend = self.ready[self.next % len(self.ready)]
+                self.next += 1
+            try:
+                up = socket.create_connection(backend, timeout=2)
+                break
+            except OSError:
+                continue
+        if up is None:
+            return ReadyProxy._close(conn)
+        up.settimeout(None)
+
+        def pipe(src, dst):
+            try:
+                while True:
+                    data = src.recv(65536)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except OSError:
+                pass
+            finally:
+                ReadyProxy._close(src)
+                ReadyProxy._close(dst)
+
+        threading.Thread(target=pipe, args=(up, conn), daemon=True).start()
+        pipe(conn, up)
+
+    def stop(self):
+        self.stopped.set()
+        self.sock.close()
+
+
+@unittest.skipUnless(os.environ.get("ORBIT_E2E_POSTGRES_URL"), "set ORBIT_E2E_POSTGRES_URL to run the multi-server tests")
+class SharedCluster(unittest.TestCase):
+    """Three `orbit server --cluster --cluster-mode shared` nodes on one
+    PostgreSQL database behind a round-robin proxy; every node is active. One
+    node is killed with SIGKILL mid-run."""
+
+    NODES = ("node-1", "node-2", "node-3")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.c = Cluster()
+        cls.ports = {n: free_port() for n in cls.NODES}
+        cls.nodes = {}
+        for n in cls.NODES:
+            cls.start_node(n)
+        cls.proxy = RoundRobinProxy([("127.0.0.1", p) for p in cls.ports.values()])
+        deadline = time.time() + 10
+        while len(cls.proxy.ready) < len(cls.NODES):
+            assert time.time() < deadline, "not every node became ready"
+            time.sleep(0.05)
+        cls.c.url = f"http://127.0.0.1:{cls.proxy.port}"
+        cls.c.env["ORBIT_SERVER"] = cls.c.url
+        cls.c.start_workers()
+        cls.c.cli("deploy", WORKFLOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.c.stop()
+        for p in cls.nodes.values():
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=10)
+        cls.proxy.stop()
+        print(f"\nlogs: {cls.c.dir}")
+
+    @classmethod
+    def node_url(cls, name):
+        return f"http://127.0.0.1:{cls.ports[name]}"
+
+    @classmethod
+    def start_node(cls, name):
+        cls.nodes[name] = subprocess.Popen(
+            [ORBIT, "server", "--cluster", "--cluster-mode", "shared", "--db", cls.c.db,
+             "--addr", f"127.0.0.1:{cls.ports[name]}", "--node-id", name,
+             "--session-timeout", "3", "--node-timeout", "3"],
+            stdout=cls.c.log(name), stderr=subprocess.STDOUT, env=cls.c.env,
+        )
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(cls.node_url(name) + "/v1/ready", timeout=1).read()
+                return
+            except OSError:
+                time.sleep(0.1)
+        raise RuntimeError(f"{name} did not become ready; logs in {cls.c.dir}")
+
+    @classmethod
+    def health(cls, name):
+        with urllib.request.urlopen(cls.node_url(name) + "/v1/health", timeout=2) as r:
+            return json.loads(r.read())
+
+    @classmethod
+    def node_log(cls, name):
+        with open(os.path.join(cls.c.dir, f"{name}.log"), errors="replace") as f:
+            return f.read()
+
+    def retry(self, call):
+        """A request through the proxy, repeated when the node serving it
+        dies mid-request (as a client of a load balancer would)."""
+        deadline = time.time() + 30
+        while True:
+            try:
+                return call()
+            except (OSError, http.client.HTTPException) as e:
+                if isinstance(e, urllib.error.HTTPError) or time.time() > deadline:
+                    raise
+                time.sleep(0.2)
+
+    def get(self, path):
+        return self.retry(lambda: self.c.get(path))
+
+    def wait(self, ex, timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s = self.get(f"/v1/executions/{ex}/wait?timeout_ms=5000")
+            if s["status"] in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
+                return s
+        raise AssertionError(f"execution {ex} did not finish: {s['status']}")
+
+    def start(self, input):
+        # An explicit execution id makes a repeated start safe.
+        ex = "sh-" + input["order_id"]
+        body = {"workflow": "OrderProcessing", "input": input, "execution_id": ex}
+        return self.retry(lambda: self.c.post("/v1/executions", body))["execution_id"]
+
+    def start_on(self, node, input):
+        """Start an execution on one node directly: that node owns it."""
+        ex = "sh-" + input["order_id"]
+        req = urllib.request.Request(self.node_url(node) + "/v1/executions", method="POST",
+                                     data=json.dumps({"workflow": "OrderProcessing", "input": input, "execution_id": ex}).encode(),
+                                     headers={"content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())["execution_id"]
+
+    def await_dead(self, victim):
+        """Wait until the other nodes no longer list `victim` as live."""
+        deadline = time.time() + 15
+        for n in self.NODES:
+            if n == victim:
+                continue
+            while victim in [x["node_id"] for x in self.health(n)["nodes"] if x["live"]]:
+                self.assertLess(time.time(), deadline, f"{n} still lists {victim} as live")
+                time.sleep(0.1)
+
+    def started_by(self):
+        """Executions each node started (and therefore owned first), from its log."""
+        return {n: set(re.findall(r"execution started execution_id=(\S+)", self.node_log(n))) for n in self.NODES}
+
+    def payment(self, ex):
+        history = self.get(f"/v1/executions/{ex}/history")["events"]
+        return {t: [e for e in history if e["type"] == t and e.get("step") == "process_payment"]
+                for t in ("StepDispatched", "StepAttemptUncertain", "StepSucceeded")}
+
+    def await_dispatched(self, executions, step="process_payment"):
+        deadline = time.time() + 30
+        while not all(self.get(f"/v1/executions/{ex}")["units"].get(step, {}).get("status") == "DISPATCHED" for ex in executions):
+            self.assertLess(time.time(), deadline, f"{step} never dispatched")
+            time.sleep(0.05)
+
+    def test_a_work_is_spread_over_every_node(self):
+        claimed = {n: self.health(n)["tasks_claimed"] for n in self.NODES}
+        executions = [self.start(order(f"SH-A{i}", customer=f"cust-{i}")) for i in range(20)]
+        for ex in executions:
+            s = self.wait(ex, timeout=60)
+            self.assertEqual(s["status"], "COMPLETED", json.dumps(s, indent=2))
+            self.assertEqual(len(self.payment(ex)["StepSucceeded"]), 1)
+        owners = self.started_by()
+        spread = [n for n in self.NODES if owners[n] & set(executions)]
+        self.assertGreater(len(spread), 1, f"executions started on one node only: {owners}")
+        dispatched = {n: self.health(n)["tasks_claimed"] - claimed[n] for n in self.NODES}
+        self.assertGreater(len([n for n in dispatched if dispatched[n] > 0]), 1, f"tasks dispatched by one node only: {dispatched}")
+        # Every node reports the others as live and is ready.
+        for n in self.NODES:
+            h = self.health(n)
+            self.assertEqual((h["role"], h["node_id"]), ("shared", n))
+            self.assertEqual(sorted(x["node_id"] for x in h["nodes"] if x["live"]), sorted(self.NODES))
+        print(f"\nstarted per node: { {n: len(owners[n] & set(executions)) for n in self.NODES} }, tasks claimed per node: {dispatched}")
+
+    def test_b_kill_a_node_mid_run(self):
+        victim = "node-2"
+        quick = [self.start(order(f"SH-B{i}", customer=f"cust-{i}")) for i in range(16)]
+        # Charges of 4242 take 3s; two of them are owned by the victim.
+        slow = [self.start_on(victim, order(f"SH-B9{i}", amount=4242)) for i in range(2)]
+        slow += [self.start(order(f"SH-B9{i}", amount=4242)) for i in range(2, 4)]
+        self.await_dispatched(slow)
+        self.assertGreaterEqual(self.health(victim)["owned_executions"], 2)
+        self.nodes[victim].send_signal(signal.SIGKILL)
+        self.nodes[victim].wait()
+        for ex in quick + slow:
+            s = self.wait(ex, timeout=90)
+            self.assertEqual(s["status"], "COMPLETED", json.dumps(s, indent=2))
+            self.assertEqual(len(self.payment(ex)["StepSucceeded"]), 1, "exactly one recorded success for the charge")
+        took = "".join(self.node_log(n) for n in self.NODES if n != victim)
+        self.assertIn(f"taking over executions of a node that stopped heartbeating from={victim}", took)
+        self.await_dead(victim)
+        self.start_node(victim)
+
+    def test_c_kill_a_node_and_a_worker_mid_run(self):
+        # The node and the worker running the charges die together: the
+        # attempts' outcome is unknown and their new owners redeliver them.
+        victim = "node-3"
+        quick = [self.start(order(f"SH-C{i}", customer=f"cust-{i}")) for i in range(16)]
+        slow = [self.start_on(victim, order(f"SH-C9{i}", amount=4242)) for i in range(2)]
+        slow += [self.start(order(f"SH-C9{i}", amount=4242)) for i in range(2, 4)]
+        self.await_dispatched(slow)
+        python = self.c.workers[0]
+        python.send_signal(signal.SIGKILL)
+        self.nodes[victim].send_signal(signal.SIGKILL)
+        self.nodes[victim].wait()
+        self.c.spawn("python-restarted", [sys.executable, os.path.join(ROOT, "examples", "workers", "python", "order_workers.py")])
+        for ex in quick + slow:
+            s = self.wait(ex, timeout=90)
+            self.assertEqual(s["status"], "COMPLETED", json.dumps(s, indent=2))
+        for ex in slow:
+            p = self.payment(ex)
+            self.assertEqual(len(p["StepAttemptUncertain"]), 1, json.dumps(p, indent=1))
+            self.assertEqual(len(p["StepDispatched"]), 2, "the charge was redelivered")
+            self.assertTrue(p["StepDispatched"][0]["worker_session"] != p["StepDispatched"][1]["worker_session"])
+            self.assertEqual(len(p["StepSucceeded"]), 1, "exactly one recorded success for the charge")
+        self.start_node(victim)
 
 
 if __name__ == "__main__":

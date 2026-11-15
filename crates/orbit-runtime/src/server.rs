@@ -266,7 +266,7 @@ async fn auth(State(state): State<Shared>, mut req: Request, next: Next) -> Resp
 /// A per-worker identity may only use sessions it opened.
 pub(crate) fn authorize_session(state: &Shared, caller: &Caller, session: &str) -> ApiResult<()> {
     if let Some(id) = caller.identity() {
-        if let Some(owner) = engine(state).session_worker(session) {
+        if let Some(owner) = engine(state).session_worker_lookup(session) {
             if owner != id.id {
                 return Err(forbidden(format!(
                     "session belongs to worker `{owner}`, not `{}`",
@@ -281,7 +281,7 @@ pub(crate) fn authorize_session(state: &Shared, caller: &Caller, session: &str) 
 /// A per-worker identity may only report results for tokens issued to it.
 pub(crate) fn authorize_token(state: &Shared, caller: &Caller, token: &str) -> ApiResult<()> {
     if let Some(id) = caller.identity() {
-        if let Some(owner) = engine(state).token_worker(token) {
+        if let Some(owner) = engine(state).token_worker_lookup(token) {
             if owner != id.id {
                 return Err(forbidden(format!(
                     "task token was issued to worker `{owner}`, not `{}`",
@@ -643,7 +643,7 @@ async fn poll(
         let notified = state.changed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let task: Option<TaskAssignment> = engine(&state).poll(&req.worker_session_id)?;
+        let task: Option<TaskAssignment> = crate::shared::poll(&state, &req.worker_session_id)?;
         if let Some(t) = task {
             return Ok(Json(serde_json::to_value(t).unwrap_or_default()).into_response());
         }
@@ -853,6 +853,8 @@ pub async fn serve_node(
     // dependencies); choose one before any TLS configuration is built.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let changed = engine.changed.clone();
+    // Shared mode (`--cluster-mode shared`): the engine carries its context.
+    let shared = engine.shared_context();
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
         changed,
@@ -861,9 +863,15 @@ pub async fn serve_node(
         identities: config.identities,
     });
     let app = router(state.clone(), config.body_limit);
-    let app = crate::cluster::layer(app, cluster.clone(), state.clone());
+    let app = match &shared {
+        Some(ctx) => crate::shared::layer(app, ctx.clone(), state.clone()),
+        None => crate::cluster::layer(app, cluster.clone(), state.clone()),
+    };
     if let Some(node) = &cluster {
         crate::cluster::start(node.clone(), state.clone())?;
+    }
+    if let Some(ctx) = &shared {
+        crate::shared::start(ctx.clone(), state.clone())?;
     }
     let ticker = tokio::spawn(run_ticker(state.clone(), config.tick_interval));
     // One shutdown signal fanned out to every listener.
@@ -969,6 +977,9 @@ pub async fn serve_node(
         }
     };
     ticker.abort();
+    if let Some(ctx) = &shared {
+        ctx.stop();
+    }
     if let Some(g) = grpc {
         let _ = g.await;
     }

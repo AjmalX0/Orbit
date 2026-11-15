@@ -69,8 +69,9 @@ The schema is the same on both backends (`BIGINT` columns are `INTEGER` in SQLit
 | `execution_events` | `(execution_id, seq)` | The authoritative history: `event_type`, `step` (or null), `payload` (the event as JSON), `timestamp_ms`. Append-only. |
 | `worker_registry` | `worker_id` | Latest registration of each worker: `runtime`, `sdk`, `contracts` (JSON), `registered_at_ms`, `last_seen_ms`. |
 | `orbit_cluster` | `id` | PostgreSQL, cluster mode only. See [Cluster table](#cluster-table). |
+| `orbit_nodes`, `orbit_owners`, `orbit_tasks`, `orbit_inbox`, `orbit_sessions` | | PostgreSQL, shared mode only. See [Shared-mode tables](#shared-mode-tables). |
 
-Each batch of events and the matching `workflow_executions` update are written in one transaction. Worker sessions, tokens in flight and metrics are kept in memory only; sessions and tokens are rebuilt from the history on startup, and metrics start from zero.
+Each batch of events and the matching `workflow_executions` update are written in one transaction. Worker sessions, tokens in flight and metrics are kept in memory only; sessions and tokens are rebuilt from the history on startup, and metrics start from zero. Shared mode is the exception: it keeps worker sessions and the task queue in the shared-mode tables, so that every server sees them.
 
 The tables are an implementation detail. Read execution state through the [HTTP API](../reference/http-api.md), which applies the same fold the engine uses. Do not write to the tables: a modified history no longer matches what the engine decided.
 
@@ -87,6 +88,71 @@ Servers started with `--cluster` create one more table on first start, idempoten
 | `since_ms` | `BIGINT` | When the latest leader was elected. |
 
 The leader also holds a session-level advisory lock on its own election connection (`application_name` `orbit-cluster:<node id>`). See [Running several servers](cluster.md).
+
+### Shared-mode tables
+
+Servers started with `--cluster --cluster-mode shared` create five more tables on first start, idempotently, under an advisory lock; they also create the base schema under an advisory lock, because shared-mode servers usually start together. Other servers neither create nor read these tables, and the schema version stays `1`. Times ending in `_ms` are milliseconds since the Unix epoch; `heartbeat_ms` and `last_seen_ms` use the database clock, the others the clock of the server that wrote them.
+
+`orbit_nodes`: one row per server.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `node_id` | `TEXT`, primary key | `--node-id`. |
+| `incarnation` | `TEXT` | Random id of the running process; a restarted server gets a new one. |
+| `addr` | `TEXT` | `--advertise-addr`, or null. |
+| `heartbeat_ms` | `BIGINT` | Last heartbeat (every second). `0` after a graceful shutdown. |
+| `started_ms` | `BIGINT` | When the process registered. |
+
+`orbit_owners`: one row per running execution.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `execution_id` | `TEXT`, primary key | The execution. |
+| `root_id` | `TEXT` | The top-level execution of its tree: child workflows share their root's owner and move with it. |
+| `node_id` | `TEXT` | The owner. Indexed. |
+| `epoch` | `BIGINT` | `1` when the execution starts, incremented by every takeover. Every history append checks it in the same transaction (fencing). |
+| `since_ms` | `BIGINT` | When the current owner got it. |
+
+The row is deleted, in the same transaction, when the execution reaches a terminal status.
+
+`orbit_tasks`: the shared task queue, one row per offer of a worker task.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | `BIGSERIAL`, primary key | |
+| `execution_id`, `unit_key`, `attempt`, `offer` | | The unit and which offer of it this is (`offer` is the unit's dispatch count when it was scheduled). Unique together. |
+| `task_name`, `contract_version`, `language` | `TEXT` | What a worker must announce to get it (`language` from `using`, lowercase, or null). |
+| `payload` | `TEXT` | The task assignment as JSON, without token and deadline. |
+| `enqueued_ms` | `BIGINT` | When the unit was scheduled. Workers get the oldest matching row first. |
+| `state` | `TEXT` | `queued`, `claimed`, `done` (the result arrived), `cancelled` (the owner no longer needs it) or `cancel_sent` (the worker was told). |
+| `token`, `claimed_by`, `claimed_inc`, `claimed_session`, `claimed_worker`, `claimed_ms` | | The claim: token handed out, server and process that handed it out, worker session and worker. Indexed by `token` and `claimed_session`. |
+| `updated_ms` | `BIGINT` | Last change. |
+
+`orbit_inbox`: commands for an execution's owner, applied in `seq` order.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `seq` | `BIGSERIAL`, primary key | Order of arrival. |
+| `execution_id` | `TEXT` | The execution. Indexed with `seq`. |
+| `kind` | `TEXT` | `dispatched`, `complete`, `fail`, `uncertain`, `signal` or `cancel`. |
+| `token` | `TEXT` | The task token, for task-related kinds. |
+| `payload` | `TEXT` | The command as JSON. |
+| `created_ms` | `BIGINT` | When it was written. |
+| `done_ms`, `result` | | For `signal` and `cancel`: when the owner applied it and its reply, read by the server that is waiting to answer the client. |
+
+The owner deletes an entry (or, for `signal` and `cancel`, marks it done) in the same transaction as the events it caused.
+
+`orbit_sessions`: worker sessions, usable through any server.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `session_id` | `TEXT`, primary key | The `worker_session_id` returned by registration. |
+| `worker_id`, `runtime`, `contracts` | `TEXT` | From the registration (`contracts` as JSON). Indexed by `worker_id`. |
+| `node_id` | `TEXT` | The server that registered it. |
+| `registered_ms` | `BIGINT` | When it registered. |
+| `last_seen_ms` | `BIGINT` | Last poll, heartbeat or result, written by the servers in batches every 250 ms. |
+
+Every server deletes, every 30 seconds: sessions silent for four session timeouts, finished queue rows and inbox entries of executions that have no owner any more (after one minute, or four session timeouts if longer), and rows of servers that have been gone for an hour and own nothing.
 
 ## Retention
 
@@ -120,7 +186,7 @@ Stop the server, restore the database, and start the server. It recovers every n
 
 Without `--cluster`, one database belongs to one running server. The engine keeps the active executions, the worker sessions and the in-flight tokens in memory and assumes it is the only writer. Two servers on the same database would each dispatch the same tasks and append conflicting events. Nothing in the database prevents this, so make sure your deployment cannot start a second instance: one systemd unit, one container with a restart policy, or a Kubernetes `Deployment` with `replicas: 1` and the `Recreate` strategy.
 
-For availability, rely on fast restarts and recovery, or, with PostgreSQL, run several servers in cluster mode: they elect one leader, which is the only one that writes, and fence a deposed leader so it cannot write. See [Running several servers](cluster.md). You can also use the database's own replication and failover; servers reconnect to the new primary.
+For availability, rely on fast restarts and recovery, or, with PostgreSQL, run several servers in cluster mode: they elect one leader, which is the only one that writes, and fence a deposed leader so it cannot write. In shared mode every server writes, but each execution has one owner, and every append is fenced by the execution's ownership epoch. See [Running several servers](cluster.md). You can also use the database's own replication and failover; servers reconnect to the new primary.
 
 ## See also
 

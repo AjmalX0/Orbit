@@ -409,16 +409,25 @@ struct ServerArgs {
     /// Log format.
     #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     log_format: String,
-    /// Run as one of several servers on the same PostgreSQL database: one
-    /// leader serves, the others stand by and take over if it fails.
+    /// Run as one of several servers on the same PostgreSQL database. By
+    /// default one leader serves and the others stand by and take over if it
+    /// fails; see --cluster-mode.
     #[arg(long, env = "ORBIT_CLUSTER")]
     cluster: bool,
+    /// With --cluster: `standby` (one leader serves, the others stand by) or
+    /// `shared` (every server is active and they share executions and tasks).
+    #[arg(long, env = "ORBIT_CLUSTER_MODE", default_value = "standby", value_parser = ["standby", "shared"])]
+    cluster_mode: String,
+    /// Shared mode: seconds without a heartbeat after which a server is
+    /// considered dead and the others take over its executions (minimum 2).
+    #[arg(long, env = "ORBIT_NODE_TIMEOUT", default_value_t = 5)]
+    node_timeout: u64,
     /// This server's name in the cluster (default: the host name).
     #[arg(long, env = "ORBIT_NODE_ID", requires = "cluster")]
     node_id: Option<String>,
-    /// URL other servers give out to reach this one while it leads, e.g.
-    /// http://orbit-0.orbit:7233 (default: derived from --addr when it is
-    /// not a wildcard address).
+    /// URL other servers give out to reach this one while it leads, and that
+    /// shared mode lists in /v1/health, e.g. http://orbit-0.orbit:7233
+    /// (default: derived from --addr when it is not a wildcard address).
     #[arg(long, env = "ORBIT_ADVERTISE_ADDR", requires = "cluster")]
     advertise_addr: Option<String>,
 }
@@ -1103,8 +1112,16 @@ fn server(mut args: ServerArgs) -> Res {
     if args.cluster && !is_postgres {
         return Err("--cluster requires a PostgreSQL database (--db postgres://...): the servers share it for leader election and history".into());
     }
-    // In cluster mode the node starts as a standby with a read-only store.
-    let store = if args.cluster {
+    let shared_mode = args.cluster_mode == "shared";
+    if shared_mode && !args.cluster {
+        return Err("--cluster-mode shared requires --cluster".into());
+    }
+    // In cluster mode the node starts as a standby with a read-only store; in
+    // shared mode every node writes the executions it owns.
+    let store = if args.cluster && shared_mode {
+        orbit_runtime::store::PgStore::connect_with(&args.db, orbit_runtime::store::PgMode::Shared)
+            .map(orbit_runtime::Store::Postgres)
+    } else if args.cluster {
         orbit_runtime::store::PgStore::connect_with(
             &args.db,
             orbit_runtime::store::PgMode::ReadOnly,
@@ -1132,7 +1149,26 @@ fn server(mut args: ServerArgs) -> Res {
     if let Some(endpoint) = args.otlp_endpoint.as_deref().filter(|e| !e.is_empty()) {
         engine.enable_telemetry(orbit_runtime::telemetry::TelemetryConfig::new(endpoint));
     }
-    let cluster = args.cluster.then(|| {
+    let node_id = args
+        .node_id
+        .clone()
+        .unwrap_or_else(orbit_runtime::cluster::default_node_id);
+    let advertise_addr = args.advertise_addr.clone().or_else(|| {
+        let scheme = if args.tls_cert.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        (!args.addr.ip().is_unspecified()).then(|| format!("{scheme}://{}", args.addr))
+    });
+    if shared_mode {
+        let mut c = orbit_runtime::shared::SharedConfig::new(&args.db, &node_id);
+        c.advertise_addr = advertise_addr.clone();
+        c.node_timeout = std::time::Duration::from_secs(args.node_timeout.max(2));
+        engine = orbit_runtime::shared::attach(engine, c)
+            .map_err(|e| format!("cannot join the shared cluster: {e}"))?;
+    }
+    let cluster = (args.cluster && !shared_mode).then(|| {
         let scheme = if args.tls_cert.is_some() {
             "https"
         } else {

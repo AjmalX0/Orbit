@@ -81,7 +81,7 @@ Errors produced by ORBIT have this body:
 | `SIGNAL_PAYLOAD_INVALID` | 422 | `POST /v1/executions/{id}/signals/{name}` | The payload does not match the signal's declaration. The message names the path, for example `$.approved`. Nothing is recorded. |
 | `QUERY_FAILED` | 422 | `GET /v1/executions/{id}/queries/{name}` | Evaluating the query failed at runtime, for example with a division by zero. |
 | `RESOURCE_EXHAUSTED` | 429 | `POST /v1/executions` | `--max-active-executions` executions are already running. Nothing is started; retry later with the same `execution_id`. |
-| `STORAGE_ERROR` | 500 | any endpoint that reads or writes the database | The database operation failed. The message contains the backend error. Nothing was changed. On a cluster leader that was just deposed, the message starts with `fenced:`. |
+| `STORAGE_ERROR` | 500 | any endpoint that reads or writes the database | The database operation failed. The message contains the backend error. Nothing was changed. On a cluster leader that was just deposed, or in shared mode on a server that lost an execution to another server, the message starts with `fenced:`. |
 | `NOT_LEADER` | 503 | every route except `GET` routes, on a cluster standby | This server is a standby (`--cluster`). The body's `error` object adds `leader_node` and `leader_addr` (either may be `null`), the `x-orbit-leader` header carries the address, and `retry-after: 1` is set. Send the request to the leader, or retry. See [Running several servers](../runtime/cluster.md#standby-behavior). |
 
 Some errors are produced by the HTTP layer before a request reaches ORBIT. They have a plain-text body (`content-type: text/plain`), not the JSON envelope:
@@ -130,7 +130,7 @@ A client should check the status first, and parse the JSON error envelope only w
 
 ### GET /v1/health
 
-Liveness and version information. It never requires authentication. A single server binds its listener only after it has opened the database and recovered active executions, so a `200` also means the runtime is ready to serve. In cluster mode every server, leader or standby, answers `200`; use [`/v1/ready`](#get-v1ready) to find the leader.
+Liveness and version information. It never requires authentication. A single server binds its listener only after it has opened the database and recovered active executions, so a `200` also means the runtime is ready to serve. In cluster mode every server, leader or standby, answers `200`; use [`/v1/ready`](#get-v1ready) to find the leader, or in shared mode the servers that are live.
 
 Response `200`:
 
@@ -168,6 +168,19 @@ A cluster standby:
 | `term` | integer or null | The leadership term this server last saw; `null` without `--cluster`. |
 | `leader` | object or null | The current leader as `{"node_id": ..., "addr": ...}`, or `null`. |
 
+A server in shared mode (`--cluster --cluster-mode shared`) adds the fields below; `term` and `leader` are `null`, and `active_executions` counts the executions this server owns:
+
+```json
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.3.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":2,"role":"shared","node_id":"node-1","term":null,"leader":null,"owned_executions":0,"tasks_claimed":18,"nodes":[{"node_id":"node-1","addr":"http://127.0.0.1:46825","live":true,"heartbeat_age_ms":2,"owned_executions":0},{"node_id":"node-3","addr":"http://127.0.0.1:47377","live":true,"heartbeat_age_ms":248,"owned_executions":0}]}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `role` | string | `shared`. |
+| `owned_executions` | integer | Running executions this server owns: it ticks them and is the only one that appends to their history. |
+| `tasks_claimed` | integer | Tasks this server handed to workers from the shared queue since it started. |
+| `nodes` | array | Every server that is live or still owns executions: `node_id`, `addr` (its `--advertise-addr`), `live` (heartbeat younger than `--node-timeout`), `heartbeat_age_ms` and `owned_executions`. Refreshed every second. |
+
 ### GET /v1/ready
 
 Readiness for load balancers and orchestrators. It never requires authentication. It returns `200` on a single server and on a cluster leader, and `503` on a cluster standby, so a load balancer that checks it sends traffic only to the server that accepts writes.
@@ -185,6 +198,8 @@ Response `503` (cluster standby):
 ```
 
 A leader that cannot confirm its leadership within its lease (3 seconds) answers `503` until it can. See [Running several servers](../runtime/cluster.md#load-balancer-configuration).
+
+In shared mode every live server answers `200`, with the shared-mode fields of [`/v1/health`](#get-v1health) and `"ready": true`. A server answers `503` while it resumes the executions it owned before a restart, when it could not write its heartbeat within `--node-timeout`, and when another running server uses the same `--node-id`.
 
 ### GET /v1/metrics
 
@@ -538,7 +553,7 @@ Response `200`:
 | `execution_id` | string | The execution. |
 | `signal` | string | The signal name. |
 | `accepted` | boolean | Always `true` in a `200` response. |
-| `seq` | integer | Sequence number of the recorded `SignalReceived` event. |
+| `seq` | integer | Sequence number of the recorded `SignalReceived` event. In shared mode, a signal sent to a server that does not own the execution is passed to the owner, and the response waits for it; `seq` is `null` when the owner has not recorded the signal within 10 seconds (it is still recorded, once, when the owner gets to it). |
 
 Errors: `404 NOT_FOUND`; `409 EXECUTION_FINISHED` (checked first); `404 UNKNOWN_SIGNAL`; `413 PAYLOAD_TOO_LARGE`; `422 SIGNAL_PAYLOAD_INVALID`:
 
@@ -746,6 +761,8 @@ Response `200`:
 | `{"accepted": false, "reason": "unknown token (execution finished or token invalid)"}` | The token is unknown, or its execution has finished. |
 
 A success is accepted for any token issued for a step that is not yet resolved, including the token of an earlier attempt that timed out or was considered lost. See [Delivery guarantees](../runtime/guarantees.md#reconciliation).
+
+In shared mode, a result for an execution that another server owns is stored in that server's inbox and answered with `{"accepted": true}` once stored; the owner then records it as above (a contract violation as `OUTPUT_CONTRACT_VIOLATION`, a duplicate as `StaleResultIgnored`). A token whose execution has finished still gets `unknown token`. See [Shared mode](../runtime/cluster.md#shared-mode-several-active-servers).
 
 Errors: `400 INVALID_REQUEST` (`token is required`); `403 FORBIDDEN` when a per-worker identity reports for a token issued to another worker; `413 PAYLOAD_TOO_LARGE` when the output is larger than `--max-payload-bytes`. A refused output is not recorded and the attempt stays in flight, so the worker can still report a smaller result or a failure:
 

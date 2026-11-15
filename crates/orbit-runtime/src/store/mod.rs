@@ -22,6 +22,7 @@ use std::path::Path;
 
 pub(crate) use self::postgres::{session_client, CLUSTER_SCHEMA};
 pub use self::postgres::{PgMode, PgStore};
+pub(crate) use self::postgres::{SharedAppend, TaskOffer, UnitSync, NOW_MS, SHARED_SCHEMA};
 pub use self::sqlite::SqliteStore;
 
 #[derive(Debug)]

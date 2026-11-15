@@ -284,7 +284,7 @@ async fn gate(State(g): State<Gate>, req: Request, next: Next) -> Response {
 }
 
 /// Add `fields` to a JSON object response.
-async fn merge_json(resp: Response, fields: Value) -> Response {
+pub(crate) async fn merge_json(resp: Response, fields: Value) -> Response {
     if resp.status() != StatusCode::OK {
         return resp;
     }
