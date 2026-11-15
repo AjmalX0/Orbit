@@ -21,4 +21,4 @@ from .client import ApiError, Client
 from .worker import Context, TaskError, Worker
 
 __all__ = ["Worker", "Context", "TaskError", "Client", "ApiError"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

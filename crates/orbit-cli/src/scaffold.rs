@@ -116,7 +116,7 @@ diagnostics, hover, go to definition and completion as you type.
   "private": true,
   "type": "module",
   "dependencies": {
-    "orbit-lang": "^0.1.0"
+    "orbit-lang": "^0.2.0"
   }
 }
 "#;

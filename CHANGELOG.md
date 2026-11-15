@@ -1,18 +1,55 @@
 # Changelog
 
 All notable changes are listed here. The project follows
-[Semantic Versioning](https://semver.org/). The language, the IR (`orbit-ir/1`)
+[Semantic Versioning](https://semver.org/). The language, the IR (`orbit-ir/1`, `orbit-ir/2`)
 and the worker protocol (`orbit.worker.v1`) are versioned separately, as
 described in RFC-0001 §17.
 
-## Unreleased
+## [0.2.0] — 2026-11-15
 
-- Documentation website (landing page and full documentation), deployed to
-  GitHub Pages.
-- The server shuts down gracefully on `SIGTERM` as well as `SIGINT`; the
-  container image sets `STOPSIGNAL SIGINT`.
-- `orbit fmt` keeps Windows (CRLF) line endings.
-- The CLI exits quietly when its output pipe closes (`orbit logs --json | head`).
+### Language
+- **Signals and queries.** `signal <name> { ... }` declares a typed message a
+  workflow accepts; an `await <name>` step waits for it durably (with
+  `timeout`, failing with `SIGNAL_TIMEOUT`). Signals sent early are buffered and
+  delivered in order. `query <name> = <expr>` declares a typed, read-only view
+  of the execution state.
+- **Compute steps.** `compute <expr>` evaluates a deterministic expression in
+  the runtime, with no worker; its output type is inferred. New lambdas
+  (`x => ...`) and built-ins `map`, `filter`, `find`, `any`, `all`, `sum`.
+- **Static safety checks.** Task contracts can declare `compensated_by`; the
+  compiler warns about missing or mismatched compensations (W0601, W0602),
+  steps that never run or conditions that are always true (W0603, W0604),
+  signals nobody awaits (W0605) and waits without a timeout (W0606).
+  `orbit check --strict` / `orbit compile --strict` turn warnings into errors.
+- New diagnostics E0315–E0318 and E0415.
+
+### Tooling
+- `orbit compat <old> <new>`: reports breaking changes between two versions
+  of workflows and contracts (inputs, outputs, signals, queries) and the
+  version bump they require; JSON output for CI.
+- `orbit signal` and `orbit query`.
+- `orbit fmt` keeps Windows (CRLF) line endings. The CLI exits quietly when its
+  output pipe closes (`orbit logs --json | head`).
+
+### Runtime
+- `POST /v1/executions/{id}/signals/{name}` and
+  `GET /v1/executions/{id}/queries/{name}`; history events `SignalReceived`,
+  `SignalAwaitStarted`, `SignalDelivered`.
+- `orbit-ir/2` for workflows that use the new features. Workflows that do not
+  still compile to `orbit-ir/1` with unchanged definition hashes, so existing
+  deployments are unaffected. The runtime accepts both.
+- A failed compensation no longer stops the others: every remaining
+  compensation runs, and each failure is reported.
+- Graceful shutdown on `SIGTERM` as well as `SIGINT`; the container image sets
+  `STOPSIGNAL SIGINT`.
+- `float(Bool)` evaluates at run time, as the compiler allows.
+
+### SDKs
+- Python and TypeScript clients: `signal()` and `query()`.
+
+### Project
+- Documentation website with a landing page and complete documentation,
+  deployed to GitHub Pages.
 - `install.sh` explains how to install when a release has no binary for the
   platform (macOS: `cargo install orbit-lang`).
 

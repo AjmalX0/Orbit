@@ -35,7 +35,7 @@
 <section class="hero">
   <div class="wrap hero-grid">
     <div class="hero-copy">
-      <p class="eyebrow">Version 0.1.0 &middot; Apache-2.0</p>
+      <p class="eyebrow">Version 0.2.0 &middot; Apache-2.0</p>
       <h1>Write the workflow once. Run it reliably, in every language.</h1>
       <p class="lede">ORBIT is a declarative language and durable runtime for work that spans services. You describe the steps, their order and what happens when they fail. The compiler checks every step against its worker's contract before anything runs, and the runtime carries it through retries, timeouts, crashes and compensation.</p>
 
@@ -150,6 +150,68 @@
 </section>
 
 <section>
+  <div class="wrap split">
+    <div>
+      <h2 class="section-title">People in the loop, as part of the language</h2>
+      <p>Approvals, reviews and replies from other systems are typed <code>signal</code> declarations. An <code>await</code> step pauses durably until the signal arrives, or fails after its timeout and compensates what already happened. A <code>query</code> exposes the execution's state to anyone who asks.</p>
+      <p>The compiler checks both: a signal's payload is a typed record, every reader of it is type-checked, and the runtime rejects a malformed payload before it is recorded. <a href="docs/language/signals.html">Signals and queries</a></p>
+    </div>
+    <figure class="code-card" aria-label="A workflow that waits for an approval">
+      <figcaption><span>approval.orbit</span></figcaption>
+<pre><code><span class="k">signal</span> review { approved: <span class="t">Bool</span>, reviewer: <span class="t">String</span> }
+
+<span class="k">step</span> assess {
+    <span class="k">compute</span> { needs_approval: input.amount &gt;= <span class="n">1000.0</span> }
+}
+
+<span class="k">step</span> decision {
+    <span class="k">await</span> review
+    <span class="k">when</span> assess.needs_approval
+    <span class="k">timeout</span> <span class="n">2d</span>
+}
+
+<span class="k">query</span> status = {
+    approved: decision.approved
+    reviewer: decision.reviewer
+}</code></pre>
+    </figure>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap split">
+    <div>
+      <h2 class="section-title">Checked beyond types</h2>
+      <p>A task contract can declare the task that undoes it. Every step that calls it must then compensate with that task, or <code>orbit check --strict</code> fails the build. The same analysis reports steps that can never run, signals nothing waits for, and waits that could last forever.</p>
+      <p>Run it in CI and a workflow cannot reach production with an effect it has no way to undo. <a href="docs/language/safety.html">Static safety checks</a></p>
+    </div>
+<pre class="terminal"><code><span class="dim">$</span> orbit check --strict checkout.orbit
+<span class="err">warning[W0601]</span>: step `charge` calls `payments.charge` but has no compensation
+  <span class="dim">--&gt;</span> checkout.orbit:13:16
+   <span class="dim">|</span>
+<span class="dim">13 |</span>         worker "payments.charge"
+   <span class="dim">|</span>                <span class="err">^^^^^^^^^^^^^^^^^</span>
+   <span class="dim">=</span> help: add `compensate { worker "payments.refund" with { ... } }`
+
+error: 1 warning(s) treated as errors (--strict)</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <div>
+      <h2 class="section-title">Change workflows without breaking running work</h2>
+      <p>Every running execution keeps the exact definition it started with. <code>orbit compat</code> compares two versions and tells you whether callers, signal senders and query readers will still work, and which version number the change requires.</p>
+      <p><a href="docs/tooling/compat.html">Compatibility checks</a></p>
+    </div>
+<pre class="terminal wrap-lines"><code><span class="dim">$</span> orbit compat old.orbit new.orbit
+<span class="err">error</span>   workflow Invoice 1.4.0 → 1.5.0: input.amount: Float → Int: incompatible type: expected `Int`, found `Float`; breaking for callers without a major version bump; hint: bump the major version (1.4.0 → 2.0.0)
+<span class="err">error</span>   workflow Invoice 1.4.0 → 1.5.0: signal approve.approver: (added) → String: required field added without a default; breaking for senders of the signal without a major version bump; hint: bump the major version (1.4.0 → 2.0.0)
+error: compatibility check failed: 2 error(s), 0 warning(s)</code></pre>
+  </div>
+</section>
+
+<section class="band">
   <div class="wrap">
     <h2 class="section-title">What the language covers</h2>
     <div class="features">
@@ -159,11 +221,14 @@
       <div><h3>Fan-out</h3><p><code>for item in list</code> runs a step per element with its own retries and idempotency key, limited by <code>max_parallel</code>.</p></div>
       <div><h3>Child workflows</h3><p>Start another workflow as a durable child with a deterministic id, type-checked against its input and output.</p></div>
       <div><h3>Durable timers</h3><p><code>sleep 24h</code> survives restarts and needs no worker. Conditions decide at run time whether a step runs.</p></div>
+      <div><h3>Signals and queries</h3><p>Typed messages a workflow waits for, and typed read-only views of its state, declared in the workflow itself.</p></div>
+      <div><h3>Compute steps</h3><p>Small deterministic transformations with <code>map</code>, <code>filter</code> and <code>sum</code>, evaluated by the runtime and type-checked like everything else.</p></div>
+      <div><h3>Safe evolution</h3><p>Immutable versions, content hashes, and <code>orbit compat</code> to catch breaking changes to inputs, outputs, signals and queries.</p></div>
     </div>
   </div>
 </section>
 
-<section class="band">
+<section>
   <div class="wrap">
     <h2 class="section-title">Workers in the language you already use</h2>
     <p class="section-lede">Business logic stays in your services. Each SDK registers task handlers, receives work, and reports results; all six are tested against the real runtime, including over mutual TLS.</p>
@@ -181,7 +246,7 @@
   </div>
 </section>
 
-<section>
+<section class="band">
   <div class="wrap">
     <h2 class="section-title">Guarantees, stated precisely</h2>
     <dl class="guarantees">

@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -20,11 +20,11 @@ readme = "README.md"
 repository = "https://github.com/AjmalX0/Orbit"
 
 [workspace.dependencies]
-orbit-syntax = { path = "crates/orbit-syntax", version = "0.1.0" }
-orbit-ir = { path = "crates/orbit-ir", version = "0.1.0" }
-orbit-compiler = { path = "crates/orbit-compiler", version = "0.1.0" }
-orbit-runtime = { path = "crates/orbit-runtime", version = "0.1.0" }
-orbit-worker = { path = "crates/orbit-worker", version = "0.1.0" }
+orbit-syntax = { path = "crates/orbit-syntax", version = "0.2.0" }
+orbit-ir = { path = "crates/orbit-ir", version = "0.2.0" }
+orbit-compiler = { path = "crates/orbit-compiler", version = "0.2.0" }
+orbit-runtime = { path = "crates/orbit-runtime", version = "0.2.0" }
+orbit-worker = { path = "crates/orbit-worker", version = "0.2.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"

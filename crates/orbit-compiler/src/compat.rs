@@ -463,6 +463,10 @@ fn compare_workflows(o: &WorkflowIr, n: &WorkflowIr, r: &mut Report) {
     for d in &deltas {
         let who = if d.path.starts_with("input") {
             "callers"
+        } else if d.path.starts_with("signal ") {
+            "senders of the signal"
+        } else if d.path.starts_with("query ") {
+            "readers of the query"
         } else {
             "consumers of results"
         };

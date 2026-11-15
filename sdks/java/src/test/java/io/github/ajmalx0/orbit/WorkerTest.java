@@ -145,7 +145,7 @@ class WorkerTest {
 
                 assertEquals("Bearer wt", f.authHeader, "auth header");
                 assertEquals("java", f.registerBody.path("runtime").asText());
-                assertEquals("orbit-java/0.1.0", f.registerBody.path("sdk").asText());
+                assertEquals("orbit-java/0.2.0", f.registerBody.path("sdk").asText());
                 assertEquals("java-test", f.registerBody.path("worker_id").asText());
                 assertEquals(5, f.registerBody.path("contracts").size());
                 assertEquals(1, f.unregistrations, "unregister on stop");

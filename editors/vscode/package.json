@@ -2,7 +2,7 @@
   "name": "orbit-lang",
   "displayName": "ORBIT",
   "description": "ORBIT orchestration language: syntax highlighting, live diagnostics, hover, go to definition, completion, outline and formatting",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "orbit-lang",
   "license": "Apache-2.0",
   "repository": {

@@ -167,7 +167,8 @@ inventory reservation that already succeeded and records every decision
 +    28ms  #22  WorkflowFailed            error=CARD_DECLINED step `process_payment` failed: charge of 9000 USD declined
 ```
 
-More examples: [`examples/fulfilment.orbit`](examples/fulfilment.orbit) (fan-out
+More examples: [`examples/approval.orbit`](examples/approval.orbit) (signals,
+queries and compute steps), [`examples/fulfilment.orbit`](examples/fulfilment.orbit) (fan-out
 and a child workflow), [`examples/polyglot.orbit`](examples/polyglot.orbit)
 (Python, TypeScript, Go and Rust in one workflow), `java_hello.orbit`,
 `csharp_hello.orbit`, and `http_ping.orbit` (the built-in HTTP adapter). Start
@@ -179,8 +180,17 @@ your own project with `orbit init my-project`.
 `coalesce`, dependencies from data references, conditions (`when`), retries
 with `non_retryable` codes, attempt, queue and workflow timeouts, idempotency
 keys, durable `sleep`, compensation (Saga), fan-out (`for item in list`,
-`max_parallel`), and child workflows (`workflow "Name"`). Errors come with
+`max_parallel`), child workflows (`workflow "Name"`), typed signals and queries
+for people and external systems in the loop (`signal`, `await`, `query`), and
+deterministic `compute` steps with `map`/`filter`/`sum`. Errors come with
 stable codes, source locations and suggestions.
+
+**Checked before it runs:** beyond type-checking every step against its
+worker's contract, the compiler finds missing compensations (`compensated_by`
+on contracts), steps that can never run, signals nothing waits for and waits
+without a timeout; `orbit check --strict` makes them build failures.
+`orbit compat old.orbit new.orbit` reports breaking changes to inputs, outputs,
+signals and queries, and the version bump they require.
 
 **Runtime:** event-sourced and crash-safe. SQLite or PostgreSQL storage.
 At-least-once delivery with reconciliation of uncertain attempts. The worker
@@ -203,7 +213,7 @@ against the real runtime, including over mutual TLS.
 | Compiler | `crates/orbit-compiler` | imports, name resolution, type checker, dependency graph, child-workflow ordering, IR lowering |
 | IR | `crates/orbit-ir` | `orbit-ir/1`: types, payload validation, pure expression evaluator, invariants, definition hash |
 | Runtime | `crates/orbit-runtime` | engine and pure decider, SQLite/PostgreSQL, dispatch, fan-out, children, recovery, HTTP API, gRPC, identities, TLS/mTLS, OpenTelemetry |
-| CLI | `crates/orbit-cli` (crate `orbit-lang`) | `init check validate compile fmt graph server deploy run status inspect logs cancel ps workers token lsp` |
+| CLI | `crates/orbit-cli` (crate `orbit-lang`) | `init check validate compile fmt compat graph server deploy run status inspect logs signal query cancel ps workers token lsp` |
 | SDKs | `sdks/python`, `sdks/typescript`, `sdks/go`, `sdks/java`, `sdks/csharp`, `crates/orbit-worker` | one per language |
 | Worker protocol | `protocol/` | canonical `.proto`; HTTP/JSON and gRPC bindings |
 | Specification | `specification/` | RFC-0001 with the implementation record, EBNF grammar |
@@ -247,8 +257,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status and license
 
-Version 0.1: a single-node runtime. Next: multi-node execution sharing
-PostgreSQL, signals and queries, and `orbit test` / `replay` / `simulate`
-([RFC-0001 Appendix A.3](specification/RFC-0001.md#a3-known-gaps-tracked-for-v02)).
+Version 0.2: a single-node runtime. Next: multi-node execution sharing
+PostgreSQL, and `orbit test` / `replay` / `simulate`
+([RFC-0001 Appendix A.4](specification/RFC-0001.md#a4-known-gaps)).
 
 Licensed under the [Apache License 2.0](LICENSE).
