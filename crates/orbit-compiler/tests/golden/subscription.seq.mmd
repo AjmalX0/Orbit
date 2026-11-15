@@ -1,0 +1,14 @@
+sequenceDiagram
+    %% Subscription@1.0.0
+    %% sha256:1d7a374edd1e400b4fb61a0d851ea74a99b4620006f6be5f06ce7a9421d6f8f1
+    participant W as Subscription
+    participant payments
+    participant notifications
+    W->>+payments: charge: payments.charge@1.0.0
+    payments-->>-W: PaymentResult
+    W->>+notifications: receipt: notifications.send@1.0.0
+    notifications-->>-W: { delivered }
+    Note over W: next_period: sleep 30d
+    opt when input.period < input.periods
+        W->>W: continue_as_new: next run with { customer_id, amount, periods, period, charged }
+    end

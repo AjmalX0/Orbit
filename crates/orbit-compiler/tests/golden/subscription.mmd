@@ -1,0 +1,13 @@
+flowchart TD
+    %% Subscription@1.0.0
+    %% sha256:1d7a374edd1e400b4fb61a0d851ea74a99b4620006f6be5f06ce7a9421d6f8f1
+    classDef compensation stroke-dasharray: 4 3
+    classDef signal stroke-dasharray: 2 2
+    charge["charge<br/><small>payments.charge@1.0.0</small><br/><small>retry 5 attempts, exponential 1m..1h</small><br/><small>idempotency key</small>"]
+    receipt["receipt<br/><small>notifications.send@1.0.0</small>"]
+    charge --> receipt
+    next_period["next_period<br/><small>sleep 30d</small>"]
+    receipt --> next_period
+    continue_as_new[["continue as new<br/><small>when input.period #lt; input.periods</small><br/><small>next input { customer_id, amount, periods, period, charged }</small>"]]
+    next_period --> continue_as_new
+    continue_as_new -. next run .-> charge

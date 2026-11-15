@@ -1,0 +1,15 @@
+digraph "Subscription" {
+  // Subscription@1.0.0
+  // sha256:1d7a374edd1e400b4fb61a0d851ea74a99b4620006f6be5f06ce7a9421d6f8f1
+  rankdir=TB;
+  node [shape=box, style=rounded, fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=10];
+  "charge" [label="charge\npayments.charge@1.0.0\nretry 5 attempts, exponential 1m..1h\nidempotency key"];
+  "receipt" [label="receipt\nnotifications.send@1.0.0"];
+  "charge" -> "receipt";
+  "next_period" [label="next_period\nsleep 30d"];
+  "receipt" -> "next_period";
+  "continue_as_new" [label="continue as new\nwhen input.period < input.periods\nnext input { customer_id, amount, periods, period, charged }", peripheries=2];
+  "next_period" -> "continue_as_new";
+  "continue_as_new" -> "charge" [style=dashed, constraint=false, label="next run"];
+}

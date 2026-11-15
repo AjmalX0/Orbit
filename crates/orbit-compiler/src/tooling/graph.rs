@@ -26,6 +26,42 @@ pub enum NodeKind {
     Conditional,
     Compensation,
     Signal,
+    /// The workflow's `continue_as_new`: after the final steps, with a dashed
+    /// `next run` edge back to the first steps.
+    ContinueAsNew,
+}
+
+/// Node id of the `continue_as_new` node (a keyword, so never a step id).
+pub const CONTINUE_ID: &str = "continue_as_new";
+
+/// The label lines of a `continue_as_new`: `continue as new`, its condition
+/// (`always` without `when`) and the fields of the next run's input.
+pub fn continue_lines(c: &orbit_ir::ContinueAsNewIr) -> Vec<String> {
+    vec![
+        "continue as new".into(),
+        match &c.condition {
+            Some(e) => format!("when {}", pretty::expr(e)),
+            None => "always".into(),
+        },
+        format!("next input {}", input_fields(&c.input)),
+    ]
+}
+
+/// `{ a, b }` for an object literal (the fields it sets), the expression
+/// otherwise.
+pub fn input_fields(e: &orbit_ir::Expr) -> String {
+    match e {
+        orbit_ir::Expr::Object { fields } if fields.is_empty() => "{}".into(),
+        orbit_ir::Expr::Object { fields } => format!(
+            "{{ {} }}",
+            fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => pretty::expr(other),
+    }
 }
 
 /// Node id prefix of a scope: ``, `on_failure__`, `on_event_location__`.
@@ -136,7 +172,50 @@ pub fn scope_graph(wf: &WorkflowIr, scope: Scope, signal_nodes: bool) -> ScopeGr
             edges.push((id.clone(), cid, Some("compensate".into()), true));
         }
     }
+    if let (Scope::Main, Some(c)) = (scope, &wf.continue_as_new) {
+        // Evaluated once every step has finished: after the steps nothing
+        // depends on; the next run starts again at the steps without
+        // dependencies.
+        let steps = scope_steps(wf, scope);
+        let sinks = steps
+            .iter()
+            .filter(|s| !steps.iter().any(|t| t.dependencies.contains(&s.id)));
+        let roots = steps.iter().filter(|s| s.dependencies.is_empty());
+        nodes.push(Node {
+            id: CONTINUE_ID.into(),
+            lines: continue_lines(c),
+            kind: NodeKind::ContinueAsNew,
+        });
+        for s in sinks {
+            edges.push((s.id.clone(), CONTINUE_ID.into(), None, false));
+        }
+        for s in roots {
+            edges.push((
+                CONTINUE_ID.into(),
+                s.id.clone(),
+                Some("next run".into()),
+                true,
+            ));
+        }
+    }
     ScopeGraph { nodes, edges }
+}
+
+impl ScopeGraph {
+    /// The edges to print with node `n`: those into it, except the
+    /// `next run` edges out of `continue_as_new`, which follow that node.
+    pub fn edges_at(&self, n: &Node) -> Vec<&(String, String, Option<String>, bool)> {
+        self.edges
+            .iter()
+            .filter(|e| {
+                if n.kind == NodeKind::ContinueAsNew {
+                    e.1 == n.id || e.0 == n.id
+                } else {
+                    e.1 == n.id && e.0 != CONTINUE_ID
+                }
+            })
+            .collect()
+    }
 }
 
 /// Header facts shown as a comment: version, hash, timeout, limits.
@@ -202,6 +281,7 @@ fn mermaid_node(n: &Node) -> String {
         NodeKind::Conditional => format!("{}{{{{\"{label}\"}}}}", n.id),
         NodeKind::Compensation => format!("{}([\"{label}\"]):::compensation", n.id),
         NodeKind::Signal => format!("{}>\"{label}\"]:::signal", n.id),
+        NodeKind::ContinueAsNew => format!("{}[[\"{label}\"]]", n.id),
     }
 }
 
@@ -217,7 +297,8 @@ fn mermaid_edge(from: &str, to: &str, label: &Option<String>, dashed: bool) -> S
 /// Mermaid flowchart. Steps are rectangles, conditional steps hexagons,
 /// compensations dashed stadiums linked from the step they undo, signals
 /// flags feeding their `await` step, and each outcome handler and event block
-/// a subgraph.
+/// a subgraph. A `continue_as_new` is a subroutine node after the final
+/// steps, with a dashed `next run` edge back to the first steps.
 pub fn mermaid(wf: &WorkflowIr) -> String {
     let mut out = String::from("flowchart TD\n");
     for h in header(wf) {
@@ -242,7 +323,7 @@ pub fn mermaid(wf: &WorkflowIr) -> String {
         };
         for n in &g.nodes {
             let _ = writeln!(out, "{indent}{}", mermaid_node(n));
-            for (from, to, label, dashed) in g.edges.iter().filter(|e| e.1 == n.id) {
+            for (from, to, label, dashed) in g.edges_at(n) {
                 let _ = writeln!(out, "{indent}{}", mermaid_edge(from, to, label, *dashed));
             }
         }
@@ -292,12 +373,17 @@ pub fn dot(wf: &WorkflowIr) -> String {
                 NodeKind::Conditional => ", shape=hexagon, style=\"\"",
                 NodeKind::Compensation => ", style=\"rounded,dashed\"",
                 NodeKind::Signal => ", shape=cds, style=dashed",
+                NodeKind::ContinueAsNew => ", peripheries=2",
             };
             let _ = writeln!(out, "{indent}\"{}\" [label=\"{label}\"{attrs}];", n.id);
-            for (from, to, label, dashed) in g.edges.iter().filter(|e| e.1 == n.id) {
+            for (from, to, label, dashed) in g.edges_at(n) {
                 let mut attrs = vec![];
                 if *dashed {
                     attrs.push("style=dashed".to_string());
+                }
+                if from == CONTINUE_ID {
+                    // A back edge: keep the steps ranked top to bottom.
+                    attrs.push("constraint=false".to_string());
                 }
                 if let Some(l) = label {
                     attrs.push(format!("label=\"{}\"", dot_escape(l)));
@@ -355,7 +441,9 @@ fn seq_text(s: &str) -> String {
 /// child workflows, signals from outside (`Sender`) and timers. Steps appear
 /// in execution order; steps that can run concurrently are drawn one after
 /// the other. Conditional steps are `opt` blocks, `for` steps `loop` blocks,
-/// and compensations and handlers are `opt` blocks at the end.
+/// a `continue_as_new` is a message from the workflow to itself (in an `opt`
+/// block when it has a condition), and compensations and handlers are `opt`
+/// blocks at the end.
 pub fn sequence(wf: &WorkflowIr) -> String {
     let mut participants: Vec<(String, String)> = vec![];
     let mut body = String::new();
@@ -433,6 +521,22 @@ pub fn sequence(wf: &WorkflowIr) -> String {
         }
     };
     steps(Scope::Main, "    ", &mut body, &mut participants);
+    if let Some(c) = &wf.continue_as_new {
+        let next = format!(
+            "W->>W: continue_as_new: next run with {}",
+            seq_text(&input_fields(&c.input))
+        );
+        match &c.condition {
+            Some(e) => {
+                let _ = writeln!(body, "    opt when {}", seq_text(&pretty::expr(e)));
+                let _ = writeln!(body, "        {next}");
+                body.push_str("    end\n");
+            }
+            None => {
+                let _ = writeln!(body, "    {next}");
+            }
+        }
+    }
     let comps: Vec<&StepIr> = wf
         .steps
         .iter()
@@ -552,6 +656,76 @@ mod tests {
         assert!(m.contains("subgraph on_cancel[\"on cancel\"]"));
         let d = dot(&wfs[0]);
         assert!(d.contains("subgraph \"cluster_on_failure\""));
+    }
+
+    #[test]
+    fn subscription_golden_outputs() {
+        let wfs = example("subscription.orbit");
+        golden("subscription.mmd", &mermaid(&wfs[0]));
+        golden("subscription.dot", &dot(&wfs[0]));
+        golden("subscription.seq.mmd", &sequence(&wfs[0]));
+    }
+
+    #[test]
+    fn continue_as_new_follows_the_final_steps_and_loops_back() {
+        let wfs = example("subscription.orbit");
+        let m = mermaid(&wfs[0]);
+        assert!(
+            m.contains("continue_as_new[[\"continue as new<br/><small>when input.period #lt; input.periods</small>"),
+            "{m}"
+        );
+        assert!(m.contains("    next_period --> continue_as_new\n"), "{m}");
+        assert!(
+            m.contains("    continue_as_new -. next run .-> charge\n"),
+            "{m}"
+        );
+        // The back edge comes after the node it starts from.
+        assert!(m.find("continue_as_new[[").unwrap() < m.find("-. next run").unwrap());
+        let d = dot(&wfs[0]);
+        assert!(
+            d.contains("\"continue_as_new\" -> \"charge\" [style=dashed, constraint=false, label=\"next run\"];"),
+            "{d}"
+        );
+        let s = sequence(&wfs[0]);
+        assert!(s.contains("    opt when input.period < input.periods\n        W->>W: continue_as_new: next run with { customer_id, amount, periods, period, charged }\n    end\n"), "{s}");
+
+        // Without `when`: always; several first and final steps.
+        let c = crate::compile_str(
+            "loop.orbit",
+            r#"
+workflow Poll {
+    version "1.0.0"
+    input { cursor: Int = 0 }
+    step a { compute input.cursor }
+    step b { compute input.cursor + 1 }
+    step c { compute a + 1 }
+    continue_as_new with { cursor: c + b }
+}
+"#,
+        );
+        assert!(!c.has_errors(), "{}", c.render_diagnostics(false));
+        let m = mermaid(&c.workflows[0]);
+        assert!(
+            m.contains("<small>always</small><br/><small>next input { cursor }</small>"),
+            "{m}"
+        );
+        for edge in [
+            "b --> continue_as_new",
+            "c --> continue_as_new",
+            "continue_as_new -. next run .-> a",
+            "continue_as_new -. next run .-> b",
+        ] {
+            assert!(m.contains(edge), "{edge}: {m}");
+        }
+        assert!(!m.contains("a --> continue_as_new"), "{m}");
+        let s = sequence(&c.workflows[0]);
+        assert!(
+            s.contains("\n    W->>W: continue_as_new: next run with { cursor }\n"),
+            "{s}"
+        );
+        assert!(!s.contains("opt when"), "{s}");
+        // Workflows without it are drawn as before.
+        assert!(!mermaid(&example("approval.orbit")[0]).contains("continue_as_new"));
     }
 
     #[test]
