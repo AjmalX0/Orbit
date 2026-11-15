@@ -103,34 +103,38 @@ fn nanos(ms: u64) -> String {
     (ms as u128 * 1_000_000).to_string()
 }
 
-/// One OTLP span.
-fn span(
-    trace: &str,
-    id: &str,
-    parent: Option<&str>,
+/// One finished span, before OTLP encoding.
+struct Span<'a> {
+    trace: &'a str,
+    id: &'a str,
+    parent: Option<&'a str>,
     name: String,
-    start: u64,
-    end: u64,
+    start_ms: u64,
+    end_ms: u64,
     attrs: Vec<Value>,
     error: Option<String>,
-) -> Value {
-    let mut s = json!({
-        "traceId": trace,
-        "spanId": id,
-        "name": name,
-        "kind": 1,
-        "startTimeUnixNano": nanos(start),
-        "endTimeUnixNano": nanos(end.max(start)),
-        "attributes": attrs,
-        "status": match &error {
-            Some(m) => json!({ "code": 2, "message": m }),
-            None => json!({ "code": 1 }),
-        },
-    });
-    if let Some(p) = parent {
-        s["parentSpanId"] = json!(p);
+}
+
+impl Span<'_> {
+    fn encode(self) -> Value {
+        let mut s = json!({
+            "traceId": self.trace,
+            "spanId": self.id,
+            "name": self.name,
+            "kind": 1,
+            "startTimeUnixNano": nanos(self.start_ms),
+            "endTimeUnixNano": nanos(self.end_ms.max(self.start_ms)),
+            "attributes": self.attrs,
+            "status": match &self.error {
+                Some(m) => json!({ "code": 2, "message": m }),
+                None => json!({ "code": 1 }),
+            },
+        });
+        if let Some(p) = self.parent {
+            s["parentSpanId"] = json!(p);
+        }
+        s
     }
-    s
 }
 
 /// Spans finished by one committed batch of events.
@@ -155,16 +159,19 @@ pub fn spans_for(state: &ExecutionState, ctx: &TraceContext, batch: &[HistoryEve
                 attrs.push(attr("orbit.redelivery", true));
             }
             let id = unit_span_id(&state.id, key, u.dispatch_count.max(1));
-            Some(span(
-                &ctx.trace_id,
-                &id,
-                Some(&root),
-                format!("step {key}"),
-                start,
-                h.timestamp_ms,
-                attrs,
-                error,
-            ))
+            Some(
+                Span {
+                    trace: &ctx.trace_id,
+                    id: &id,
+                    parent: Some(&root),
+                    name: format!("step {key}"),
+                    start_ms: start,
+                    end_ms: h.timestamp_ms,
+                    attrs,
+                    error,
+                }
+                .encode(),
+            )
         };
         let s = match &h.event {
             Event::StepSucceeded { step, .. } => ended(step, None, "succeeded"),
@@ -202,16 +209,19 @@ pub fn spans_for(state: &ExecutionState, ctx: &TraceContext, batch: &[HistoryEve
                             .unwrap_or_else(|| state.status.as_str().to_string()),
                     ),
                 };
-                Some(span(
-                    &ctx.trace_id,
-                    &root,
-                    ctx.parent_span_id.as_deref(),
-                    format!("workflow {}", state.workflow),
-                    state.created_at_ms,
-                    h.timestamp_ms,
-                    attrs,
-                    error,
-                ))
+                Some(
+                    Span {
+                        trace: &ctx.trace_id,
+                        id: &root,
+                        parent: ctx.parent_span_id.as_deref(),
+                        name: format!("workflow {}", state.workflow),
+                        start_ms: state.created_at_ms,
+                        end_ms: h.timestamp_ms,
+                        attrs,
+                        error,
+                    }
+                    .encode(),
+                )
             }
             _ => None,
         };
