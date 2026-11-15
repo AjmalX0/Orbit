@@ -235,6 +235,35 @@ class EndToEnd(unittest.TestCase):
         released = sorted(k for k, u in s["units"].items() if k.startswith("compensate:") and u["status"] == "SUCCEEDED")
         self.assertEqual(released, [f"compensate:reserve[{i}]" for i in range(3)])
 
+    def test_signals_queries_and_compute_steps(self):
+        approval = os.path.join(ROOT, "examples", "approval.orbit")
+        self.c.cli("deploy", approval)
+        start = lambda oid, amount: self.c.post("/v1/executions", {"workflow": "OrderApproval", "input": {"order_id": oid, "customer_id": "c-1", "amount": amount}})["execution_id"]
+        # Small orders need no approval: the await step is skipped.
+        s = self.c.wait(start("S-1", 50.0))
+        self.assertEqual(s["status"], "COMPLETED")
+        self.assertEqual(s["units"]["decision"]["status"], "SKIPPED")
+        self.assertEqual(s["output"], {"status": "charged", "transaction_id": "tx-S-1"})
+        # Large orders wait for a typed signal; the query shows where they stand.
+        big = start("S-2", 2500.0)
+        deadline = time.time() + 10
+        while self.c.get(f"/v1/executions/{big}")["units"].get("decision", {}).get("status") != "WAITING":
+            self.assertLess(time.time(), deadline, "await step did not start")
+            time.sleep(0.1)
+        q = json.loads(self.c.cli("query", big, "status").stdout)
+        self.assertEqual(q, {"needs_approval": True, "approved": None, "reviewer": None, "charged": False})
+        bad = self.c.cli("signal", big, "review", "--data", '{"approved": "yes"}', check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("SIGNAL_PAYLOAD_INVALID", bad.stderr)
+        sys.path.insert(0, os.path.join(ROOT, "sdks", "python"))
+        from orbit_sdk import Client
+        Client(self.c.url).signal(big, "review", {"approved": True, "reviewer": "dana"})
+        s = self.c.wait(big)
+        self.assertEqual(s["status"], "COMPLETED")
+        self.assertEqual(s["output"]["transaction_id"], "tx-S-2")
+        self.assertEqual(Client(self.c.url).query(big, "status")["reviewer"], "dana")
+        self.assertIn("SignalDelivered", self.c.cli("logs", big).stdout)
+
     def test_z_crash_recovery(self):
         # amount 4242 makes the charge take 3s; kill the runtime while it runs.
         ex = self.start(order("A-5", amount=4242))

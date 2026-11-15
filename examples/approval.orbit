@@ -1,0 +1,66 @@
+// Human-in-the-loop approval with typed signals, queries and compute steps.
+//
+// Orders of 1000 or more wait for a reviewer's decision, sent as a typed
+// `review` signal (`orbit signal <id> review --data '{...}'`). Anyone can ask
+// where an order stands with the `status` query (`orbit query <id> status`).
+//
+// Workers: examples/workers/python/order_workers.py and
+// examples/workers/typescript/order_workers.ts.
+
+import "contracts.orbit"
+
+workflow OrderApproval {
+    version "1.0.0"
+    description "Charge an order, with a reviewer's approval above a threshold"
+    input { order_id: String, customer_id: String, amount: Float, currency: String = "USD" }
+    output { status: String, transaction_id: String? }
+
+    signal review { approved: Bool, reviewer: String, comment: String? }
+
+    // Deterministic logic, evaluated by the runtime: no worker needed.
+    step assess {
+        compute {
+            needs_approval: input.amount >= 1000.0
+            rounded: float(int(input.amount * 100.0)) / 100.0
+        }
+    }
+
+    step decision {
+        await review
+        when assess.needs_approval
+        timeout 2d
+    }
+
+    step charge {
+        worker "payments.charge"
+        using python
+        when !assess.needs_approval || coalesce(decision.approved, false)
+        with { order_id: input.order_id, amount: assess.rounded, currency: input.currency }
+        idempotency_key: "charge-" + input.order_id
+        compensate {
+            worker "payments.refund"
+            with { transaction_id: charge.transaction_id, amount: assess.rounded }
+        }
+    }
+
+    step notify {
+        worker "notifications.send"
+        after charge
+        with {
+            customer_id: input.customer_id
+            message: if is_null(charge) then "Your order was not approved" else "Your order is confirmed"
+        }
+    }
+
+    query status = {
+        needs_approval: assess.needs_approval
+        approved: decision.approved
+        reviewer: decision.reviewer
+        charged: !is_null(charge)
+    }
+
+    return {
+        status: if is_null(charge) then "rejected" else "charged"
+        transaction_id: charge.transaction_id
+    }
+}

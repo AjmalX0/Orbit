@@ -166,6 +166,28 @@ export class Client {
   async wait(executionId: string, timeoutMs = 30_000): Promise<any> {
     return (await this.request("GET", `/v1/executions/${encodeURIComponent(executionId)}/wait?timeout_ms=${timeoutMs}`)).body;
   }
+
+  /**
+   * Send a typed signal declared with `signal <name> { ... }` in the workflow.
+   * The runtime validates the payload; returns the history sequence number.
+   */
+  async signal(executionId: string, name: string, payload: Json = {}): Promise<number> {
+    const r = await this.request<{ seq: number }>(
+      "POST",
+      `/v1/executions/${encodeURIComponent(executionId)}/signals/${encodeURIComponent(name)}`,
+      payload,
+    );
+    return r.body.seq;
+  }
+
+  /** Evaluate a query declared with `query <name> = ...` against the current state. */
+  async query<T = any>(executionId: string, name: string): Promise<T> {
+    const r = await this.request<{ value: T }>(
+      "GET",
+      `/v1/executions/${encodeURIComponent(executionId)}/queries/${encodeURIComponent(name)}`,
+    );
+    return r.body.value;
+  }
 }
 
 /** Information about the attempt being executed. */

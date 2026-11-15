@@ -351,6 +351,42 @@ fn compare_workflows(o: &WorkflowIr, n: &WorkflowIr, r: &mut Report) {
         "output",
         &mut deltas,
     );
+    // Signals are inputs sent by other systems; queries are outputs read by them.
+    for (sig, old_ty) in &o.signals {
+        let path = format!("signal {sig}");
+        match n.signals.get(sig) {
+            Some(new_ty) => walk(old_ty, new_ty, Flow::Accept, true, &path, &mut deltas),
+            None => push(
+                &mut deltas,
+                &path,
+                Some(old_ty),
+                None,
+                true,
+                "signal removed: senders get UNKNOWN_SIGNAL",
+            ),
+        }
+    }
+    for (q, old_q) in &o.queries {
+        let path = format!("query {q}");
+        match n.queries.get(q) {
+            Some(new_q) => walk(
+                &old_q.output_type,
+                &new_q.output_type,
+                Flow::Produce,
+                false,
+                &path,
+                &mut deltas,
+            ),
+            None => push(
+                &mut deltas,
+                &path,
+                Some(&old_q.output_type),
+                None,
+                true,
+                "query removed: readers get UNKNOWN_QUERY",
+            ),
+        }
+    }
     dedupe(&mut deltas);
     let breaking = deltas.iter().any(|d| d.breaking);
     let changed_hash = definition_hash(o) != definition_hash(n);

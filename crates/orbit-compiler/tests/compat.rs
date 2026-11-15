@@ -379,3 +379,23 @@ fn json_report_format() {
     assert_eq!(f["new_type"], "Int");
     assert_eq!(f["hint"], "bump the major version (1.4.0 → 2.0.0)");
 }
+
+#[test]
+fn removing_a_signal_or_query_is_breaking() {
+    let old = orbit_compiler::compile_str(
+        "old.orbit",
+        r#"workflow W { version "1.0.0" signal go { ok: Bool } step w { await go timeout 1d } query q = w.ok }"#,
+    );
+    let new = orbit_compiler::compile_str(
+        "new.orbit",
+        r#"workflow W { version "1.1.0" signal go { ok: Bool, by: String } step w { await go timeout 1d } }"#,
+    );
+    let r = orbit_compiler::compat::compare(
+        &orbit_compiler::compat::Snapshot::from_compilation(&old),
+        &orbit_compiler::compat::Snapshot::from_compilation(&new),
+    );
+    let text = r.render(false);
+    assert!(r.errors() >= 1, "{text}");
+    assert!(text.contains("signal go"), "{text}");
+    assert!(text.contains("query q"), "{text}");
+}

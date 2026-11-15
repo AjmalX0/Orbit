@@ -4,6 +4,7 @@ import json
 import os
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Optional, Tuple
 
@@ -82,3 +83,18 @@ class Client:
 
     def wait(self, execution_id: str, timeout_ms: int = 30000) -> Any:
         return self.get(f"/v1/executions/{execution_id}/wait?timeout_ms={timeout_ms}")
+
+    def signal(self, execution_id: str, name: str, payload: Any = None) -> int:
+        """Send a typed signal declared with `signal <name> { ... }` in the workflow.
+
+        The payload is validated by the runtime against the declaration.
+        Returns the history sequence number of the recorded signal.
+        """
+        quote = urllib.parse.quote
+        _, r = self.post(f"/v1/executions/{quote(execution_id, safe='')}/signals/{quote(name, safe='')}", payload if payload is not None else {})
+        return r["seq"]
+
+    def query(self, execution_id: str, name: str) -> Any:
+        """Evaluate a query declared with `query <name> = ...` against the current state."""
+        quote = urllib.parse.quote
+        return self.get(f"/v1/executions/{quote(execution_id, safe='')}/queries/{quote(name, safe='')}")["value"]
