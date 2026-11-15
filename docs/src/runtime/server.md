@@ -30,7 +30,7 @@ In another terminal, check it and deploy a workflow:
 
 ```console
 $ curl -s http://127.0.0.1:7233/v1/health
-{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0}
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0,"role":"single","node_id":null,"term":null,"leader":null}
 $ orbit deploy examples/order_processing.orbit
 deployed OrderProcessing@1.0.0 (sha256:4fdfac082bf3)
 ```
@@ -58,6 +58,9 @@ Every option can also be set through the environment variable listed, except whe
 | `--max-body` | | bytes | `4194304` (4 MiB) | Maximum request body size. Larger requests get `413`. |
 | `--log-format` | | `text` or `json` | `text` | Log format. Logs go to stderr. |
 | `--insecure` | | flag | off | Allow a non-loopback `--addr` without a token. Use only on a trusted network. |
+| `--cluster` | `ORBIT_CLUSTER` | flag | off | Run as one of several servers on the same PostgreSQL database: one leader serves, the others stand by. Requires a PostgreSQL `--db`. See [Running several servers](cluster.md). |
+| `--node-id` | `ORBIT_NODE_ID` | string | host name | This server's name in the cluster. Requires `--cluster`. |
+| `--advertise-addr` | `ORBIT_ADVERTISE_ADDR` | URL | from `--addr` | URL standbys hand out for this server while it leads, for example `http://orbit-0.orbit:7233`. Without it, a wildcard `--addr` advertises nothing. Requires `--cluster`. |
 
 The server also reads `ORBIT_LOG` (log filter), `ORBIT_DB_CA_CERT` (CA for PostgreSQL TLS), `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_SERVICE_NAME`. See [Environment variables](../reference/environment.md).
 
@@ -73,6 +76,7 @@ The server checks its configuration before it opens the database and exits with 
 | `--workers-file` without `--token` | `--workers-file requires --token: without an admin token administrative endpoints would be open` |
 | `--tls-client-ca` without `client_cert` entries | `` --tls-client-ca needs --workers-file entries with `client_cert` to map certificates to workers `` |
 | An invalid workers file | for example `` workers.toml: worker `a` needs `token_sha256` or `client_cert` `` |
+| `--cluster` with a SQLite `--db` | `--cluster requires a PostgreSQL database (--db postgres://...): the servers share it for leader election and history` |
 
 An empty token (`ORBIT_TOKEN=`) counts as no token.
 
@@ -200,17 +204,21 @@ INFO orbit_runtime::engine: recovered active executions from history executions=
 
 Attempts that were in flight before the restart get one session timeout for their workers to reconnect and report a result. After that, attempts nobody reported are redelivered. See [Delivery guarantees](guarantees.md#crash-recovery).
 
-Because recovery runs before the listener is bound, connection attempts fail until the server is ready. A runtime with many active executions takes longer to start.
+Because recovery runs before the listener is bound, connection attempts fail until the server is ready. A runtime with many active executions takes longer to start. In cluster mode the order differs: a server binds its listener at once as a standby and recovers only when it is elected; see [Running several servers](cluster.md).
 
 ## Health and readiness
 
 `GET /v1/health` never requires authentication and returns `200` once the server is listening:
 
 ```json
-{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0}
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0,"role":"single","node_id":null,"term":null,"leader":null}
 ```
 
-Use it for both liveness and readiness probes: the server answers only after recovery. There is no separate readiness endpoint. If you use mutual TLS, a probe that presents a client certificate matching no worker gets `403`; send probes without a client certificate.
+Use it for liveness probes, and for readiness of a single server: a single server answers only after recovery. The response also carries `role` (`single`, or `leader` and `standby` in cluster mode), `node_id`, `term` and `leader`.
+
+`GET /v1/ready` never requires authentication either. It returns `200` on a single server and on a cluster leader, and `503` on a standby. Use it as the readiness or load-balancer health check when you run several servers, so traffic reaches only the leader. See [Running several servers](cluster.md#load-balancer-configuration).
+
+If you use mutual TLS, a probe that presents a client certificate matching no worker gets `403`; send probes without a client certificate.
 
 For monitoring beyond liveness, scrape `/v1/metrics` with the admin token. See [Observability](observability.md).
 
@@ -237,14 +245,15 @@ The server stops accepting connections, waits for in-flight HTTP requests to fin
 
 Version 0.1.0 handles only `SIGINT`; `SIGTERM` ends a 0.1.0 server immediately, as `SIGKILL` would. Later versions handle both. Either way no committed state is lost, because every state change is committed to the database before it takes effect, and the next start recovers exactly what was committed. To get a graceful stop from every version, set the stop signal to `SIGINT`: `docker run --stop-signal SIGINT`, `stop_signal: SIGINT` in Compose, or `KillSignal=SIGINT` under systemd. See [Deployment](deployment.md).
 
-## Single node
+## Single node and cluster mode
 
-One server owns a database. Do not run two servers against the same SQLite file or PostgreSQL database: each would keep its own in-memory view of active executions and dispatch the same work. For availability, run one server under a supervisor that restarts it (systemd, Kubernetes with one replica), and rely on recovery. See [Storage](storage.md#single-node).
+Without `--cluster`, one server owns a database. Do not run two such servers against the same SQLite file or PostgreSQL database: each would keep its own in-memory view of active executions and dispatch the same work. For availability, either run one server under a supervisor that restarts it (systemd, Kubernetes with one replica) and rely on recovery, or run several servers with `--cluster` on PostgreSQL: one is elected leader, the others take over if it fails. See [Running several servers](cluster.md) and [Storage](storage.md#single-node).
 
 ## See also
 
 - [Security](security.md)
 - [Storage](storage.md)
+- [Running several servers](cluster.md)
 - [Observability](observability.md)
 - [Deployment](deployment.md)
 - [CLI: orbit server](../reference/cli.md#orbit-server)

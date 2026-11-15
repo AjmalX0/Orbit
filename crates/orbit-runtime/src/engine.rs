@@ -1516,6 +1516,20 @@ impl Engine {
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
+
+    /// Load definitions registered in the store since this engine opened
+    /// (another server registered them). Used by cluster standbys, whose
+    /// engine only reads. Returns how many were new.
+    pub fn refresh_definitions(&mut self) -> Result<usize> {
+        let mut added = 0;
+        for ir in self.store.definitions().map_err(EngineError::storage)? {
+            if !self.by_hash.contains_key(&ir.definition_hash) {
+                self.cache_definition(ir);
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
 }
 
 /// Apply fan-out and history limits to the decider's next events (the decider

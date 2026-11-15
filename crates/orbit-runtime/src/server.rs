@@ -815,6 +815,18 @@ pub async fn serve(
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    serve_node(engine, config, None, shutdown).await
+}
+
+/// [`serve`] as a member of a cluster (`orbit server --cluster`): `engine`
+/// is the node's standby engine ([`crate::cluster::Node::standby_engine`]);
+/// the node's election thread swaps in a leader engine once elected.
+pub async fn serve_node(
+    engine: Engine,
+    config: ServerConfig,
+    cluster: Option<Arc<crate::cluster::Node>>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     // Several rustls crypto backends are compiled in (via different
     // dependencies); choose one before any TLS configuration is built.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -827,6 +839,10 @@ pub async fn serve(
         identities: config.identities,
     });
     let app = router(state.clone(), config.body_limit);
+    let app = crate::cluster::layer(app, cluster.clone(), state.clone());
+    if let Some(node) = &cluster {
+        crate::cluster::start(node.clone(), state.clone())?;
+    }
     let ticker = tokio::spawn(run_ticker(state.clone(), config.tick_interval));
     // One shutdown signal fanned out to every listener.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -882,9 +898,17 @@ pub async fn serve(
             let service = crate::grpc::GrpcWorkers::new(state.clone());
             let rx = stop_rx.clone();
             tracing::info!(addr = %addr, tls = config.tls.is_some(), "gRPC worker protocol listening");
+            let router = match &cluster {
+                Some(node) => {
+                    builder.add_service(tonic::service::interceptor::InterceptedService::new(
+                        service,
+                        crate::cluster::grpc_gate(node.clone()),
+                    ))
+                }
+                None => builder.add_service(service),
+            };
             Some(tokio::spawn(async move {
-                if let Err(e) = builder
-                    .add_service(service)
+                if let Err(e) = router
                     .serve_with_incoming_shutdown(incoming, stopped(rx))
                     .await
                 {

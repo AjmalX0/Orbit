@@ -68,10 +68,25 @@ The schema is the same on both backends (`BIGINT` columns are `INTEGER` in SQLit
 | `workflow_executions` | `execution_id` | Projection for listing: `workflow`, `version`, `definition_hash`, `status`, `created_at_ms`, `updated_at_ms`, `last_seq`. Indexed by `status`. |
 | `execution_events` | `(execution_id, seq)` | The authoritative history: `event_type`, `step` (or null), `payload` (the event as JSON), `timestamp_ms`. Append-only. |
 | `worker_registry` | `worker_id` | Latest registration of each worker: `runtime`, `sdk`, `contracts` (JSON), `registered_at_ms`, `last_seen_ms`. |
+| `orbit_cluster` | `id` | PostgreSQL, cluster mode only. See [Cluster table](#cluster-table). |
 
 Each batch of events and the matching `workflow_executions` update are written in one transaction. Worker sessions, tokens in flight and metrics are kept in memory only; sessions and tokens are rebuilt from the history on startup, and metrics start from zero.
 
 The tables are an implementation detail. Read execution state through the [HTTP API](../reference/http-api.md), which applies the same fold the engine uses. Do not write to the tables: a modified history no longer matches what the engine decided.
+
+### Cluster table
+
+Servers started with `--cluster` create one more table on first start, idempotently, under an advisory lock. Single-node servers neither create nor read it, and the schema version stays `1`.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | `INT`, primary key | Always `1`: the table has one row. |
+| `term` | `BIGINT` | Leadership term, incremented by every newly elected leader. Every history append of the leader checks it in the same transaction (fencing). |
+| `leader_node` | `TEXT` | `--node-id` of the latest leader. |
+| `leader_addr` | `TEXT` | `--advertise-addr` of the latest leader, or null. |
+| `since_ms` | `BIGINT` | When the latest leader was elected. |
+
+The leader also holds a session-level advisory lock on its own election connection (`application_name` `orbit-cluster:<node id>`). See [Running several servers](cluster.md).
 
 ## Retention
 
@@ -103,13 +118,14 @@ Stop the server, restore the database, and start the server. It recovers every n
 
 ## Single node
 
-One database belongs to one running server. The engine keeps the active executions, the worker sessions and the in-flight tokens in memory and assumes it is the only writer. Two servers on the same database would each dispatch the same tasks and append conflicting events. Nothing in the database prevents this, so make sure your deployment cannot start a second instance: one systemd unit, one container with a restart policy, or a Kubernetes `Deployment` with `replicas: 1` and the `Recreate` strategy.
+Without `--cluster`, one database belongs to one running server. The engine keeps the active executions, the worker sessions and the in-flight tokens in memory and assumes it is the only writer. Two servers on the same database would each dispatch the same tasks and append conflicting events. Nothing in the database prevents this, so make sure your deployment cannot start a second instance: one systemd unit, one container with a restart policy, or a Kubernetes `Deployment` with `replicas: 1` and the `Recreate` strategy.
 
-For availability, rely on fast restarts and recovery rather than replicas. With PostgreSQL, you can also use the database's own replication and failover; after a failover, restart the server against the new primary.
+For availability, rely on fast restarts and recovery, or, with PostgreSQL, run several servers in cluster mode: they elect one leader, which is the only one that writes, and fence a deposed leader so it cannot write. See [Running several servers](cluster.md). You can also use the database's own replication and failover; servers reconnect to the new primary.
 
 ## See also
 
 - [Running the server](server.md)
+- [Running several servers](cluster.md)
 - [Delivery guarantees](guarantees.md)
 - [Deployment](deployment.md)
 - [Security](security.md)

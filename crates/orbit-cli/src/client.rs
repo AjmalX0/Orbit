@@ -14,6 +14,8 @@ pub struct ApiError {
     pub status: u16,
     pub code: String,
     pub message: String,
+    /// With `NOT_LEADER` (a standby in a cluster): the leader's address.
+    pub leader: Option<String>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -86,6 +88,7 @@ impl Client {
             status: 0,
             code: "CONNECTION".into(),
             message: format!("cannot reach the ORBIT runtime at {}: {e}\n  hint: start it with `orbit server` or set --server / ORBIT_SERVER", self.base),
+            leader: None,
         })?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
@@ -103,35 +106,61 @@ impl Client {
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| body.to_string()),
+                leader: err["leader_addr"].as_str().map(str::to_string),
             });
         }
         Ok((status, body))
     }
 
-    pub fn get(&self, path: &str) -> Result<Value> {
-        let mut req = self.agent.get(format!("{}{path}", self.base));
-        if let Some(t) = &self.token {
-            req = req.header("authorization", format!("Bearer {t}"));
+    /// Send a request to `base`, then once more to the leader if a cluster
+    /// standby answered `NOT_LEADER` with the leader's address.
+    fn send(
+        &self,
+        call: impl Fn(&str) -> std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<(u16, Value)> {
+        match self.handle(call(&self.base)) {
+            Err(ApiError {
+                code,
+                leader: Some(leader),
+                ..
+            }) if code == "NOT_LEADER" && leader.trim_end_matches('/') != self.base => {
+                self.handle(call(leader.trim_end_matches('/')))
+            }
+            r => r,
         }
-        self.handle(req.call()).map(|r| r.1)
+    }
+
+    pub fn get(&self, path: &str) -> Result<Value> {
+        self.send(|base| {
+            let mut req = self.agent.get(format!("{base}{path}"));
+            if let Some(t) = &self.token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            req.call()
+        })
+        .map(|r| r.1)
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<(u16, Value)> {
-        let mut req = self.agent.post(format!("{}{path}", self.base));
-        if let Some(t) = &self.token {
-            req = req.header("authorization", format!("Bearer {t}"));
-        }
-        self.handle(req.send_json(body))
+        self.send(|base| {
+            let mut req = self.agent.post(format!("{base}{path}"));
+            if let Some(t) = &self.token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            req.send_json(body)
+        })
     }
 
     pub fn post_raw(&self, path: &str, body: String) -> Result<(u16, Value)> {
-        let mut req = self
-            .agent
-            .post(format!("{}{path}", self.base))
-            .header("content-type", "application/json");
-        if let Some(t) = &self.token {
-            req = req.header("authorization", format!("Bearer {t}"));
-        }
-        self.handle(req.send(body))
+        self.send(|base| {
+            let mut req = self
+                .agent
+                .post(format!("{base}{path}"))
+                .header("content-type", "application/json");
+            if let Some(t) = &self.token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            req.send(body.as_str())
+        })
     }
 }

@@ -50,6 +50,7 @@
 - [Executions and history](runtime/executions.md)
 - [Delivery guarantees](runtime/guarantees.md)
 - [Storage](runtime/storage.md)
+- [Running several servers](runtime/cluster.md)
 - [Security](runtime/security.md)
 - [Observability](runtime/observability.md)
 - [Deployment](runtime/deployment.md)

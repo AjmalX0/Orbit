@@ -126,7 +126,7 @@ Put `POSTGRES_PASSWORD`, `ORBIT_TOKEN` and `ORBIT_WORKER_TOKEN` in an `.env` fil
 
 ### Kubernetes
 
-Run exactly one replica:
+Without cluster mode, run exactly one replica (for two or more, see [Kubernetes with two replicas](#kubernetes-with-two-replicas)):
 
 ```yaml
 apiVersion: apps/v1
@@ -170,6 +170,74 @@ spec:
 ```
 
 The `preStop` hook sends `SIGINT` for a graceful shutdown; without it, the pod is killed after its termination grace period, which is also safe. With PostgreSQL, set `ORBIT_DB` in the secret and drop the volume. With SQLite, use a `ReadWriteOnce` volume on block storage.
+
+### Kubernetes with two replicas
+
+With PostgreSQL you can run two or more replicas in cluster mode: one pod is elected leader, the others stand by and take over within about a second if it fails. A readiness probe on `/v1/ready` keeps standbys out of the `Service` endpoints, so clients and workers always reach the leader through the `Service` address. A `StatefulSet` gives every pod a stable name, used as its node id, and a headless `Service` gives it a stable address to advertise.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: orbit
+spec:
+  selector: { app: orbit }
+  ports:
+    - { name: http, port: 7233, targetPort: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orbit-nodes            # headless: orbit-0.orbit-nodes, orbit-1.orbit-nodes
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: orbit }
+  ports:
+    - { name: http, port: 7233 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: orbit
+spec:
+  serviceName: orbit-nodes
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: orbit }
+  template:
+    metadata:
+      labels: { app: orbit }
+    spec:
+      securityContext:
+        runAsUser: 10001
+      containers:
+        - name: orbit
+          image: ghcr.io/ajmalx0/orbit:v0.2.0
+          args: ["server", "--cluster", "--log-format", "json"]
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: ORBIT_NODE_ID, value: "$(POD_NAME)" }
+            - { name: ORBIT_ADVERTISE_ADDR, value: "http://$(POD_NAME).orbit-nodes:7233" }
+          envFrom:
+            - secretRef: { name: orbit }   # ORBIT_TOKEN, ORBIT_WORKER_TOKEN, ORBIT_DB (postgres://...)
+          ports:
+            - { containerPort: 7233, name: http }
+          readinessProbe:
+            httpGet: { path: /v1/ready, port: http }
+            periodSeconds: 1
+            failureThreshold: 1
+          livenessProbe:
+            httpGet: { path: /v1/health, port: http }
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec: { command: ["/bin/sh", "-c", "kill -INT 1"] }
+```
+
+Point workers and applications at `http://orbit:7233`. A rolling update replaces one pod at a time; when the leader's pod stops, a standby is elected and the `Service` switches to it after its next readiness probe. Expect workers to log a few failed polls and register again. See [Running several servers](cluster.md) for the election, fencing and failover details.
 
 ## Release binaries
 
@@ -292,5 +360,6 @@ Downgrading to an older runtime against a database written by a newer one is not
 - [Running the server](server.md)
 - [Security](security.md)
 - [Storage](storage.md)
+- [Running several servers](cluster.md)
 - [Observability](observability.md)
 - [Installation](../getting-started/installation.md)

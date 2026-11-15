@@ -18,6 +18,53 @@ type Job = Box<dyn FnOnce(&mut Client) + Send>;
 
 pub struct PgStore {
     jobs: mpsc::Sender<Job>,
+    mode: PgMode,
+}
+
+/// How a [`PgStore`] may write. Single-node servers use `ReadWrite`; the
+/// cluster mode (`orbit server --cluster`, see `crate::cluster`) gives a
+/// standby a `ReadOnly` store and the leader a `Fenced` one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgMode {
+    ReadWrite,
+    /// Reads only: writes fail and no execution counts as active, so an
+    /// engine opened on it recovers nothing and never appends.
+    ReadOnly,
+    /// Every history append verifies, in its own transaction, that the
+    /// cluster term is still this one, so a deposed leader cannot write.
+    Fenced(i64),
+}
+
+/// Table holding the cluster's leadership term (created by `crate::cluster`).
+pub(crate) const CLUSTER_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS orbit_cluster (
+    id INT PRIMARY KEY,
+    term BIGINT NOT NULL,
+    leader_node TEXT,
+    leader_addr TEXT,
+    since_ms BIGINT NOT NULL
+);
+INSERT INTO orbit_cluster (id, term, since_ms) VALUES (1, 0, 0) ON CONFLICT DO NOTHING;
+"#;
+
+/// A plain session for the cluster's leader-election connection: same TLS
+/// rules as the store, plus timeouts so that a dead network path is noticed
+/// within seconds rather than minutes.
+pub(crate) fn session_client(url: &str, application_name: &str) -> Result<Client> {
+    use std::str::FromStr;
+    use std::time::Duration;
+    let mut config = postgres::Config::from_str(url)?;
+    config
+        .application_name(application_name)
+        .connect_timeout(Duration::from_secs(5))
+        .keepalives(true)
+        .keepalives_idle(Duration::from_secs(5))
+        .tcp_user_timeout(Duration::from_secs(5));
+    Ok(config.connect(tls()?)?)
+}
+
+fn read_only() -> StoreError {
+    StoreError("this server is a standby: the store is read-only".into())
 }
 
 /// TLS for PostgreSQL connections, following the URL's `sslmode`: `prefer`
@@ -63,6 +110,11 @@ fn bad_payload(e: serde_json::Error) -> StoreError {
 
 impl PgStore {
     pub fn connect(url: &str) -> Result<PgStore> {
+        PgStore::connect_with(url, PgMode::ReadWrite)
+    }
+
+    /// Connect with a write mode (see [`PgMode`]).
+    pub fn connect_with(url: &str, mode: PgMode) -> Result<PgStore> {
         let url = url.to_string();
         let (jobs, rx) = mpsc::channel::<Job>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
@@ -96,7 +148,7 @@ impl PgStore {
         ready_rx
             .recv()
             .map_err(|_| StoreError("PostgreSQL thread exited during startup".into()))??;
-        Ok(PgStore { jobs })
+        Ok(PgStore { jobs, mode })
     }
 
     fn run<T: Send + 'static>(
@@ -113,7 +165,14 @@ impl PgStore {
             .map_err(|_| StoreError("PostgreSQL connection thread has stopped".into()))?
     }
 
+    pub fn mode(&self) -> PgMode {
+        self.mode
+    }
+
     pub fn put_definition(&self, ir: &WorkflowIr, now: u64) -> Result<PutDefinition> {
+        if self.mode == PgMode::ReadOnly {
+            return Err(read_only());
+        }
         let (name, version, hash) = (
             ir.name.clone(),
             ir.version.clone(),
@@ -175,6 +234,11 @@ impl PgStore {
     }
 
     pub fn append(&mut self, state: &ExecutionState, events: &[HistoryEvent]) -> Result<()> {
+        let fence = match self.mode {
+            PgMode::ReadWrite => None,
+            PgMode::ReadOnly => return Err(read_only()),
+            PgMode::Fenced(term) => Some(term),
+        };
         let rows: Vec<(i64, &'static str, Option<String>, String, i64)> = events
             .iter()
             .map(|h| {
@@ -199,6 +263,19 @@ impl PgStore {
         );
         self.run(move |c| {
             let mut tx = c.transaction()?;
+            if let Some(term) = fence {
+                // FOR SHARE: a new leader's term increment waits for this
+                // transaction, and this read sees any increment committed first.
+                let current: Option<i64> = tx
+                    .query_opt("SELECT term FROM orbit_cluster WHERE id = 1 FOR SHARE", &[])?
+                    .map(|r| r.get(0));
+                if current != Some(term) {
+                    return Err(StoreError(format!(
+                        "fenced: this server led term {term}, but the cluster is at term {}; another server is the leader",
+                        current.map_or("unknown".to_string(), |t| t.to_string())
+                    )));
+                }
+            }
             let ins = tx.prepare(
                 "INSERT INTO execution_events (execution_id, seq, event_type, step, payload, timestamp_ms)
                  VALUES ($1, $2, $3, $4, $5, $6)",
@@ -242,6 +319,9 @@ impl PgStore {
     }
 
     pub fn active_execution_ids(&self) -> Result<Vec<String>> {
+        if self.mode == PgMode::ReadOnly {
+            return Ok(vec![]);
+        }
         self.run(|c| {
             Ok(c.query(
                 "SELECT execution_id FROM workflow_executions WHERE status IN ('RUNNING', 'COMPENSATING') ORDER BY created_at_ms",
@@ -293,6 +373,9 @@ impl PgStore {
     }
 
     pub fn upsert_worker(&self, w: &WorkerRecord) -> Result<()> {
+        if self.mode == PgMode::ReadOnly {
+            return Err(read_only());
+        }
         let w = w.clone();
         self.run(move |c| {
             c.execute(
@@ -306,6 +389,9 @@ impl PgStore {
     }
 
     pub fn touch_worker(&self, worker_id: &str, now: u64) -> Result<()> {
+        if self.mode == PgMode::ReadOnly {
+            return Err(read_only());
+        }
         let id = worker_id.to_string();
         self.run(move |c| {
             c.execute(
