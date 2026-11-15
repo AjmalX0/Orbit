@@ -49,6 +49,7 @@ The first line has the severity, the code and the message. The `-->` line gives 
 | [E05xx](#workflows-e05xx) | Workflow-level rules. |
 | [W06xx](#static-safety-w06xx) | Static safety checks: compensations, constant conditions, signals and waits. |
 | [E07xx, W07xx](#tests-e07xx-w07xx) | `test` declarations: workflows, mocks, signals and expectations. |
+| [P0xxx](#policy-p0xxx) | Organisation policies checked with `--policy`: waivers (`P00xx`) and rule violations (`P01xx`). |
 
 ## Lexical (E00xx)
 
@@ -439,10 +440,47 @@ A constant in `input`, a `signal` payload or an expected output type-checks but 
 
 The test has no `expect`. Message: ``test `nothing` checks nothing``, with help ``add an expectation such as `expect status COMPLETED` ``. Such a test still fails if the execution cannot finish, for example because a task is not mocked.
 
+## Policy (P0xxx)
+
+Reported only with `orbit check`, `orbit compile` or `orbit deploy` given `--policy <file>`, after the files compiled without errors. A rule's `severity` decides whether its violations are errors or warnings; the code is the same either way. Every violation message starts with ``policy rule `<id>`: ``, has a note naming the policy file (with the rule's `description` if it has one), and a help that ends with the waiver to write. [Policies](../tooling/policy.md) describes each rule in full.
+
+```text
+error[P0101]: policy rule `payments-compensated`: step `charge` calls `payments.charge` but has no compensation
+  --> examples/checkout.orbit:22:10
+   |
+22 |     step charge {
+   |          ^^^^^^
+   = note: policy fintech (examples/policies/fintech.toml): every charge and reservation must be undone on failure
+   = help: add a `compensate { worker "..." with { ... } }` block, or waive it: `// policy-allow: payments-compensated <reason>`
+```
+
+Step violations point at the step name; workflow violations (`P0106`, `P0109` for the `limits` block, `P0110`) point at the workflow name.
+
+| Code | Rule type | Message |
+|---|---|---|
+| `P0001` | waivers | ``waiver names unknown policy rule `<id>` `` (note: the known rule ids), or ``waiver for policy rule `<id>` has no reason``. Always an error. |
+| `P0002` | waivers | ``waiver for policy rule `<id>` suppresses nothing``, help `remove the comment`. Always a warning. |
+| `P0101` | `require_compensation` | ``step `<s>` calls `<task>` but has no compensation``; with `compensate_with`: ``step `<s>` compensates `<task>` with `<other>`, which is not one of <patterns>`` |
+| `P0102` | `require_retry` | ``step `<s>` calls `<task>` with <n> attempt(s); at least <min> required``, or ``... with up to <n> attempts; at most <max> allowed`` |
+| `P0103` | `max_attempts` | ``step `<s>` calls `<task>` with up to <n> attempts; at most <max> allowed`` |
+| `P0104` | `require_timeout` | ``step `<s>` calls `<task>` without a `timeout` ``, ``step `<s>` has `timeout <d>`; at most <max> allowed``, or ``step `<s>` calls `<task>` without a `queue_timeout` `` |
+| `P0105` | `require_approval` | ``step `<s>` calls `<task>` without depending on an approval (`await` of <signals>) when <condition>``, or ``step `<s>` calls `<task>` without a guaranteed approval when <condition>`` with a note per reason, or ``step `<s>` calls `<task>`, but the workflow input has no numeric field `<path>` to evaluate `<condition>` `` |
+| `P0106` | `require_handler` | ``workflow `<w>` has no `on failure` handler`` (every missing kind is listed) |
+| `P0107` | `forbid_tasks` | ``step `<s>` calls `<task>`, a forbidden task``, or ``the compensation of step `<s>` calls `<task>`, a forbidden task`` |
+| `P0108` | `allow_tasks` | ``step `<s>` calls `<task>`, a task outside the allowed list`` (or ``the compensation of step `<s>` ...``) |
+| `P0109` | `max_fan_out` | ``workflow `<w>` has `for` steps (<steps>) but no `limits { max_fan_out: ... }` ``, ``workflow `<w>` allows `max_fan_out: <n>`; at most <max> allowed``, or ``` `for` step `<s>` has no `max_parallel` ``` |
+| `P0110` | `require_limits` | ``workflow `<w>` does not set `<key>` in `limits` `` |
+| `P0111` | `require_signal_timeout` | ``step `<s>` waits for signal `<signal>` without a step `timeout` ``, or ``step `<s>` waits up to <d> for `<signal>`; at most <max> allowed`` |
+
+Handler and event steps are named `on <kind>: <step>` and `on event <signal>: <step>` in messages.
+
+An `[[exemption]]` in the policy file that matches no violation is not a diagnostic: it is printed as ``warning: policy <file>: exemption <n> (rule `<id>`, workflow `<pattern>`) matched no violation`` and does not change the exit status.
+
 ## See also
 
 - [CLI: orbit check](cli.md#orbit-check)
 - [Static safety checks](../language/safety.md)
+- [Policies](../tooling/policy.md)
 - [Testing workflows](../tooling/testing.md)
 - [Editor support](../tooling/editors.md)
 - [Grammar](../language/grammar.md)

@@ -12,7 +12,10 @@ Commands:
   compile   Compile workflow files to orbit-ir JSON
   fmt       Format .orbit files in place (comments and line breaks are preserved)
   lsp       Run the language server (LSP over stdio), used by editor extensions
-  graph     Render a workflow's step graph (Mermaid or Graphviz)
+  graph     Render a workflow as a diagram (Mermaid, Graphviz DOT or SVG)
+  docs      Generate reference documentation for workflows and task contracts
+  schema    Export JSON Schema (draft 2020-12) for workflow inputs, outputs, signals, queries and task contracts
+  diff      Show what changed in a process between two versions, with the compatibility verdict
   compat    Check that new workflow and contract versions are compatible with old ones
   server    Run the ORBIT runtime server
   deploy    Compile and register workflow definitions with the runtime
@@ -122,6 +125,7 @@ orbit check [OPTIONS] [FILES]...
 | `[FILES]...` | paths | none | One or more `.orbit` files. Imports are followed. |
 | `--format <FORMAT>` | `human` or `json` | `human` | `human` prints diagnostics on stderr and one `ok` line per workflow on stdout. `json` prints `{"diagnostics": [...]}` on stdout and nothing else. |
 | `--strict` | flag | off | Treat warnings (missing compensations, unreachable steps, unused signals, waits without a timeout, ...) as errors. |
+| `--policy <FILE>` | path | none | Also check the workflows against an organisation [policy](../tooling/policy.md) (TOML). Repeatable. Violations are `P01xx` diagnostics, errors or warnings per rule; they are checked only when the files compile. |
 
 Exit codes: `0` when there are no errors (warnings are allowed, unless `--strict` is given); `1` when any file has an error, when `--strict` is given and there is any warning, or when no files are given. With `--strict` and only warnings, the human format prints the warnings, then `error: <n> warning(s) treated as errors (--strict)`, and no `ok` lines.
 
@@ -223,6 +227,7 @@ orbit compile [OPTIONS] [FILES]...
 | `--strict` | flag | off | Treat warnings as errors: with any warning, print the diagnostics and `error: <n> warning(s) treated as errors (--strict)`, write nothing and exit `1`. |
 | `-o`, `--out-dir <OUT_DIR>` | path | `build` | Output directory, created if needed. |
 | `--stdout` | flag | off | Print the IR to stdout instead of writing files. |
+| `--policy <FILE>` | path | none | Check the workflows against a [policy](../tooling/policy.md) first; with a policy error, print the diagnostics, write nothing and exit `1`. Repeatable. |
 
 Each workflow is written to `<out-dir>/<file stem>.orbit.json`. When one file defines several workflows, each is written to `<out-dir>/<file stem>.<Workflow>.orbit.json`.
 
@@ -274,23 +279,146 @@ Exit codes: `0` when the client ends the session; `1` on an I/O error.
 
 ## orbit graph
 
-Render a workflow's step graph as Mermaid or Graphviz. See [Workflow graphs](../tooling/graph.md).
+Render a workflow as a diagram: a Mermaid flowchart, Graphviz DOT, SVG, or a Mermaid sequence diagram. See [Workflow graphs](../tooling/graph.md).
 
 ```text
-orbit graph [OPTIONS] <FILE>
+Render a workflow as a diagram (Mermaid, Graphviz DOT or SVG)
+
+Usage: orbit graph [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>  A `.orbit` file or a compiled IR `.json` file
+
+Options:
+      --workflow <WORKFLOW>  The workflow to render when the file defines several
+      --format <FORMAT>      `mermaid` (flowchart), `dot` (Graphviz) or `svg` (laid out by orbit, no external tools) [default: mermaid] [possible values: mermaid, dot, svg]
+      --sequence             Render a Mermaid sequence diagram of the workflow's calls instead of the step graph
+  -o, --output <PATH>        Write to this file instead of stdout
+  -h, --help                 Print help
 ```
 
 | Argument or option | Type | Default | Meaning |
 |---|---|---|---|
 | `<FILE>` | path | required | A `.orbit` file or a compiled `.json` IR file. |
 | `--workflow <WORKFLOW>` | string | see below | Workflow to render when the file defines several. Without it, a file with one workflow renders that workflow, and a file with a parent and its children renders the one workflow no other workflow in the file starts. |
-| `--format <FORMAT>` | `mermaid` or `dot` | `mermaid` | Output format. |
+| `--format <FORMAT>` | `mermaid`, `dot` or `svg` | `mermaid` | Output format. `svg` is laid out by `orbit` itself. |
+| `--sequence` | flag | off | Render a Mermaid sequence diagram of the workflow's calls. Only with `--format mermaid`. |
+| `-o`, `--output <PATH>` | path | stdout | Write to this file (parent directories are created) and print `wrote <PATH>` on stderr. |
 
-Exit codes: `0` on success; `1` on compilation errors, an unknown `--workflow`, or an ambiguous file.
+Exit codes: `0` on success; `1` on compilation errors, an unknown `--workflow`, an ambiguous file, `--sequence` with `--format dot` or `svg`, or a file that cannot be written.
 
 ```console
 $ orbit graph examples/fulfilment.orbit --workflow Nope
 error: no workflow `Nope`; available: Shipping, Fulfilment
+```
+
+## orbit docs
+
+Generate reference documentation for workflows and task contracts, as Markdown or self-contained HTML. See [Documentation generation](../tooling/docs-generation.md).
+
+```text
+Generate reference documentation for workflows and task contracts
+
+Usage: orbit docs [OPTIONS] --output <DIR> <FILES>...
+
+Arguments:
+  <FILES>...  `.orbit` files (imports are followed)
+
+Options:
+  -o, --output <DIR>     Output directory: one page per workflow, `contracts` and `index`
+      --format <FORMAT>  `markdown` or `html` (one self-contained file per page) [default: markdown] [possible values: markdown, html]
+      --json-schema      Also write JSON Schema files to `<DIR>/schemas` and link them from the pages
+  -h, --help             Print help
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `<FILES>...` | paths | required | `.orbit` files. Imports are followed. |
+| `-o`, `--output <DIR>` | path | required | Output directory, created if needed. Writes `index`, one page per workflow and `contracts`, each `.md` or `.html`, and prints `wrote <path>` on stderr for each. |
+| `--format <FORMAT>` | `markdown` or `html` | `markdown` | Page format. |
+| `--json-schema` | flag | off | Also write the [JSON Schema](#orbit-schema) files to `<DIR>/schemas` and link them from the workflow pages. |
+
+Exit codes: `0` on success; `1` on compilation errors (nothing is written) or a file that cannot be written.
+
+```console
+$ orbit docs refunds.orbit --output ref --json-schema
+wrote ref/index.md
+wrote ref/Refund.md
+wrote ref/contracts.md
+wrote 5 JSON Schema file(s) in ref/schemas
+```
+
+## orbit schema
+
+Export JSON Schema (draft 2020-12) for workflow inputs, outputs, signal payloads, query results and task contract inputs and outputs. See [Documentation generation](../tooling/docs-generation.md#json-schema).
+
+```text
+Export JSON Schema (draft 2020-12) for workflow inputs, outputs, signals, queries and task contracts
+
+Usage: orbit schema [OPTIONS] <FILES>...
+
+Arguments:
+  <FILES>...  `.orbit` files (imports are followed)
+
+Options:
+      --workflow <WORKFLOW>  Only this workflow (and the contracts it uses)
+  -o, --output <DIR>         Write one `<name>.schema.json` file per schema into this directory instead of printing a single JSON object
+  -h, --help                 Print help
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `<FILES>...` | paths | required | `.orbit` files. Imports are followed. |
+| `--workflow <WORKFLOW>` | string | all | Only this workflow's schemas and those of the task contracts it uses. |
+| `-o`, `--output <DIR>` | path | stdout | Write `<DIR>/<name>.schema.json` per schema. Without it, print one JSON object mapping each name (`workflow.Refund.input`, `task.payments.payout.output`, ...) to its schema. |
+
+Exit codes: `0` on success; `1` on compilation errors, an unknown `--workflow`, or a file that cannot be written.
+
+```console
+$ orbit schema refunds.orbit -o schemas
+wrote 5 JSON Schema file(s) in schemas
+```
+
+## orbit diff
+
+Show what changed in a process between two versions: steps, actions, dependencies, conditions, retries, timeouts, compensations, handlers, events, signals, queries, types and limits, with the [`orbit compat`](#orbit-compat) verdict. See [Process diffs](../tooling/diff.md).
+
+```text
+Show what changed in a process between two versions, with the compatibility verdict
+
+Usage: orbit diff [OPTIONS] <OLD> <NEW>
+
+Arguments:
+  <OLD>  The old version: a .orbit file or a compiled IR .json file
+  <NEW>  The new version: a .orbit file or a compiled IR .json file
+
+Options:
+      --workflow <WORKFLOW>  Only this workflow
+      --format <FORMAT>      `text`, `markdown` (for a pull request) or `json` [default: text] [possible values: text, markdown, json]
+      --exit-code            Exit with status 1 when there are changes (0 when there are none)
+  -h, --help                 Print help
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `<OLD>` | path | required | The old version: a `.orbit` file or a compiled IR `.json` file. |
+| `<NEW>` | path | required | The new version: a `.orbit` file or a compiled IR `.json` file. |
+| `--workflow <WORKFLOW>` | string | all | Report only this workflow. |
+| `--format <FORMAT>` | `text`, `markdown` or `json` | `text` | `text` prints one line per change and a `summary:` line; `markdown` prints a section for a pull request; `json` prints one object. |
+| `--exit-code` | flag | off | Exit `1` when there are changes. |
+
+Exit codes: `0` on success (with `--exit-code`: no changes); `1` with `--exit-code` when there are changes; `2` when a file cannot be read, is not valid IR or does not compile, or `--workflow` names a workflow neither side defines. An incompatible change does not change the exit status; use `orbit compat` for that.
+
+```console
+$ orbit diff approval.orbit v3/approval.orbit --exit-code
+workflow OrderApproval 1.0.0
+  + input: input.channel: String
+  ~ timeout: decision: timeout 2d → timeout 1d
+compatibility
+  error   workflow OrderApproval@1.0.0: content changed without a version change; the runtime rejects it with DEFINITION_CONFLICT; hint: bump the version (1.0.0 → 2.0.0)
+summary: workflows: 1 changed; 2 change(s): 1 added, 1 changed; compatibility: incompatible, 1 error(s) (bump the version (1.0.0 → 2.0.0))
+$ echo $?
+1
 ```
 
 ## orbit compat
@@ -529,6 +657,7 @@ orbit deploy [OPTIONS] [FILES]...
 | Argument or option | Type | Default | Meaning |
 |---|---|---|---|
 | `[FILES]...` | paths | none | `.orbit` files or compiled `.json` IR files. Every workflow in every file is registered, children before parents. |
+| `--policy <FILE>` | path | none | Check each file against a [policy](../tooling/policy.md) before registering its workflows; a file with a policy error is not deployed and the command exits `1`. Requires `.orbit` files. Repeatable. |
 | runtime connection options | | | See [Runtime connection options](#runtime-connection-options). |
 
 For each workflow, `deploy` prints `deployed` when the definition is new and `up to date` when an identical definition is already registered. The hash prefix identifies the definition.
@@ -909,6 +1038,9 @@ ts-1                         typescript   offline  0  orders.validate@1.0.0, inv
 
 ## See also
 
+- [Policies](../tooling/policy.md)
+- [Process diffs](../tooling/diff.md)
+- [Documentation generation](../tooling/docs-generation.md)
 - [HTTP API](http-api.md)
 - [Environment variables](environment.md)
 - [Compiler diagnostics](diagnostics.md)

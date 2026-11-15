@@ -19,7 +19,7 @@ use crate::Compilation;
 use orbit_ir::{Action, BinOp, Expr, StepIr, Type, UnOp, WorkflowIr, WORKFLOW_LIMITS};
 use orbit_syntax::{Diagnostic, Span};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Rule types, their diagnostic codes and the keys each accepts besides the
@@ -680,6 +680,26 @@ impl Policy {
 
     /// Check every workflow of a successful compilation.
     pub fn check(&self, c: &Compilation) -> PolicyReport {
+        Policy::check_all(std::slice::from_ref(self), c)
+    }
+
+    /// Check several policies. A waiver may name a rule of any of them; one
+    /// that names no rule of any policy is reported once.
+    pub fn check_all(policies: &[Policy], c: &Compilation) -> PolicyReport {
+        let all: Vec<&str> = policies.iter().flat_map(|p| p.rule_ids()).collect();
+        let mut report = PolicyReport::default();
+        for (i, p) in policies.iter().enumerate() {
+            let r = p.check_in(c, &all, i == 0);
+            report.diagnostics.extend(r.diagnostics);
+            report.messages.extend(r.messages);
+        }
+        report
+            .diagnostics
+            .sort_by_key(|d| (d.span.file, d.span.start, d.code));
+        report
+    }
+
+    fn check_in(&self, c: &Compilation, all_ids: &[&str], first: bool) -> PolicyReport {
         let idx = SourceIndex::new(c);
         let mut report = PolicyReport::default();
         let mut used_exemptions: HashSet<usize> = HashSet::new();
@@ -693,7 +713,14 @@ impl Policy {
                 }
                 check_rule(rule, wf, &mut violations);
             }
-            self.report(wf, &idx, violations, &mut used_exemptions, &mut report);
+            self.report(
+                wf,
+                &idx,
+                violations,
+                (all_ids, first),
+                &mut used_exemptions,
+                &mut report,
+            );
         }
         for e in &self.exemptions {
             if !used_exemptions.contains(&e.index) {
@@ -722,6 +749,7 @@ impl Policy {
         wf: &WorkflowIr,
         idx: &SourceIndex,
         violations: Vec<Violation>,
+        (all_ids, first): (&[&str], bool),
         used_exemptions: &mut HashSet<usize>,
         report: &mut PolicyReport,
     ) {
@@ -743,18 +771,18 @@ impl Policy {
                 };
                 let rest = rest.trim();
                 let (rule, reason) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-                if rule.is_empty() || !self.rules.iter().any(|r| r.id == rule) {
+                if !self.rules.iter().any(|r| r.id == rule) {
+                    // Another policy's rule: that policy handles it.
+                    if (!rule.is_empty() && all_ids.contains(&rule)) || !first {
+                        continue;
+                    }
                     report.diagnostics.push(
                         Diagnostic::error(
                             INVALID_WAIVER,
                             format!("waiver names unknown policy rule `{rule}`"),
                             *span,
                         )
-                        .with_note(format!(
-                            "rules in {}: {}",
-                            self.path,
-                            self.rule_ids().join(", ")
-                        )),
+                        .with_note(format!("known rules: {}", all_ids.join(", "))),
                     );
                     continue;
                 }
@@ -1322,6 +1350,7 @@ fn check_approval(rule: &Rule, wf: &WorkflowIr, tasks: &[String], push: &mut Pus
                 continue;
             }
             let mut reasons = vec![];
+            let (mut skipped, mut ungated) = (false, false);
             let mut ok = false;
             for a in &awaits {
                 let a_runs = match &a.condition {
@@ -1329,47 +1358,53 @@ fn check_approval(rule: &Rule, wf: &WorkflowIr, tasks: &[String], push: &mut Pus
                     Some(c) => implied_by(p, &formula(c, false, &computes, 0)),
                 };
                 if !a_runs {
+                    skipped = true;
                     reasons.push(format!(
                         "`{}` may be skipped{when}: its condition `{}` is not implied by the rule",
                         a.id,
                         super::pretty::expr(a.condition.as_ref().unwrap())
                     ));
-                    continue;
                 }
-                if gate {
-                    let reads = cond
+                let reads = !gate
+                    || cond
                         .as_ref()
                         .map(|f| assume(f, p))
                         .is_some_and(|f| !matches!(f, Formula::Const(_)) && reads_step(&f, &a.id));
-                    if !reads {
-                        reasons.push(format!(
-                            "the `when` condition of `{}` does not read `{}`{when}, so the decision does not gate the step",
-                            s.id, a.id
-                        ));
-                        continue;
-                    }
+                if !reads {
+                    ungated = true;
+                    reasons.push(format!(
+                        "the `when` condition of `{}` does not read `{}`{when}, so the decision does not gate the step",
+                        s.id, a.id
+                    ));
                 }
-                ok = true;
-                break;
+                if a_runs && reads {
+                    ok = true;
+                    break;
+                }
             }
             if !ok {
+                let a = &awaits[0].id;
+                let mut help = vec![];
+                if skipped {
+                    help.push(format!(
+                        "make `{a}` run whenever the rule's condition holds (no `when`, or one the condition implies)"
+                    ));
+                }
+                if ungated {
+                    help.push(format!(
+                        "make `{}` read the decision, e.g. `when coalesce({a}.approved, false)`",
+                        s.id
+                    ));
+                }
                 push(
                     Some((&scope, s)),
                     format!("step `{q}` calls `{task}` without a guaranteed approval{when}"),
                     reasons,
-                    Some(format!(
-                        "make `{}` read the decision, e.g. `when coalesce({}.approved, false)`",
-                        s.id, awaits[0].id
-                    )),
+                    Some(help.join(", and ")),
                 );
             }
         }
     }
-}
-
-/// The diagnostic code of every rule type, for documentation.
-pub fn codes() -> BTreeMap<&'static str, &'static str> {
-    RULES.iter().map(|(k, c, _)| (*k, *c)).collect()
 }
 
 #[cfg(test)]
@@ -1711,6 +1746,44 @@ workflow Pay {{
         assert!(Policy::parse(&no, "p.toml")
             .unwrap_err()
             .contains("`reason` is required"));
+    }
+
+    #[test]
+    fn several_policies_share_waivers() {
+        let a = Policy::parse(
+            "[[rule]]\nid = \"comp\"\ntype = \"require_compensation\"\ntasks = [\"payments.*\"]\n",
+            "a.toml",
+        )
+        .unwrap();
+        let b = Policy::parse(
+            "[[rule]]\nid = \"handler\"\ntype = \"require_handler\"\n",
+            "b.toml",
+        )
+        .unwrap();
+        let check = |src: &str| {
+            let c = compile_str("w.orbit", &format!("{CONTRACTS}\n{src}"));
+            assert!(!c.has_errors(), "{}", c.render_diagnostics(false));
+            Policy::check_all(&[a.clone(), b.clone()], &c)
+                .diagnostics
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>()
+        };
+        let waived = CHARGE
+            .replace(
+                "workflow Pay",
+                "// policy-allow: handler no customer contact\nworkflow Pay",
+            )
+            .replace(
+                "    step charge {",
+                "    // policy-allow: comp voided by the provider\n    step charge {",
+            );
+        assert!(check(&waived).is_empty(), "{:?}", check(&waived));
+        let unknown = CHARGE.replace(
+            "workflow Pay",
+            "// policy-allow: nope because\nworkflow Pay",
+        );
+        assert_eq!(check(&unknown), ["P0001", "P0106", "P0101"]);
     }
 
     #[test]

@@ -372,11 +372,23 @@ The compiler's type checks remain the main guarantee: every step input,
 condition, query and `return` expression is checked against the declared
 types before anything is deployed.
 
+## Organisation policies
+
+The checks above are fixed and apply to every workflow. Rules that depend on
+the organisation, such as "every payment step is compensated", "charges of
+10000 or more wait for an approval signal", "every wait for a person has a
+deadline of at most 7 days" or "only these services may be called", go in a
+policy file checked with `orbit check --policy <file>`. Violations are
+reported in the same format with codes in the `P01xx` range, can be errors or
+warnings per rule, and can be waived per step with a
+`// policy-allow: <rule> <reason>` comment. See [Policies](../tooling/policy.md).
+
 ## See also
 
 - [Compensation](compensation.md)
 - [Task contracts](tasks.md)
 - [Signals and queries](signals.md)
 - [Conditions](conditions.md)
+- [Policies](../tooling/policy.md)
 - [Compiler diagnostics](../reference/diagnostics.md#static-safety-w06xx)
 - [CLI: orbit check](../reference/cli.md#orbit-check)

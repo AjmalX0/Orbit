@@ -534,12 +534,10 @@ fn compile(
         .collect::<Result<Vec<_>, _>>()?;
     let mut c = compile_files(files);
     if !c.has_errors() && !policies.is_empty() {
-        for p in &policies {
-            let r = p.check(&c);
-            c.diagnostics.extend(r.diagnostics);
-            for m in r.messages {
-                eprintln!("{} {m}", view::paint("warning:", view::YELLOW, color_err()));
-            }
+        let r = orbit_compiler::tooling::policy::Policy::check_all(&policies, &c);
+        c.diagnostics.extend(r.diagnostics);
+        for m in r.messages {
+            eprintln!("{} {m}", view::paint("warning:", view::YELLOW, color_err()));
         }
         c.diagnostics
             .sort_by_key(|d| (d.span.file, d.span.start, d.severity));

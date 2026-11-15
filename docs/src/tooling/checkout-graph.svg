@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="orbit-graph" width="508" height="402" viewBox="0 0 508 402" role="img" aria-label="Step graph of workflow Checkout">
+<title>Checkout@1.0.0</title>
+<style>
+.orbit-graph { --ink: #1c1917; --muted: #57534e; --line: #a8a29e; --bg: #faf9f7; --band: #f3f1ed; --accent: #c2410c; }
+@media (prefers-color-scheme: dark) { .orbit-graph { --ink: #ece9e4; --muted: #a8a29e; --line: #6b6560; --bg: #0f0d0c; --band: #161412; --accent: #fb923c; } }
+.orbit-graph text { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: var(--muted); }
+.orbit-graph text.name { font-weight: 600; fill: var(--ink); }
+.orbit-graph .node { fill: var(--bg); stroke: var(--ink); stroke-width: 1.2; }
+.orbit-graph .conditional { stroke: var(--accent); }
+.orbit-graph .compensation { stroke-dasharray: 5 3; stroke: var(--muted); }
+.orbit-graph .edge { fill: none; stroke: var(--line); stroke-width: 1.3; }
+.orbit-graph .edge.dashed { stroke-dasharray: 5 3; }
+.orbit-graph .panel { fill: var(--band); stroke: var(--line); stroke-dasharray: 4 3; }
+.orbit-graph .title { font-weight: 600; fill: var(--ink); }
+.orbit-graph .arrow { fill: var(--line); }
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrow" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<path class="edge dashed" d="M206.2,39.0 L300.2,39.0" marker-end="url(#arrow)"/>
+<text x="254.2" y="34.0" text-anchor="middle">compensate</text>
+<path class="edge" d="M111.1,62.0 C111.1,85.0 254.2,85.0 254.2,106.0" marker-end="url(#arrow)"/>
+<rect class="node" x="16.0" y="16.0" width="190.2" height="46.0" rx="5"/>
+<text class="name" x="26.0" y="35.0">reserve</text>
+<text x="26.0" y="50.0">inventory.reserve@1.0.0</text>
+<rect class="node compensation" x="302.2" y="16.0" width="190.2" height="46.0" rx="14"/>
+<text class="name" x="312.2" y="35.0">undo reserve</text>
+<text x="312.2" y="50.0">inventory.release@1.0.0</text>
+<rect class="node" x="166.5" y="108.0" width="175.4" height="46.0" rx="5"/>
+<text class="name" x="176.5" y="127.0">charge</text>
+<text x="176.5" y="142.0">payments.charge@1.0.0</text>
+<rect class="panel" x="85.4" y="182.0" width="337.6" height="88.0" rx="6"/>
+<text class="title" x="95.4" y="199.0">on failure</text>
+<rect class="node" x="101.4" y="208.0" width="197.6" height="46.0" rx="5"/>
+<text class="name" x="111.4" y="227.0">tell_customer</text>
+<text x="111.4" y="242.0">notifications.send@1.0.0</text>
+<rect class="node" x="327.0" y="208.0" width="80.0" height="46.0" rx="5"/>
+<text class="name" x="337.0" y="227.0">summary</text>
+<text x="337.0" y="242.0">compute</text>
+<rect class="panel" x="139.4" y="298.0" width="229.6" height="88.0" rx="6"/>
+<text class="title" x="149.4" y="315.0">on cancel</text>
+<rect class="node" x="155.4" y="324.0" width="197.6" height="46.0" rx="5"/>
+<text class="name" x="165.4" y="343.0">confirm_cancel</text>
+<text x="165.4" y="358.0">notifications.send@1.0.0</text>
+</svg>
