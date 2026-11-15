@@ -1,8 +1,35 @@
+# Dependency updates: one grouped pull request per ecosystem per month, minor
+# and patch versions only. Major upgrades change APIs (e.g. tonic, prost,
+# vscode-languageclient) and are done deliberately, by hand.
 version: 2
 updates:
-  - { package-ecosystem: cargo, directory: "/", schedule: { interval: weekly } }
-  - { package-ecosystem: github-actions, directory: "/", schedule: { interval: weekly } }
-  - { package-ecosystem: npm, directory: "/editors/vscode", schedule: { interval: weekly } }
-  - { package-ecosystem: maven, directory: "/sdks/java", schedule: { interval: weekly } }
-  - { package-ecosystem: nuget, directory: "/sdks/csharp", schedule: { interval: weekly } }
-  - { package-ecosystem: gomod, directory: "/sdks/go", schedule: { interval: weekly } }
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups: { cargo: { patterns: ["*"], update-types: [minor, patch] } }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups: { actions: { patterns: ["*"] } }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
+  - package-ecosystem: npm
+    directory: "/editors/vscode"
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups: { vscode-extension: { patterns: ["*"], update-types: [minor, patch] } }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
+  - package-ecosystem: maven
+    directory: "/sdks/java"
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups: { java-sdk: { patterns: ["*"], update-types: [minor, patch] } }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
+  - package-ecosystem: nuget
+    directory: "/sdks/csharp"
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 1
+    groups: { csharp-sdk: { patterns: ["*"], update-types: [minor, patch] } }
+    ignore: [{ dependency-name: "*", update-types: ["version-update:semver-major"] }]
