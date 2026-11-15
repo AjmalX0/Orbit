@@ -10,7 +10,7 @@ Any of these works:
 - **VS Code + dev container (everything preinstalled):** open the folder and choose
   *Reopen in Container*. `.devcontainer/` installs Rust, Node, Python, Go,
   Java, .NET, PostgreSQL and openssl.
-- **Locally:** Rust 1.85+ is required. Node 22, Python 3.9+, Go 1.21+, Java 17+
+- **Locally:** Rust 1.89+ is required. Node 22, Python 3.9+, Go 1.21+, Java 17+
   and .NET 8 are needed only for the SDK you work on.
 
 ```bash
