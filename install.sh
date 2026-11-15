@@ -36,7 +36,10 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 echo "orbit: downloading $asset ($VERSION)"
-curl -fsSL "$base/$asset" -o "$tmp/$asset"
+if ! curl -fsSL "$base/$asset" -o "$tmp/$asset"; then
+  echo "orbit: this release has no prebuilt binary for $os/$arch; install with: cargo install orbit-lang" >&2
+  exit 1
+fi
 curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
 expected=$(grep " $asset\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
 if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)

@@ -53,7 +53,7 @@ step_member      = action
 action           = "worker" , [ ":" ] , STRING                   (* a task contract name *)
                  | "workflow" , [ ":" ] , STRING                 (* a child workflow name *)
                  | "sleep" , [ ":" ] , DURATION ;
-(* Restrictions checked by the compiler (see docs/diagnostics.md):
+(* Restrictions checked by the compiler (see docs/src/reference/diagnostics.md):
    - `workflow` steps take no `using`, `retry`, `idempotency_key` or `queue_timeout` (E0307);
    - `compensate` blocks call a `worker` and take no `when`, `after`, `for` or `max_parallel`;
    - `for` is not allowed on `sleep` steps; the loop variable is in scope in `with`,
@@ -82,7 +82,7 @@ primary          = literal
                  | IDENTIFIER , "(" , [ expression , { "," , expression } ] , ")"   (* built-in call *)
                  | IDENTIFIER                                    (* path root: input | execution | step | loop variable *)
                  | "{" , { ( IDENTIFIER | STRING ) , ":" , expression , [ sep ] } , "}"
-                 | "[" , [ expression , { sep , expression } ] , "]"
+                 | "[" , [ expression , { [ "," ] , expression } ] , "]"   (* items: "," or newline, not ";" *)
                  | "if" , expression , "then" , expression , "else" , expression
                  | "(" , expression , ")" ;
 literal          = STRING | INTEGER | FLOAT | DURATION | "true" | "false" | "null" ;

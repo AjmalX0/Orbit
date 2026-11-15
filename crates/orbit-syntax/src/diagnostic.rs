@@ -18,7 +18,7 @@ pub struct Label {
 }
 
 /// A single compiler message. Every diagnostic carries a stable error code
-/// (see `docs/diagnostics.md`), a primary source location and optional help.
+/// (see `docs/src/reference/diagnostics.md`), a primary source location and optional help.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub severity: Severity,

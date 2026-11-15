@@ -1,5 +1,5 @@
-// Four languages, one workflow: Python normalizes, TypeScript tokenizes,
-// then Go and Rust analyse the result in parallel.
+// Four languages, one workflow: Python normalizes the text; then Rust
+// fingerprints it while TypeScript tokenizes it and Go counts the tokens.
 //
 // Workers: examples/workers/polyglot/ (see README there).
 

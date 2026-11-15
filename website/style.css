@@ -68,6 +68,7 @@ h1 { font: 500 50px/1.08 var(--serif); letter-spacing: -0.02em; margin: 0 0 22px
 .panel[hidden] { display: none; }
 .panel code { flex: 1; min-width: 0; font-size: 13.5px; overflow-x: auto; white-space: nowrap; color: var(--ink); }
 .panel code::before { content: "$ "; color: var(--faint); }
+.panel[data-panel="windows"] code::before { content: "> "; }
 .copy { font: 500 12px var(--sans); color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 5px; padding: 5px 10px; cursor: pointer; }
 .copy:hover { color: var(--ink); border-color: var(--faint); }
 

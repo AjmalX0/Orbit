@@ -41,11 +41,13 @@
 
       <div class="install" data-tabs>
         <div class="tabs" role="tablist" aria-label="Install method">
-          <button role="tab" aria-selected="true" data-tab="script">Linux / Windows</button>
-          <button role="tab" aria-selected="false" data-tab="cargo">Cargo</button>
+          <button role="tab" aria-selected="true" data-tab="script">Linux</button>
+          <button role="tab" aria-selected="false" data-tab="windows">Windows</button>
+          <button role="tab" aria-selected="false" data-tab="cargo">macOS / Cargo</button>
           <button role="tab" aria-selected="false" data-tab="docker">Docker</button>
         </div>
         <div class="panel" data-panel="script"><code>curl -fsSL https://github.com/AjmalX0/Orbit/releases/latest/download/install.sh | sh</code><button class="copy" type="button">Copy</button></div>
+        <div class="panel" data-panel="windows" hidden><code>iwr https://github.com/AjmalX0/Orbit/releases/latest/download/orbit-x86_64-pc-windows-msvc.zip -OutFile orbit.zip; Expand-Archive orbit.zip .</code><button class="copy" type="button">Copy</button></div>
         <div class="panel" data-panel="cargo" hidden><code>cargo install orbit-lang</code><button class="copy" type="button">Copy</button></div>
         <div class="panel" data-panel="docker" hidden><code>docker run -p 7233:7233 -e ORBIT_TOKEN=change-me ghcr.io/ajmalx0/orbit:latest</code><button class="copy" type="button">Copy</button></div>
       </div>

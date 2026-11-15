@@ -17,7 +17,7 @@ You should get an acknowledgement within a few days.
 
 The runtime's security model (credentials, per-worker identities, TLS and
 mutual TLS, input validation, redaction) is described in
-[docs/runtime.md](docs/runtime.md#security). In production:
+[Security](docs/src/runtime/security.md). In production:
 
 - set `--token`, give workers per-worker identities (`--workers-file`), and
   serve TLS (`--tls-cert`/`--tls-key`, optionally `--tls-client-ca`);

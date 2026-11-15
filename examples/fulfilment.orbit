@@ -1,8 +1,9 @@
 // Fan-out and child workflows.
 //
-// `Fulfilment` reserves every line item in parallel (at most 4 at a time),
-// then runs the `Shipping` workflow as a durable child execution. If shipping
-// fails, every reservation that succeeded is released individually.
+// `Fulfilment` reserves every line item in parallel (at most 4 at a time) and,
+// concurrently, runs the `Shipping` workflow as a durable child execution (add
+// `after reserve` to the `ship` step to ship only once everything is reserved).
+// If shipping fails, every reservation that succeeded is released individually.
 //
 // Workers: examples/workers/python/order_workers.py and
 // examples/workers/typescript/order_workers.ts (plus the shipping worker below).

@@ -273,7 +273,7 @@ struct ServerArgs {
     #[arg(long, env = "ORBIT_TLS_CLIENT_CA", requires = "tls_cert")]
     tls_client_ca: Option<PathBuf>,
     /// TOML file declaring per-worker identities: id, token hash or client
-    /// certificate name, allowed task patterns. See docs/runtime.md.
+    /// certificate name, allowed task patterns. See docs/src/runtime/security.md.
     #[arg(long, env = "ORBIT_WORKERS_FILE")]
     workers_file: Option<PathBuf>,
     /// Execute `orbit.http.request` steps inside the runtime.
@@ -291,6 +291,12 @@ struct ServerArgs {
 }
 
 fn main() -> ExitCode {
+    // Exit quietly when stdout is closed early (`orbit logs --json | head`)
+    // instead of panicking on a broken pipe, as other Unix tools do.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     match run(cli.command) {
         Ok(code) => code,

@@ -75,7 +75,8 @@ blockquote { border-inline-start: 3px solid var(--orbit-accent); border-block: n
 .chapter li a.active { font-weight: 500; }
 .menu-title { font-weight: 600; letter-spacing: 0.02em; }
 #menu-bar { border-bottom: 1px solid var(--table-border-color); }
-.orbit-home { font-size: 1.4rem; margin-inline-end: 8px; color: var(--sidebar-fg); }
+.orbit-home { display: inline-flex; align-items: center; height: var(--menu-bar-height); padding: 0 10px; font-size: 1.4rem; color: var(--icons) !important; text-decoration: none !important; border-inline-start: 1px solid var(--table-border-color); margin-inline-start: 6px; }
+.orbit-home:hover { color: var(--icons-hover) !important; }
 
 /* ORBIT syntax colours (see orbit-highlight.js) */
 .hljs-keyword { color: #9a3412; font-weight: 500; }

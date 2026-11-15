@@ -7,8 +7,13 @@ orchestrating work across services written in different languages. You
 describe *what* should happen in a `.orbit` file. The compiler type-checks
 every step against its worker's contract, and the runtime executes it durably:
 retries, timeouts, compensation, crash recovery and a complete audit history.
-Your business logic stays in Python, TypeScript, Go or anything that can speak
-HTTP.
+Your business logic stays in Python, TypeScript, Go, Rust, Java, C# or anything
+that can speak HTTP.
+
+**[Website](https://ajmalx0.github.io/Orbit/)** ·
+**[Documentation](https://ajmalx0.github.io/Orbit/docs/)** ·
+**[Quick start](https://ajmalx0.github.io/Orbit/docs/getting-started/quickstart.html)** ·
+**[Releases](https://github.com/AjmalX0/Orbit/releases/latest)**
 
 ```orbit
 import "contracts.orbit"
@@ -67,25 +72,29 @@ error[E0405]: value may be `null` but `String` is required
 
 ## Install
 
-**From source** (works today; Rust 1.89+):
-
-```bash
-cargo install --path crates/orbit-cli
-```
-
-**Container:**
-
-```bash
-docker build -t orbit .
-docker run -p 7233:7233 -e ORBIT_TOKEN=change-me -v orbit-data:/data orbit
-```
-
-**Prebuilt binaries** (Linux, macOS, Windows) from
-[GitHub Releases](https://github.com/AjmalX0/Orbit/releases/latest):
+**Linux** (x86_64, arm64), with checksum verification:
 
 ```bash
 curl -fsSL https://github.com/AjmalX0/Orbit/releases/latest/download/install.sh | sh
 ```
+
+**macOS, or any platform with Rust 1.89+:**
+
+```bash
+cargo install orbit-lang
+```
+
+**Windows:** download `orbit-x86_64-pc-windows-msvc.zip` from
+[GitHub Releases](https://github.com/AjmalX0/Orbit/releases/latest).
+
+**Container:**
+
+```bash
+docker run -p 7233:7233 -e ORBIT_TOKEN=change-me -v orbit-data:/data ghcr.io/ajmalx0/orbit:latest
+```
+
+See [Installation](https://ajmalx0.github.io/Orbit/docs/getting-started/installation.html)
+for every option, including upgrading and building from source.
 
 | | Package |
 |---|---|
@@ -198,7 +207,7 @@ against the real runtime, including over mutual TLS.
 | SDKs | `sdks/python`, `sdks/typescript`, `sdks/go`, `sdks/java`, `sdks/csharp`, `crates/orbit-worker` | one per language |
 | Worker protocol | `protocol/` | canonical `.proto`; HTTP/JSON and gRPC bindings |
 | Specification | `specification/` | RFC-0001 with the implementation record, EBNF grammar |
-| Docs | `docs/` | [language](docs/language.md), [runtime semantics](docs/runtime.md), [diagnostics](docs/diagnostics.md) |
+| Docs and website | `docs/`, `website/` | the [documentation site](https://ajmalx0.github.io/Orbit/docs/) (mdBook sources in `docs/src`) and the landing page |
 | VS Code extension | `editors/vscode` | language client for `orbit lsp` |
 
 ## Guarantees, precisely
@@ -216,7 +225,7 @@ against the real runtime, including over mutual TLS.
   every reference. The runtime validates execution inputs and worker outputs
   against the same types.
 
-Details: [docs/runtime.md](docs/runtime.md).
+Details: [Delivery guarantees](https://ajmalx0.github.io/Orbit/docs/runtime/guarantees.html).
 
 ## Developing
 

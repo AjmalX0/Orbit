@@ -5,7 +5,18 @@ All notable changes are listed here. The project follows
 and the worker protocol (`orbit.worker.v1`) are versioned separately, as
 described in RFC-0001 §17.
 
-## [0.1.0] — unreleased
+## Unreleased
+
+- Documentation website (landing page and full documentation), deployed to
+  GitHub Pages.
+- The server shuts down gracefully on `SIGTERM` as well as `SIGINT`; the
+  container image sets `STOPSIGNAL SIGINT`.
+- `orbit fmt` keeps Windows (CRLF) line endings.
+- The CLI exits quietly when its output pipe closes (`orbit logs --json | head`).
+- `install.sh` explains how to install when a release has no binary for the
+  platform (macOS: `cargo install orbit-lang`).
+
+## [0.1.0] — 2026-11-15
 
 First public version.
 

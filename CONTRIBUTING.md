@@ -49,7 +49,7 @@ have. In VS Code, the same checks are tasks (*Terminal → Run Task*), and
 - **Never weaken durability.** Events are persisted before memory changes,
   and delivery is at-least-once. Don't add shortcuts that skip either.
 - **Diagnostics are an API.** Error codes never change meaning. Add new codes
-  to `docs/diagnostics.md`.
+  to `docs/src/reference/diagnostics.md`.
 - **Protocol changes** go into `protocol/orbit/worker/v1/worker.proto` and its
   copy in `crates/orbit-runtime/proto/`. A test checks the two are identical.
   Keep changes backwards compatible within `v1`.

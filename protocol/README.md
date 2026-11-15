@@ -14,7 +14,7 @@ There are two bindings of the same service, with the same semantics:
 Credentials work the same on both bindings: `Authorization: Bearer <token>`
 (HTTP header or gRPC metadata) with the shared worker token or a per-worker
 token, or a client certificate under mutual TLS. See
-[docs/runtime.md](../docs/runtime.md#security).
+[Security](../docs/src/runtime/security.md).
 
 ## Lifecycle
 

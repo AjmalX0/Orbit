@@ -1,0 +1,44 @@
+name: pages
+
+# Builds the website (landing page and documentation) on every push and pull
+# request; deploys it to GitHub Pages from main.
+on:
+  push:
+    branches-ignore: ["dependabot/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with: { tool: mdbook@0.4.52 }
+      - name: Build the site
+        run: ./scripts/build-site.sh
+      - name: Check internal links
+        run: python3 scripts/check-site-links.py target/site
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: target/site }
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

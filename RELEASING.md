@@ -14,8 +14,8 @@ The tag produces:
 
 | Artifact | Where | Needs |
 |---|---|---|
-| `orbit` binaries (Linux x86_64/arm64, macOS x86_64/arm64, Windows x86_64) + `SHA256SUMS` | GitHub Release | nothing |
-| Container image `ghcr.io/<owner>/orbit:X.Y.Z` and `:latest` | GitHub Packages | nothing |
+| `orbit` binaries (Linux x86_64/arm64, Windows x86_64, and macOS x86_64/arm64 when macOS runners are available to the repository) + `SHA256SUMS`, `install.sh`, the VS Code `.vsix` | GitHub Release | nothing |
+| Container image `ghcr.io/<owner>/orbit:vX.Y.Z` and `:latest` (linux/amd64) | GitHub Packages | nothing |
 | Go module tag `sdks/go/vX.Y.Z` | the repository | nothing |
 | Crates `orbit-syntax`, `orbit-ir`, `orbit-compiler`, `orbit-runtime`, `orbit-worker`, `orbit-lang` | crates.io | secret `CARGO_REGISTRY_TOKEN` |
 | `orbit-lang-sdk` | PyPI | secret `PYPI_API_TOKEN`, or trusted publishing (environment `pypi`) with repository variable `PYPI_TRUSTED_PUBLISHING=true` |
@@ -26,3 +26,12 @@ The tag produces:
 
 A registry without credentials is skipped, not failed, so you can enable them
 one at a time.
+
+## Documentation website
+
+`.github/workflows/pages.yml` builds the landing page (`website/`) and the
+documentation (`docs/`, an mdBook) on every push and deploys them to GitHub
+Pages from `main`. Build locally with `./scripts/build-site.sh` (needs
+`cargo install mdbook --version 0.4.52 --locked`); the output is in
+`target/site`. In the repository settings, **Pages → Source** must be set to
+**GitHub Actions** once.

@@ -30,14 +30,14 @@
     else hljs.highlightElement(block);
     block.classList.add("hljs");
   });
-  // "ORBIT home" link back to the landing page in the top bar.
-  var title = document.querySelector(".menu-title");
-  if (title && !document.querySelector(".orbit-home")) {
+  // "Home" link back to the landing page, in the left toolbar group.
+  var bar = document.querySelector("#menu-bar .left-buttons");
+  if (bar && !document.querySelector(".orbit-home")) {
     var a = document.createElement("a");
     a.href = (window.path_to_root || "") + "../";
     a.className = "orbit-home";
-    a.textContent = "Home";
-    a.title = "ORBIT home page";
-    title.parentNode.insertBefore(a, title);
+    a.textContent = "ORBIT home";
+    a.title = "Back to the ORBIT home page";
+    bar.appendChild(a);
   }
 })();
