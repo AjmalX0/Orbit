@@ -664,7 +664,10 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
 }
 
 fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {
-    // Compensations run one at a time, newest completed unit first (Saga).
+    // Compensations run one at a time, newest completed unit first (Saga). A
+    // compensation that fails does not stop the others: every remaining effect
+    // is still undone, and each failure is reported at the end.
+    let mut failures = vec![];
     for step in &state.compensation_order {
         let key = compensation_key(step);
         let u = unit(state, &key);
@@ -674,13 +677,11 @@ fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {
                 let error = u
                     .error
                     .unwrap_or_else(|| TaskError::new("UNKNOWN", "compensation failed", false));
-                return vec![
-                    Event::CompensationFailed {
-                        step: step.clone(),
-                        error,
-                    },
-                    finish(state, CompensationOutcome::Failed),
-                ];
+                failures.push(Event::CompensationFailed {
+                    step: step.clone(),
+                    error,
+                });
+                continue;
             }
             UnitStatus::Pending => {
                 return match invocation(def, &key) {
@@ -693,6 +694,10 @@ fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {
             }
             _ => return vec![],
         }
+    }
+    if !failures.is_empty() {
+        failures.push(finish(state, CompensationOutcome::Failed));
+        return failures;
     }
     vec![
         Event::CompensationCompleted {},

@@ -139,7 +139,7 @@ Error objects (`error`) have the fields `code` (string), `message` (string), `re
 |---|---|---|
 | `CompensationStarted` | `reason`, `steps` | The execution is `COMPENSATING`. `steps` lists the units to compensate, newest success first. `reason` explains the abort. |
 | `CompensationCompleted` | none | Every compensation succeeded. Followed by the terminal event. |
-| `CompensationFailed` | `step`, `error` | A compensation failed permanently. `step` is the compensated unit. Followed by the terminal event with `compensation: failed`. |
+| `CompensationFailed` | `step`, `error` | A compensation failed permanently. `step` is the compensated unit. Recorded once per failed compensation after the remaining compensations have run, followed by the terminal event with `compensation: failed`. |
 
 Compensation units use the step events above with keys such as `compensate:reserve_inventory`.
 

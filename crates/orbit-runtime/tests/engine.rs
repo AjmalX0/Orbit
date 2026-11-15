@@ -1071,3 +1071,41 @@ fn v1_workflows_keep_their_ir_version() {
     assert_eq!(ir.ir_version, "orbit-ir/1");
     assert!(ir.signals.is_empty() && ir.queries.is_empty());
 }
+
+#[test]
+fn a_failed_compensation_does_not_stop_the_others() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0"
+        step one { worker "a" with { n: 1 } compensate { worker "undo" with { n: one.n } } }
+        step two { worker "a" after one with { n: 2 } compensate { worker "undo" with { n: two.n } } }
+        step boom { worker "b" after two with { n: 3 } }
+    }"#,
+    );
+    let id = h.start(&ir, json!({}));
+    let w = h.worker("w", "python", &["a", "b", "undo"]);
+    echo(&mut h, &w);
+    echo(&mut h, &w);
+    let t = h.poll(&w).unwrap();
+    h.engine
+        .fail(&t.token, TaskError::new("BOOM", "no", false))
+        .unwrap();
+    // Newest first: two's compensation fails...
+    let t = h.poll(&w).unwrap();
+    assert_eq!(t.input, json!({ "n": 3 }));
+    h.engine
+        .fail(
+            &t.token,
+            TaskError::new("UNDO_FAILED", "cannot undo", false),
+        )
+        .unwrap();
+    // ...and one's compensation still runs.
+    let t = h.poll(&w).expect("remaining compensation still runs");
+    assert_eq!(t.input, json!({ "n": 2 }));
+    h.engine.complete(&t.token, json!({ "ok": true })).unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    assert_eq!(s.compensation, Some(CompensationOutcome::Failed));
+    assert_eq!(s.units["compensate:one"].status(), UnitStatus::Succeeded);
+    assert!(h.events(&id).contains(&"CompensationFailed"));
+}

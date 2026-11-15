@@ -158,13 +158,16 @@ Every failed, cancelled or timed-out execution records how compensation went:
 |---------|---------|
 | `none` | No succeeded step had a `compensate` block. |
 | `completed` | Every compensation succeeded. |
-| `failed` | A compensation failed permanently, after its own retries. |
+| `failed` | At least one compensation failed permanently, after its own retries. |
 
-When a compensation fails permanently, the runtime records
-`CompensationFailed` and ends the execution immediately: the remaining
-compensations are **not** run. The history shows exactly which steps were
-undone and which were not, so an operator can finish the cleanup. Give
-compensations generous retry policies for that reason.
+A compensation that fails permanently does not stop the others: the runtime
+keeps undoing the remaining steps, newest first, so as few effects as possible
+are left behind. When every compensation has run, it records one
+`CompensationFailed` event per failed compensation and ends the execution with
+`compensation: failed`. The history shows exactly which steps were undone and
+which were not, so an operator can finish the cleanup. Give compensations
+generous retry policies for that reason. (Version 0.1.0 stopped at the first
+failed compensation.)
 
 ## Compensation in the history
 

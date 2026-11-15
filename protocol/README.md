@@ -50,8 +50,12 @@ worker                                   runtime
    stable across retries (`attempt` increases) and redeliveries (`redelivery:
    true`, same `attempt`).
 5. **Cancellation is cooperative.** When a token appears in a heartbeat's
-   `cancel` list, stop the work if you can. Any result you send for that token
-   is then ignored.
+   `cancel` list, stop the work if you can, and still report what happened.
+   If the attempt was superseded (it timed out and was retried, or its result
+   was already recorded), a late result is recorded as stale and ignored. If
+   the workflow is being cancelled or is failing, the runtime waits for
+   in-flight attempts and records their results: an attempt that did complete
+   is then compensated, so its effect is not left behind.
 6. **Liveness.** Polls and heartbeats both count as contact. If a session is
    silent for longer than `session_timeout_ms`, its in-flight tasks are
    redelivered elsewhere.

@@ -12,8 +12,10 @@ import java.util.concurrent.CompletableFuture;
  * {@code cancel} list (timeout or workflow cancellation) or when its deadline passes.
  * Cancellation sets {@link #isCancelled()}, completes {@link #cancellation()} and
  * interrupts the thread running the handler, so blocking calls such as
- * {@code Thread.sleep} throw {@link InterruptedException}. Any result sent after
- * cancellation is ignored by the runtime.
+ * {@code Thread.sleep} throw {@link InterruptedException}. A result sent after
+ * cancellation is ignored if the attempt was superseded (it timed out and was
+ * retried); while the workflow is being cancelled the runtime still records it,
+ * so an attempt that did complete is compensated.
  *
  * <p>Delivery is at-least-once: use {@link #idempotencyKey()}, which is stable across
  * retries and redeliveries, to make side effects idempotent.

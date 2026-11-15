@@ -109,7 +109,7 @@ The metrics have no labels. Counters are derived from committed events, are kept
 | `orbit_steps_skipped_total` | counter | `StepSkipped` | Steps skipped by `when` conditions. |
 | `orbit_stale_results_total` | counter | `StaleResultIgnored` | Duplicate or late results ignored. |
 | `orbit_compensations_started_total` | counter | `CompensationStarted` | Executions that started compensating. |
-| `orbit_compensations_failed_total` | counter | `CompensationFailed` | Executions whose compensation failed. |
+| `orbit_compensations_failed_total` | counter | `CompensationFailed` | Compensations that failed permanently (one per failed compensation). |
 | `orbit_events_committed_total` | counter | every event | History events committed. |
 | `orbit_active_executions` | gauge | | Executions not yet finished. |
 | `orbit_worker_sessions` | gauge | | Worker sessions the runtime remembers. A silent session is forgotten after four session timeouts. |
