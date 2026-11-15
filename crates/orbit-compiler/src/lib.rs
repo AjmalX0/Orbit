@@ -744,11 +744,27 @@ fn lower_workflow(
             context: "a step",
             locals: &locals,
         };
-        let mut ck = Checker { env: &env, diags };
+        // `when` is evaluated once for the whole step, before any fan-out, so
+        // the loop variable is not in scope there.
         let condition = s.body.condition.as_ref().map(|c| {
-            let (t, l) = ck.check(c, None);
+            let cond_env = Env { input: Some(&input_ty), steps: &step_types, allowed: None, context: "a step", locals: &[] };
+            let mut cck = Checker { env: &cond_env, diags: &mut *diags };
+            if let Some(f) = &s.body.for_each {
+                let var = &f.variable.name;
+                let mut uses = false;
+                c.walk_paths(&mut |segs, _| uses |= segs[0].name == *var);
+                if uses {
+                    cck.diags.push(
+                        Diagnostic::error("E0401", format!("loop variable `{var}` is not in scope in `when`"), c.span())
+                            .with_note("`when` decides once whether the whole `for` step runs, before it fans out")
+                            .with_help("to process only some elements, filter the list in a previous step"),
+                    );
+                    return orbit_ir::Expr::literal(serde_json::Value::Bool(false));
+                }
+            }
+            let (t, l) = cck.check(c, None);
             if assignable(&t, &Type::Bool.optional()).is_err() {
-                ck.diags.push(Diagnostic::error(
+                cck.diags.push(Diagnostic::error(
                     "E0408",
                     format!("`when` condition must be `Bool`, found `{t}`"),
                     c.span(),
@@ -756,6 +772,7 @@ fn lower_workflow(
             }
             l
         });
+        let mut ck = Checker { env: &env, diags };
         let action = match &s.action {
             Some(StepAction::Worker(task, _)) => {
                 let contract = step_contracts.get(name).copied().flatten();

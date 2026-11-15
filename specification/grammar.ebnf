@@ -1,4 +1,4 @@
-(* ORBIT v0.1 grammar — the language accepted by orbit-syntax 0.1.0.
+(* ORBIT v0.1 grammar: the language accepted by orbit-syntax 0.1.0.
    Notation: ISO EBNF. { x } = zero or more, [ x ] = optional.
 
    Lexical notes
@@ -47,9 +47,17 @@ step_member      = action
                  | "retry" , "{" , { IDENTIFIER , ":" , expression , [ sep ] } , "}"
                  | "idempotency_key" , [ ":" ] , expression
                  | "when" , [ ":" ] , expression
+                 | "for" , IDENTIFIER , "in" , expression        (* fan out over a list *)
+                 | "max_parallel" , [ ":" ] , INTEGER            (* only with `for` *)
                  | "compensate" , "{" , { step_member , [ sep ] } , "}" ;
-action           = "worker" , [ ":" ] , STRING
+action           = "worker" , [ ":" ] , STRING                   (* a task contract name *)
+                 | "workflow" , [ ":" ] , STRING                 (* a child workflow name *)
                  | "sleep" , [ ":" ] , DURATION ;
+(* Restrictions checked by the compiler (see docs/diagnostics.md):
+   - `workflow` steps take no `using`, `retry`, `idempotency_key` or `queue_timeout` (E0307);
+   - `compensate` blocks call a `worker` and take no `when`, `after`, `for` or `max_parallel`;
+   - `for` is not allowed on `sleep` steps; the loop variable is in scope in `with`,
+     `idempotency_key` and `compensate`, but not in `when` (evaluated once per step). *)
 
 (* retry settings: attempts: INTEGER, backoff: fixed | exponential,
    initial_delay: DURATION, max_delay: DURATION, non_retryable: [STRING, ...] *)
@@ -72,7 +80,7 @@ unary            = ( "!" | "-" ) , unary | postfix ;
 postfix          = primary , { "." , IDENTIFIER | "[" , expression , "]" } ;
 primary          = literal
                  | IDENTIFIER , "(" , [ expression , { "," , expression } ] , ")"   (* built-in call *)
-                 | IDENTIFIER                                    (* path root: input | execution | step *)
+                 | IDENTIFIER                                    (* path root: input | execution | step | loop variable *)
                  | "{" , { ( IDENTIFIER | STRING ) , ":" , expression , [ sep ] } , "}"
                  | "[" , [ expression , { sep , expression } ] , "]"
                  | "if" , expression , "then" , expression , "else" , expression
