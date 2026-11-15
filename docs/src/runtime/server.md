@@ -227,7 +227,7 @@ Worker sessions that stay silent for four session timeouts are forgotten; the wo
 
 ## Shutdown
 
-Press Ctrl+C or send `SIGINT` for a graceful shutdown:
+Press Ctrl+C, or send `SIGINT` or `SIGTERM`, for a graceful shutdown:
 
 ```console
 INFO orbit: shutting down
@@ -235,7 +235,7 @@ INFO orbit: shutting down
 
 The server stops accepting connections, waits for in-flight HTTP requests to finish, stops the gRPC listener and exits with status `0`. Long polls are not interrupted: a worker poll can hold shutdown for up to its `wait_ms` (at most 60 seconds), and a `GET /v1/executions/{id}/wait` for up to its `timeout_ms` (at most 300 seconds). With TLS, open connections get at most 10 seconds before they are closed.
 
-`SIGTERM` is not handled: the process ends immediately, as with `SIGKILL`. This is safe, because every state change is committed to the database before it takes effect; on the next start the server recovers exactly what was committed. In a container, where the server runs as process 1 and a signal without a handler is ignored, set the stop signal to `SIGINT` (`docker run --stop-signal SIGINT`, `stop_signal: SIGINT` in Compose) so that `docker stop` shuts the server down gracefully instead of waiting for its timeout. Under systemd, set `KillSignal=SIGINT`. See [Deployment](deployment.md).
+Version 0.1.0 handles only `SIGINT`; `SIGTERM` ends a 0.1.0 server immediately, as `SIGKILL` would. Later versions handle both. Either way no committed state is lost, because every state change is committed to the database before it takes effect, and the next start recovers exactly what was committed. To get a graceful stop from every version, set the stop signal to `SIGINT`: `docker run --stop-signal SIGINT`, `stop_signal: SIGINT` in Compose, or `KillSignal=SIGINT` under systemd. See [Deployment](deployment.md).
 
 ## Single node
 

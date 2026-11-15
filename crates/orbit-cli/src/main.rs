@@ -824,7 +824,7 @@ fn server(mut args: ServerArgs) -> Res {
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {
         let shutdown = async {
-            let _ = tokio::signal::ctrl_c().await;
+            shutdown_signal().await;
             tracing::info!("shutting down");
         };
         orbit_runtime::server::serve(
@@ -853,4 +853,28 @@ fn server(mut args: ServerArgs) -> Res {
     })
     .map_err(|e| e.to_string())?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Resolves on Ctrl+C (SIGINT) or, on Unix, SIGTERM, which `docker stop`,
+/// Kubernetes and systemd send.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

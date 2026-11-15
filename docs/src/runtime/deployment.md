@@ -44,7 +44,7 @@ docker run -d --name orbit --restart unless-stopped \
   ghcr.io/ajmalx0/orbit:v0.1.0 server --log-format json
 ```
 
-- The server shuts down gracefully on `SIGINT` and does not handle `SIGTERM`, the signal `docker stop` sends by default. In a container the server is process 1, and process 1 ignores signals it has no handler for, so without `--stop-signal SIGINT` a `docker stop` waits for its timeout and then kills the server. `--stop-timeout 75` leaves time for open worker long polls (up to 60 seconds) to finish. Killing the server loses no committed state; the graceful path only avoids interrupting requests.
+- `--stop-signal SIGINT` makes `docker stop` shut the server down gracefully with every version. Version 0.1.0 does not handle `SIGTERM`, the signal `docker stop` sends by default, and in a container the server is process 1, which ignores signals it has no handler for; later versions handle `SIGTERM` and their image sets `STOPSIGNAL SIGINT`. `--stop-timeout 75` leaves time for open worker long polls (up to 60 seconds) to finish. Killing the server loses no committed state; the graceful path only avoids interrupting requests.
 - Arguments after the image name replace the default command, so start them with `server`.
 - The entrypoint is `orbit`, so the same image runs any CLI command: `docker run --rm ghcr.io/ajmalx0/orbit:v0.1.0 --version`.
 

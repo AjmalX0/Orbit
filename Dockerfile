@@ -17,5 +17,6 @@ WORKDIR /data
 VOLUME ["/data"]
 EXPOSE 7233 7234
 ENV ORBIT_DB=/data/orbit.db ORBIT_ADDR=0.0.0.0:7233
+STOPSIGNAL SIGINT
 ENTRYPOINT ["orbit"]
 CMD ["server"]
