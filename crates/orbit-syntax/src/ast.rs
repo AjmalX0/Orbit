@@ -95,6 +95,8 @@ pub struct Workflow {
     pub queries: Vec<QueryDecl>,
     /// `on failure|cancel|timeout { step ... }` blocks.
     pub handlers: Vec<Handler>,
+    /// `limits { max_fan_out: 100, ... }`.
+    pub limits: Option<Retry>,
     pub ret: Option<Expr>,
     pub span: Span,
 }

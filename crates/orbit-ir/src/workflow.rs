@@ -50,10 +50,28 @@ pub struct WorkflowIr {
     /// is in topological order. Unit keys are `on_<kind>:<step>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub handlers: BTreeMap<String, Vec<StepIr>>,
+    /// `limits { ... }`: per-workflow resource limits. The runtime applies the
+    /// stricter of these and its own server-wide limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<WorkflowLimits>,
     /// Source locations for diagnostics and tooling (not hashed).
     #[serde(default)]
     pub source_map: BTreeMap<String, SourceLocation>,
 }
+
+/// Per-workflow resource limits (each optional).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fan_out: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_history_events: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_payload_bytes: Option<u64>,
+}
+
+/// Names accepted in a `limits { ... }` block.
+pub const WORKFLOW_LIMITS: &[&str] = &["max_fan_out", "max_history_events", "max_payload_bytes"];
 
 /// `query <name> = <expr>`: evaluated on demand against the current state.
 /// Step outputs read by a query are optional (the step may not have run yet).
@@ -433,6 +451,7 @@ impl WorkflowIr {
         !self.signals.is_empty()
             || !self.queries.is_empty()
             || !self.handlers.is_empty()
+            || self.limits.is_some()
             || self.result.as_ref().is_some_and(lambda)
             || self.steps.iter().any(|s| {
                 matches!(s.action, Action::Await { .. } | Action::Compute { .. })

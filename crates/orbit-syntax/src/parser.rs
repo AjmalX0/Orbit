@@ -41,6 +41,7 @@ const WORKFLOW_MEMBERS: &[&str] = &[
     "step",
     "signal",
     "query",
+    "limits",
     "return",
     "on",
 ];
@@ -472,6 +473,7 @@ impl Parser {
             signals: vec![],
             queries: vec![],
             handlers: vec![],
+            limits: None,
             ret: None,
             span: start,
         };
@@ -506,6 +508,24 @@ impl Parser {
                     wf.output = Some((fields, s.to(span)));
                 }
                 "step" => wf.steps.push(p.step()?),
+                "limits" => {
+                    let s = p.bump().span;
+                    if wf.limits.is_some() {
+                        p.diagnostics
+                            .push(Diagnostic::error("E0106", "duplicate `limits`", s));
+                    }
+                    let mut members = vec![];
+                    let span = p.block("limits", &[], |p| {
+                        let key = p.ident("a limit name")?;
+                        p.expect(TokenKind::Colon)?;
+                        members.push((key, p.expr()));
+                        Ok(true)
+                    });
+                    wf.limits = Some(Retry {
+                        members,
+                        span: s.to(span),
+                    });
+                }
                 "signal" => {
                     let s = p.bump().span;
                     let name = p.ident("a signal name")?;

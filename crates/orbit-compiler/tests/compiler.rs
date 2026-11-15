@@ -759,3 +759,33 @@ fn outcome_handlers() {
         vec!["E0401"]
     );
 }
+
+#[test]
+fn workflow_limits() {
+    let ir = ok(
+        r#"workflow W { version "1.0.0" limits { max_fan_out: 10, max_history_events: 500 } step a { compute 1 } }"#,
+    );
+    let l = ir.limits.unwrap();
+    assert_eq!(
+        (l.max_fan_out, l.max_history_events, l.max_payload_bytes),
+        (Some(10), Some(500), None)
+    );
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" limits { max_fanout: 1 } step a { compute 1 } }"#),
+        vec!["E0320"]
+    );
+    assert!(errors(
+        r#"workflow W { version "1.0.0" limits { max_fanout: 1 } step a { compute 1 } }"#
+    )
+    .contains("did you mean `max_fan_out`?"));
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" limits { max_fan_out: 0 } step a { compute 1 } }"#),
+        vec!["E0321"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" input { n: Int } limits { max_fan_out: input.n } step a { compute 1 } }"#
+        ),
+        vec!["E0321"]
+    );
+}

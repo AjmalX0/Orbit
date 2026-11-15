@@ -407,7 +407,7 @@ impl Engine {
             input = json!({});
         }
         def.input.apply_defaults(&mut input);
-        self.check_payload("execution input", &input)?;
+        self.check_payload(Some(&def), "execution input", &input)?;
         def.input.validate(&input, parent.is_none()).map_err(|e| {
             EngineError::new(
                 400,
@@ -455,7 +455,10 @@ impl Engine {
         };
         if parent.is_none() {
             if let Some(max) = self.config.limits.max_active_executions {
-                if self.active.len() >= max {
+                // Child workflows are part of their parent's work: only
+                // executions started by callers count.
+                let running = self.active.values().filter(|s| s.parent.is_none()).count();
+                if running >= max {
                     return Err(EngineError::new(
                         429,
                         "RESOURCE_EXHAUSTED",
@@ -540,7 +543,7 @@ impl Engine {
                 },
             ));
         };
-        self.check_payload("signal payload", &payload)?;
+        self.check_payload(Some(&def), "signal payload", &payload)?;
         ty.apply_defaults(&mut payload);
         if let Err(e) = ty.validate(&payload, false) {
             return Err(EngineError::new(
@@ -610,15 +613,20 @@ impl Engine {
         })
     }
 
-    /// Reject a payload larger than `--max-payload-bytes`.
-    fn check_payload(&self, what: &str, value: &Value) -> Result<()> {
-        if let Some(max) = self.config.limits.max_payload_bytes {
+    /// Reject a payload larger than `--max-payload-bytes` (or the workflow's
+    /// own `max_payload_bytes`, whichever is smaller).
+    fn check_payload(&self, def: Option<&WorkflowIr>, what: &str, value: &Value) -> Result<()> {
+        let limits = match def {
+            Some(d) => effective_limits(&self.config.limits, d),
+            None => self.config.limits.clone(),
+        };
+        if let Some(max) = limits.max_payload_bytes {
             let size = serde_json::to_vec(value).map(|v| v.len()).unwrap_or(0);
             if size > max {
                 return Err(EngineError::new(
                     413,
                     "PAYLOAD_TOO_LARGE",
-                    format!("{what} is {size} bytes; the limit is {max} (--max-payload-bytes)"),
+                    format!("{what} is {size} bytes; the limit is {max} (--max-payload-bytes or the workflow's `limits`)"),
                 ));
             }
         }
@@ -761,7 +769,7 @@ impl Engine {
         let now = self.now();
         let mut scratch = state.clone();
         let mut batch = vec![];
-        let limits = self.config.limits.clone();
+        let limits = effective_limits(&self.config.limits, &def);
         for _ in 0..10_000 {
             let mut events = decide(&scratch, &def, now);
             if events.is_empty() {
@@ -1344,7 +1352,7 @@ impl Engine {
         if output.is_null() {
             output = json!({});
         }
-        self.check_payload("task result", &output)?;
+        self.check_payload(Some(&def), "task result", &output)?;
         let inv = invocation(&def, &key).cloned();
         let validation = inv
             .as_ref()
@@ -1532,6 +1540,27 @@ impl Engine {
     }
 }
 
+/// The stricter of the server's limits and the workflow's `limits { ... }`.
+pub fn effective_limits(server: &Limits, def: &WorkflowIr) -> Limits {
+    fn min<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (x, None) => x,
+            (None, y) => y,
+        }
+    }
+    let w = def.limits.clone().unwrap_or_default();
+    Limits {
+        max_active_executions: server.max_active_executions,
+        max_fan_out: min(server.max_fan_out, w.max_fan_out.map(|v| v as usize)),
+        max_history_events: min(server.max_history_events, w.max_history_events),
+        max_payload_bytes: min(
+            server.max_payload_bytes,
+            w.max_payload_bytes.map(|v| v as usize),
+        ),
+    }
+}
+
 /// Apply fan-out and history limits to the decider's next events (the decider
 /// itself stays a pure function of the history and the definition).
 fn enforce_limits(limits: &Limits, state: &ExecutionState, events: &mut Vec<Event>) {
@@ -1544,7 +1573,7 @@ fn enforce_limits(limits: &Limits, state: &ExecutionState, events: &mut Vec<Even
                         error: TaskError::new(
                             "LIMIT_EXCEEDED",
                             format!(
-                                "`for` over {} elements exceeds the fan-out limit of {max} (--max-fan-out)",
+                                "`for` over {} elements exceeds the fan-out limit of {max} (--max-fan-out or the workflow's `limits`)",
                                 items.len()
                             ),
                             false,
@@ -1562,7 +1591,7 @@ fn enforce_limits(limits: &Limits, state: &ExecutionState, events: &mut Vec<Even
             events.push(Event::LimitExceeded {
                 limit: "max_history_events".into(),
                 message: format!(
-                    "the execution reached {max} history events (--max-history-events)"
+                    "the execution reached {max} history events (--max-history-events or the workflow's `limits`)"
                 ),
             });
         }

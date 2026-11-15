@@ -1368,3 +1368,58 @@ fn max_payload_bytes_rejects_large_inputs_results_and_signals() {
     let e = h.engine.signal(&id, "go", json!({ "s": big })).unwrap_err();
     assert_eq!(e.code, "PAYLOAD_TOO_LARGE");
 }
+
+#[test]
+fn workflow_limits_apply_with_the_stricter_server_limit() {
+    // No server limits: the workflow's own limits apply.
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0"
+        input { l: List<Int>, s: String }
+        limits { max_fan_out: 2, max_payload_bytes: 100 }
+        step each { for x in input.l compute x }
+    }"#,
+    );
+    assert_eq!(ir.ir_version, "orbit-ir/2");
+    let id = h.start(&ir, json!({ "l": [1, 2, 3], "s": "" }));
+    assert_eq!(
+        h.state(&id).units["each"].error.as_ref().unwrap().code,
+        "LIMIT_EXCEEDED"
+    );
+    let e = h
+        .engine
+        .start("W", None, json!({ "l": [], "s": "x".repeat(200) }), None)
+        .unwrap_err();
+    assert_eq!(e.code, "PAYLOAD_TOO_LARGE");
+    // A stricter server limit wins over a looser workflow limit.
+    let mut h2 = limited(orbit_runtime::engine::Limits {
+        max_fan_out: Some(1),
+        ..Default::default()
+    });
+    let id2 = h2.start(&ir, json!({ "l": [1, 2], "s": "" }));
+    assert_eq!(
+        h2.state(&id2).units["each"].error.as_ref().unwrap().code,
+        "LIMIT_EXCEEDED"
+    );
+}
+
+#[test]
+fn child_workflows_do_not_count_toward_max_active_executions() {
+    let mut h = limited(orbit_runtime::engine::Limits {
+        max_active_executions: Some(1),
+        ..Default::default()
+    });
+    let wfs = compile_all(
+        r#"workflow Child { version "1.0.0" step c { worker "a" with { n: 1 } } }
+        workflow Parent { version "1.0.0" step kid { workflow "Child" } }"#,
+    );
+    register_all(&mut h, &wfs);
+    let id = h
+        .engine
+        .start("Parent", None, json!({}), None)
+        .unwrap()
+        .execution_id;
+    h.advance(1);
+    // The child started even though the parent already uses the only slot.
+    assert!(h.engine.execution(&format!("{id}.kid")).is_ok());
+}

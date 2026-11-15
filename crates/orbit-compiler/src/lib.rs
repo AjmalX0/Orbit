@@ -1203,6 +1203,52 @@ fn lower_workflow(
         }
     }
 
+    // --- Per-workflow resource limits.
+    let limits = wf.limits.as_ref().map(|block| {
+        let mut l = ir::WorkflowLimits::default();
+        for (key, expr) in &block.members {
+            let value = match expr {
+                ast::Expr::Int(n, _) if *n > 0 => Some(*n as u64),
+                _ => {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0321",
+                            format!("limit `{}` must be a positive integer literal", key.name),
+                            expr.span(),
+                        )
+                        .with_help("for example `max_fan_out: 100`"),
+                    );
+                    None
+                }
+            };
+            let slot = match key.name.as_str() {
+                "max_fan_out" => &mut l.max_fan_out,
+                "max_history_events" => &mut l.max_history_events,
+                "max_payload_bytes" => &mut l.max_payload_bytes,
+                other => {
+                    let mut d =
+                        Diagnostic::error("E0320", format!("unknown limit `{other}`"), key.span);
+                    if let Some(sug) = suggest(other, ir::WORKFLOW_LIMITS.iter().copied()) {
+                        d = d.with_help(format!("did you mean `{sug}`?"));
+                    } else {
+                        d = d.with_note(format!("limits: {}", ir::WORKFLOW_LIMITS.join(", ")));
+                    }
+                    diags.push(d);
+                    continue;
+                }
+            };
+            if slot.is_some() {
+                diags.push(Diagnostic::error(
+                    "E0106",
+                    format!("duplicate limit `{}`", key.name),
+                    key.span,
+                ));
+            }
+            *slot = value;
+        }
+        l
+    });
+
     // --- Outcome handlers (`on failure|cancel|timeout`).
     let handlers = lower_handlers(
         wf,
@@ -1232,6 +1278,7 @@ fn lower_workflow(
         signals: signal_types,
         queries,
         handlers,
+        limits,
         source_map,
     };
     ir.ir_version = ir.required_ir_version().into();
