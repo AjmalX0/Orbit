@@ -1,0 +1,39 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OrbitLang.Sdk", "OrbitLang.Sdk\OrbitLang.Sdk.csproj", "{4D6BBDC8-A6B9-42C6-962C-EADC4977298C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OrbitLang.Sdk.Tests", "OrbitLang.Sdk.Tests\OrbitLang.Sdk.Tests.csproj", "{CBE8C4C9-2AC8-4136-ACDD-6BE25A6ED6E0}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "examples", "examples", "{BD9674ED-8FD0-4A4C-9EB0-7D390DADA4D6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HelloWorker", "..\..\examples\workers\csharp\HelloWorker.csproj", "{D3E1F721-65AC-48C9-8ED8-D7BB92CA6233}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4D6BBDC8-A6B9-42C6-962C-EADC4977298C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4D6BBDC8-A6B9-42C6-962C-EADC4977298C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4D6BBDC8-A6B9-42C6-962C-EADC4977298C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4D6BBDC8-A6B9-42C6-962C-EADC4977298C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CBE8C4C9-2AC8-4136-ACDD-6BE25A6ED6E0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CBE8C4C9-2AC8-4136-ACDD-6BE25A6ED6E0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CBE8C4C9-2AC8-4136-ACDD-6BE25A6ED6E0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CBE8C4C9-2AC8-4136-ACDD-6BE25A6ED6E0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D3E1F721-65AC-48C9-8ED8-D7BB92CA6233}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D3E1F721-65AC-48C9-8ED8-D7BB92CA6233}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D3E1F721-65AC-48C9-8ED8-D7BB92CA6233}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D3E1F721-65AC-48C9-8ED8-D7BB92CA6233}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{D3E1F721-65AC-48C9-8ED8-D7BB92CA6233} = {BD9674ED-8FD0-4A4C-9EB0-7D390DADA4D6}
+	EndGlobalSection
+EndGlobal
