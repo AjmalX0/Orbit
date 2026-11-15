@@ -8,12 +8,14 @@
       keywords: {
         keyword:
           "workflow task schema import step worker using after with when for in max_parallel " +
+          "signal query await compute compensated_by " +
           "timeout queue_timeout retry compensate idempotency_key sleep version description input " +
           "output return if then else on",
         literal: "true false null",
         type: "String Int Float Bool Bytes Duration Timestamp UUID JSON List Map",
         built_in:
           "len coalesce is_null string int float contains lower upper trim join keys min max abs " +
+          "sum map filter find any all " +
           "execution",
       },
       contains: [

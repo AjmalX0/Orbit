@@ -308,7 +308,12 @@ fn fields_of(ty: &Type) -> Vec<(String, String)> {
 
 const KEYWORD_DOCS: &[(&str, &str)] = &[
     ("workflow", "Declares a workflow: a versioned, durable graph of steps."),
-    ("step", "A unit of work: a worker task, a child `workflow`, or a durable `sleep`."),
+    ("step", "A unit of work: a worker task, a child `workflow`, a durable `sleep`, an `await` or a `compute`."),
+    ("signal", "`signal <name> { fields }` declares a typed message the workflow accepts."),
+    ("await", "`await <signal>` waits durably for the next signal of that name; its payload is the step output."),
+    ("query", "`query <name> = <expr>` declares a read-only view of the execution state (steps that have not run read as `null`)."),
+    ("compute", "`compute <expr>` evaluates a deterministic expression in the runtime, with no worker."),
+    ("compensated_by", "On a task contract: steps calling this task must compensate with the named task (W0601/W0602)."),
     ("worker", "`worker \"task.name\"` runs a task implemented by a worker in any language."),
     ("task", "Declares a worker contract: version, input and output types."),
     ("schema", "A named record type."),
@@ -337,7 +342,13 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     ("is_null", "is_null(x) -> Bool"),
     ("string", "string(x) -> String"),
     ("int", "int(Int | Float | String | Bool) -> Int"),
-    ("float", "float(Int | Float | String) -> Float"),
+    ("float", "float(Int | Float | String | Bool) -> Float"),
+    ("sum", "sum(List<Int | Float>) -> Int | Float"),
+    ("map", "map(List<T>, x => U) -> List<U>"),
+    ("filter", "filter(List<T>, x => Bool) -> List<T>"),
+    ("find", "find(List<T>, x => Bool) -> T?"),
+    ("any", "any(List<T>, x => Bool) -> Bool"),
+    ("all", "all(List<T>, x => Bool) -> Bool"),
     (
         "contains",
         "contains(String, String) | contains(List<T>, T) | contains(Map, String) -> Bool",
