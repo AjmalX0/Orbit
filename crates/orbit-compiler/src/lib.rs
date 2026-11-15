@@ -5,6 +5,7 @@
 //! validation → typed IR generation.
 
 pub mod check;
+pub mod compat;
 pub mod prelude;
 pub mod types;
 

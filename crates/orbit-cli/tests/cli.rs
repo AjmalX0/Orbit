@@ -109,3 +109,80 @@ fn graph_renders_mermaid() {
     assert!(text.starts_with("flowchart TD"));
     assert!(text.contains("reserve_inventory --> process_payment"));
 }
+
+#[test]
+fn compat_reports_breaking_changes_and_exit_codes() {
+    let dir = tmp("compat");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = |version: &str, ty: &str| {
+        format!("workflow Invoice {{ version \"{version}\" input {{ amount: {ty} }} step pause {{ sleep 1s }} }}\n")
+    };
+    let old = dir.join("old.orbit");
+    let minor = dir.join("minor.orbit");
+    let major = dir.join("major.orbit");
+    std::fs::write(&old, src("1.4.0", "Float")).unwrap();
+    std::fs::write(&minor, src("1.5.0", "Int")).unwrap();
+    std::fs::write(&major, src("2.0.0", "Int")).unwrap();
+
+    let out = orbit()
+        .arg("compat")
+        .arg(&old)
+        .arg(&minor)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("error   workflow Invoice 1.4.0 → 1.5.0: input.amount: Float → Int:"),
+        "{text}"
+    );
+    assert!(text.contains("hint: bump the major version (1.4.0 → 2.0.0)"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("compatibility check failed"));
+
+    let out = orbit()
+        .arg("compat")
+        .arg(&old)
+        .arg(&major)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Compiled IR works on either side, and --format json is machine-readable.
+    let build = dir.join("build");
+    let c = orbit()
+        .arg("compile")
+        .arg(&old)
+        .arg("-o")
+        .arg(&build)
+        .output()
+        .unwrap();
+    assert!(c.status.success());
+    let out = orbit()
+        .args(["compat", "--format", "json"])
+        .arg(build.join("old.orbit.json"))
+        .arg(&minor)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["compatible"], false);
+    assert_eq!(json["findings"][0]["path"], "input.amount");
+
+    // A file that does not compile, or does not exist, is a usage error.
+    let bad = dir.join("bad.orbit");
+    std::fs::write(&bad, "workflow {").unwrap();
+    let out = orbit().arg("compat").arg(&old).arg(&bad).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = orbit()
+        .arg("compat")
+        .arg(&old)
+        .arg(dir.join("missing.orbit"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

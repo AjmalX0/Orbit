@@ -54,6 +54,7 @@
 # Tooling
 
 - [Formatter](tooling/fmt.md)
+- [Compatibility checks](tooling/compat.md)
 - [Editor support](tooling/editors.md)
 - [Workflow graphs](tooling/graph.md)
 
