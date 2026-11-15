@@ -436,7 +436,9 @@ impl Ctx {
                     e.consumed = true;
                     let reply = match e.kind.as_str() {
                         "signal" => Some(json!({ "seq": signal_seq }).to_string()),
-                        "cancel" => Some(json!({ "ok": true }).to_string()),
+                        // Provisional: the final state follows once the
+                        // cancellation's own decisions are committed.
+                        "cancel" => Some(json!({ "ok": true, "pending": true }).to_string()),
                         _ => None,
                     };
                     consumed.push((e.seq, reply));
@@ -717,11 +719,14 @@ impl Ctx {
             });
             match r {
                 Ok(Some((true, result))) => {
-                    return Some(
-                        result
-                            .and_then(|r| serde_json::from_str(&r).ok())
-                            .unwrap_or(Value::Null),
-                    )
+                    let v: Value = result
+                        .and_then(|r| serde_json::from_str(&r).ok())
+                        .unwrap_or(Value::Null);
+                    // A provisional cancel reply: wait for the final state,
+                    // but answer with what there is at the deadline.
+                    if v["pending"] != json!(true) || Instant::now() >= deadline {
+                        return Some(v);
+                    }
                 }
                 Ok(None) => return Some(Value::Null),
                 _ => {}
@@ -1536,8 +1541,20 @@ impl Control {
             self.ctx.applying.store(true, Ordering::SeqCst);
             let r = apply_entry(&mut e, &exec, &kind, &p);
             self.ctx.applying.store(false, Ordering::SeqCst);
+            // A cancel answers with the state after its decisions, as a
+            // single server does.
+            let cancelled_state = (kind == "cancel" && r.is_ok())
+                .then(|| e.execution(&exec).ok())
+                .flatten()
+                .map(|st| json!({ "ok": true, "state": st }).to_string());
             drop(e);
             if self.ctx.unstage(seq) {
+                if let Some(final_reply) = cancelled_state {
+                    let _ = c.execute(
+                        "UPDATE orbit_inbox SET result = $2 WHERE seq = $1",
+                        &[&seq, &final_reply],
+                    );
+                }
                 continue;
             }
             let reply = |v: String| matches!(kind.as_str(), "signal" | "cancel").then_some(v);
@@ -1549,7 +1566,9 @@ impl Control {
                     continue;
                 }
                 Err(err) => reply(error_json(err.status, err.code, &err.message)),
-                Ok(()) => reply(json!({ "ok": true }).to_string()),
+                Ok(()) => {
+                    reply(cancelled_state.unwrap_or_else(|| json!({ "ok": true }).to_string()))
+                }
             };
             match finish {
                 None => c.execute("DELETE FROM orbit_inbox WHERE seq = $1", &[&seq]),
@@ -1900,6 +1919,13 @@ async fn finish_forwarded(g: &Gate, path: &str, seq: i64, resp: Response) -> Res
     if path.ends_with("/cancel") {
         if reply.is_none() {
             return resp;
+        }
+        if let Some(state) = reply.as_ref().and_then(|r| r.get("state")).cloned() {
+            let (parts, _) = resp.into_parts();
+            let body = axum::body::Body::from(serde_json::to_vec(&state).unwrap_or_default());
+            let mut out = Response::from_parts(parts, body);
+            out.headers_mut().remove("content-length");
+            return out;
         }
         let st = g.state.clone();
         return match tokio::task::spawn_blocking(move || engine(&st).execution(&id)).await {
