@@ -6,6 +6,11 @@ on:
     branches-ignore: ["dependabot/**"]
   pull_request:
 
+concurrency:
+  # A newer push supersedes older runs on the same branch or pull request.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
