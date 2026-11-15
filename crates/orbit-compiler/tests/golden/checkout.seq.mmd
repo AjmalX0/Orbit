@@ -1,0 +1,24 @@
+sequenceDiagram
+    %% Checkout@1.0.0
+    %% sha256:8e0eda310a1bac4d68d8910cb6103264f436a98cc16535b7c5e95eac2a4a53c3
+    participant W as Checkout
+    participant inventory
+    participant payments
+    participant notifications
+    W->>+inventory: reserve: inventory.reserve@1.0.0
+    inventory-->>-W: { reservation_id }
+    W->>+payments: charge: payments.charge@1.0.0
+    payments-->>-W: PaymentResult
+    opt compensation, in reverse order, after a failure or cancellation
+        W->>+inventory: undo reserve: inventory.release@1.0.0
+        inventory-->>-W: { released }
+    end
+    opt on failure
+        W->>+notifications: tell_customer: notifications.send@1.0.0
+        notifications-->>-W: { delivered }
+        Note over W: summary: compute
+    end
+    opt on cancel
+        W->>+notifications: confirm_cancel: notifications.send@1.0.0
+        notifications-->>-W: { delivered }
+    end

@@ -16,3 +16,5 @@ readme = "README.md"
 orbit-syntax.workspace = true
 orbit-ir.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+toml.workspace = true

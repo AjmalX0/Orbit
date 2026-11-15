@@ -1,0 +1,19 @@
+digraph "OrderApproval" {
+  // OrderApproval@1.0.0
+  // sha256:939fd564b818da34796032e2c0086ce2f28118e2e9f31a6d9c1b21fdbfc57066
+  rankdir=TB;
+  node [shape=box, style=rounded, fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=10];
+  "assess" [label="assess\ncompute"];
+  "signal__review" [label="signal review", shape=cds, style=dashed];
+  "decision" [label="decision\nawait signal review\nwhen assess.needs_approval\ntimeout 2d", shape=hexagon, style=""];
+  "signal__review" -> "decision" [style=dashed];
+  "assess" -> "decision";
+  "charge" [label="charge\npayments.charge@1.0.0 · python\nwhen !assess.needs_approval || coalesce(decision.approved, false)\nidempotency key", shape=hexagon, style=""];
+  "assess" -> "charge";
+  "decision" -> "charge";
+  "charge__undo" [label="undo charge\npayments.refund@1.0.0", style="rounded,dashed"];
+  "charge" -> "charge__undo" [style=dashed, label="compensate"];
+  "notify" [label="notify\nnotifications.send@1.0.0"];
+  "charge" -> "notify";
+}

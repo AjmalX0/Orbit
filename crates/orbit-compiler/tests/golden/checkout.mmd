@@ -1,0 +1,19 @@
+flowchart TD
+    %% Checkout@1.0.0
+    %% sha256:8e0eda310a1bac4d68d8910cb6103264f436a98cc16535b7c5e95eac2a4a53c3
+    classDef compensation stroke-dasharray: 4 3
+    classDef signal stroke-dasharray: 2 2
+    reserve["reserve<br/><small>inventory.reserve@1.0.0</small>"]
+    reserve__undo(["undo reserve<br/><small>inventory.release@1.0.0</small>"]):::compensation
+    reserve -. compensate .-> reserve__undo
+    charge["charge<br/><small>payments.charge@1.0.0</small>"]
+    reserve --> charge
+    subgraph on_failure["on failure"]
+        direction TB
+        on_failure__tell_customer["tell_customer<br/><small>notifications.send@1.0.0</small>"]
+        on_failure__summary["summary<br/><small>compute</small>"]
+    end
+    subgraph on_cancel["on cancel"]
+        direction TB
+        on_cancel__confirm_cancel["confirm_cancel<br/><small>notifications.send@1.0.0</small>"]
+    end

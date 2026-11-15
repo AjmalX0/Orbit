@@ -1,0 +1,17 @@
+flowchart TD
+    %% OrderApproval@1.0.0
+    %% sha256:939fd564b818da34796032e2c0086ce2f28118e2e9f31a6d9c1b21fdbfc57066
+    classDef compensation stroke-dasharray: 4 3
+    classDef signal stroke-dasharray: 2 2
+    assess["assess<br/><small>compute</small>"]
+    signal__review>"signal review"]:::signal
+    decision{{"decision<br/><small>await signal review</small><br/><small>when assess.needs_approval</small><br/><small>timeout 2d</small>"}}
+    signal__review -.-> decision
+    assess --> decision
+    charge{{"charge<br/><small>payments.charge@1.0.0 · python</small><br/><small>when !assess.needs_approval || coalesce(decision.approved, false)</small><br/><small>idempotency key</small>"}}
+    assess --> charge
+    decision --> charge
+    charge__undo(["undo charge<br/><small>payments.refund@1.0.0</small>"]):::compensation
+    charge -. compensate .-> charge__undo
+    notify["notify<br/><small>notifications.send@1.0.0</small>"]
+    charge --> notify

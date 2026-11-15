@@ -84,7 +84,7 @@ workflow W {
     version "1.0.0"
     input { amount: Float }
     step risk { worker "risk.analyze" with { amount: input.amount } }
-    step again { worker "risk.analyze" with { amount: risk.score } }
+    step again { worker "risk.analyze" with { amount: risk.score } timeout 5s }
 }
 "#;
 
@@ -150,11 +150,10 @@ fn language_server_features() {
         "textDocument/hover",
         json!({ "textDocument": { "uri": uri }, "position": pos(DOC, "step again", 0, 7) }),
     );
+    let text = h["contents"]["value"].as_str().unwrap();
+    assert!(text.contains("**step** `again`"), "{h}");
     assert!(
-        h["contents"]["value"]
-            .as_str()
-            .unwrap()
-            .contains("**step** `again`"),
+        text.contains("contract output: `{ score: Float }`") && text.contains("timeout 5s"),
         "{h}"
     );
 
