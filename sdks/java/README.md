@@ -48,8 +48,27 @@ worker.run(); // returns after stop(): in-flight tasks finish, then the worker u
   `resultRetryTimeout`, 10 minutes by default), so they survive a runtime
   restart. A lost session (`404 UNKNOWN_SESSION`) is re-registered automatically.
 * Configuration comes from `Worker.builder()` or from `ORBIT_SERVER`,
-  `ORBIT_WORKER_TOKEN` / `ORBIT_TOKEN` and `ORBIT_CA_CERT`. `runtime` defaults
-  to `java`, `concurrency` to 4 and `pollWait` to 20s.
+  `ORBIT_WORKER_TOKEN` / `ORBIT_TOKEN`, `ORBIT_CA_CERT` and
+  `ORBIT_CLIENT_CERT` / `ORBIT_CLIENT_KEY`. `runtime` defaults to `java`,
+  `concurrency` to 4 and `pollWait` to 20s.
+* **TLS.** `ORBIT_CA_CERT` (or `.caCertFile(path)`) is a PEM CA trusted in
+  addition to the system trust store. For a runtime started with
+  `--tls-client-ca`, present a client certificate signed by that CA; the
+  runtime identifies the worker by its DNS SAN or subject CN:
+
+  ```java
+  Worker.builder()
+      .server("https://orbit.internal:7233")
+      .caCertFile(Path.of("ca.pem"))
+      .clientCert(Path.of("worker.pem"), Path.of("worker.key"))
+      .build();
+  ```
+
+  or `ORBIT_CLIENT_CERT=worker.pem ORBIT_CLIENT_KEY=worker.key`. The
+  certificate file is a PEM chain, leaf first. The key must be unencrypted
+  PKCS#8 (`BEGIN PRIVATE KEY`, which openssl 3 writes by default), RSA or EC.
+  Convert other formats with `openssl pkcs8 -topk8 -nocrypt -in old.key -out worker.key`.
+  `.sslContext(...)` replaces all of this with your own `SSLContext`.
 * Logs go to `System.getLogger("orbit")` (java.util.logging unless you bridge
   it); pass `.logger(...)` to use another. Messages logged from a JVM shutdown
   hook may be dropped by java.util.logging's own hook.
