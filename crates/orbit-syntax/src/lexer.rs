@@ -114,17 +114,36 @@ pub struct Lexer<'a> {
     bytes: &'a [u8],
     pos: usize,
     diagnostics: Vec<Diagnostic>,
+    comments: Vec<Comment>,
 }
 
 /// Tokenise a whole file. Lexical errors are reported but lexing continues so
 /// that the parser can report as many problems as possible in one run.
 pub fn tokenize(file: FileId, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+    let (tokens, _, diagnostics) = tokenize_with_comments(file, src);
+    (tokens, diagnostics)
+}
+
+/// A source comment (`// ...` or `/* ... */`), kept for tooling such as
+/// `orbit fmt`. `span` covers the whole comment including its delimiters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comment {
+    pub span: Span,
+    pub block: bool,
+}
+
+/// Like [`tokenize`], but also returns every comment in source order.
+pub fn tokenize_with_comments(
+    file: FileId,
+    src: &str,
+) -> (Vec<Token>, Vec<Comment>, Vec<Diagnostic>) {
     let mut lx = Lexer {
         file,
         src,
         bytes: src.as_bytes(),
         pos: 0,
         diagnostics: vec![],
+        comments: vec![],
     };
     let mut tokens = vec![];
     let mut newline = true;
@@ -148,7 +167,7 @@ pub fn tokenize(file: FileId, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             newline = false;
         }
     }
-    (tokens, lx.diagnostics)
+    (tokens, lx.comments, lx.diagnostics)
 }
 
 impl<'a> Lexer<'a> {
@@ -175,12 +194,18 @@ impl<'a> Lexer<'a> {
                 }
                 Some(c) if c.is_ascii_whitespace() => self.pos += 1,
                 Some(b'/') if self.peek2() == Some(b'/') => {
+                    let start = self.pos;
                     while let Some(c) = self.peek() {
                         if c == b'\n' {
                             break;
                         }
                         self.pos += 1;
                     }
+                    let end = self.src[start..self.pos].trim_end().len() + start;
+                    self.comments.push(Comment {
+                        span: self.span(start, end),
+                        block: false,
+                    });
                 }
                 Some(b'/') if self.peek2() == Some(b'*') => {
                     let start = self.pos;
@@ -202,6 +227,12 @@ impl<'a> Lexer<'a> {
                             (Some(b'*'), Some(b'/')) => {
                                 depth -= 1;
                                 self.pos += 2;
+                                if depth == 0 {
+                                    self.comments.push(Comment {
+                                        span: self.span(start, self.pos),
+                                        block: true,
+                                    });
+                                }
                             }
                             (Some(b'/'), Some(b'*')) => {
                                 depth += 1;

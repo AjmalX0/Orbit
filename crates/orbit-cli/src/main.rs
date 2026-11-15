@@ -1,6 +1,7 @@
 //! `orbit` — compiler driver, runtime server and runtime client.
 
 mod client;
+mod lsp;
 mod scaffold;
 mod view;
 
@@ -116,6 +117,15 @@ enum Command {
         #[arg(long)]
         stdout: bool,
     },
+    /// Format .orbit files in place (comments and line breaks are preserved).
+    Fmt {
+        files: Vec<PathBuf>,
+        /// Do not write; exit with status 1 if any file is not formatted.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Run the language server (LSP over stdio), used by editor extensions.
+    Lsp,
     /// Render a workflow's step graph (Mermaid or Graphviz).
     Graph {
         file: PathBuf,
@@ -615,6 +625,41 @@ fn run(cmd: Command) -> Res {
             print!("{}", view::executions(&r, tty));
             Ok(ExitCode::SUCCESS)
         }
+        Command::Fmt { files, check } => {
+            if files.is_empty() {
+                return Err("no input files".into());
+            }
+            let mut unformatted = 0;
+            for f in &files {
+                let src = std::fs::read_to_string(f)
+                    .map_err(|e| format!("cannot read {}: {e}", f.display()))?;
+                let out = orbit_syntax::format::format_source(&src)
+                    .map_err(|e| format!("{}: {e}", f.display()))?;
+                if out != src {
+                    unformatted += 1;
+                    if check {
+                        eprintln!(
+                            "{} {}",
+                            view::paint("would reformat", view::YELLOW, color_err()),
+                            f.display()
+                        );
+                    } else {
+                        std::fs::write(f, out)
+                            .map_err(|e| format!("cannot write {}: {e}", f.display()))?;
+                        eprintln!(
+                            "{} {}",
+                            view::paint("formatted", view::GREEN, color_err()),
+                            f.display()
+                        );
+                    }
+                }
+            }
+            if check && unformatted > 0 {
+                return Ok(ExitCode::from(1));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Lsp => lsp::run().map(|_| ExitCode::SUCCESS),
         Command::Token { worker, tasks } => {
             // Two v4 UUIDs from the OS CSPRNG: 244 random bits.
             let token = format!(
