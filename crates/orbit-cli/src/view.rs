@@ -68,13 +68,27 @@ fn status_color(s: &str) -> &'static str {
     }
 }
 
+/// Human-readable duration: `450ms`, `2.5s`, `3m05s`, `2h15m`, `2d`, `1d6h`.
 fn duration(ms: i64) -> String {
+    const MIN: i64 = 60_000;
+    const HOUR: i64 = 60 * MIN;
+    const DAY: i64 = 24 * HOUR;
     if ms < 1000 {
         format!("{ms}ms")
-    } else if ms < 60_000 {
+    } else if ms < MIN {
         format!("{:.1}s", ms as f64 / 1000.0)
+    } else if ms < HOUR {
+        format!("{}m{:02}s", ms / MIN, (ms % MIN) / 1000)
+    } else if ms < DAY {
+        match (ms % HOUR) / MIN {
+            0 => format!("{}h", ms / HOUR),
+            m => format!("{}h{m:02}m", ms / HOUR),
+        }
     } else {
-        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
+        match (ms % DAY) / HOUR {
+            0 => format!("{}d", ms / DAY),
+            h => format!("{}d{h}h", ms / DAY),
+        }
     }
 }
 
@@ -248,6 +262,18 @@ pub fn ir_summary(wf: &WorkflowIr, tty: bool) -> String {
                 paint("↺ compensate", YELLOW, tty),
                 c.task
             );
+        }
+    }
+    if !wf.signals.is_empty() {
+        let _ = writeln!(out, "\n{}", paint("signals", BOLD, tty));
+        for (name, ty) in &wf.signals {
+            let _ = writeln!(out, "  {name:<28} {ty}");
+        }
+    }
+    if !wf.queries.is_empty() {
+        let _ = writeln!(out, "\n{}", paint("queries", BOLD, tty));
+        for (name, q) in &wf.queries {
+            let _ = writeln!(out, "  {name:<28} {}", q.output_type);
         }
     }
     let _ = writeln!(out, "\n{}", paint("contracts", BOLD, tty));
@@ -552,5 +578,21 @@ pub fn follow(client: &Client, id: &str, tty: bool) -> Result<ExitCode, String> 
                 ExitCode::from(1)
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::duration;
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(duration(450), "450ms");
+        assert_eq!(duration(2_500), "2.5s");
+        assert_eq!(duration(185_000), "3m05s");
+        assert_eq!(duration(2 * 3_600_000), "2h");
+        assert_eq!(duration(8_100_000), "2h15m");
+        assert_eq!(duration(2 * 86_400_000), "2d");
+        assert_eq!(duration(86_400_000 + 6 * 3_600_000), "1d6h");
     }
 }

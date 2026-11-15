@@ -974,7 +974,15 @@ impl Checker<'_, '_> {
                 if item == Some(Type::Int) {
                     Type::Int
                 } else {
-                    Type::Float
+                    // `sum([])` is the integer 0 at run time; wrap it so a
+                    // `Float` sum is always a float (`0.0` for an empty list).
+                    return (
+                        Type::Float,
+                        ir::Expr::Call {
+                            function: "float".into(),
+                            args: vec![lowered],
+                        },
+                    );
                 }
             }
             "abs" => {
