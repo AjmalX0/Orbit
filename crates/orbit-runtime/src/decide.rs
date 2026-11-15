@@ -1,17 +1,35 @@
 //! The deterministic workflow decider.
 //!
 //! `decide(state, definition, now)` inspects an execution and returns the
-//! events that should happen next (schedule ready steps, fire timers, apply
-//! retry policy, start compensation, finish the workflow...). It performs no
-//! I/O. The engine applies the events, persists them, and calls `decide`
-//! again until it returns nothing.
+//! events that should happen next (schedule ready steps, fan out `for` steps,
+//! fire timers, apply retry policy, start compensation, finish the
+//! workflow...). It performs no I/O. The engine applies the events, persists
+//! them, and calls `decide` again until it returns nothing.
+//!
+//! Unit keys: `step` for a step, `step[i]` for element `i` of a `for` step,
+//! and `compensate:<unit>` for the compensation of a unit.
 
 use crate::model::*;
 use orbit_ir::{eval, Action, Invocation, Scope, StepIr, WorkflowIr};
 use serde_json::Value;
 
+/// Expression scope over an execution, optionally with a loop variable bound
+/// and with one step's output overridden (an element's own output inside its
+/// compensation).
 pub struct StateScope<'a> {
     pub state: &'a ExecutionState,
+    pub local: Option<(&'a str, &'a Value)>,
+    pub own_output: Option<(&'a str, &'a Value)>,
+}
+
+impl<'a> StateScope<'a> {
+    pub fn new(state: &'a ExecutionState) -> Self {
+        StateScope {
+            state,
+            local: None,
+            own_output: None,
+        }
+    }
 }
 
 impl Scope for StateScope<'_> {
@@ -20,6 +38,11 @@ impl Scope for StateScope<'_> {
     }
 
     fn step_output(&self, step: &str) -> Option<&Value> {
+        if let Some((s, v)) = self.own_output {
+            if s == step {
+                return Some(v);
+            }
+        }
         let u = self.state.units.get(step)?;
         match u.status() {
             UnitStatus::Succeeded | UnitStatus::Skipped => u.output.as_ref(),
@@ -35,13 +58,20 @@ impl Scope for StateScope<'_> {
             _ => return None,
         }))
     }
+
+    fn local(&self, name: &str) -> Option<&Value> {
+        self.local.filter(|(n, _)| *n == name).map(|(_, v)| v)
+    }
 }
 
-/// The invocation behind a unit key (`step` or `compensate:step`).
+/// The invocation behind a unit key.
 pub fn invocation<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a Invocation> {
-    match key.strip_prefix("compensate:") {
-        Some(step) => def.step(step)?.compensation.as_ref(),
-        None => def.step(key)?.invocation(),
+    let k = parse_key(key);
+    let step = def.step(k.step)?;
+    if k.compensation {
+        step.compensation.as_ref()
+    } else {
+        step.invocation()
     }
 }
 
@@ -49,9 +79,36 @@ fn unit(state: &ExecutionState, key: &str) -> UnitState {
     state.units.get(key).cloned().unwrap_or_default()
 }
 
+/// The `for` element bound to a unit, if any: (variable, value).
+fn element<'a>(
+    state: &'a ExecutionState,
+    def: &'a WorkflowIr,
+    key: &str,
+) -> Option<(&'a str, &'a Value)> {
+    let k = parse_key(key);
+    let index = k.index?;
+    let fe = def.step(k.step)?.for_each.as_ref()?;
+    let items = state.units.get(k.step)?.input.as_ref()?.as_array()?;
+    Some((fe.variable.as_str(), items.get(index)?))
+}
+
 /// Evaluate the payload and idempotency key for a unit's first attempt.
 fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocation) -> Event {
-    let scope = StateScope { state };
+    let k = parse_key(key);
+    let mut scope = StateScope::new(state);
+    scope.local = element(state, def, key);
+    // Inside the compensation of an element, `<step>` is that element's output.
+    let element_unit = if k.compensation && k.index.is_some() {
+        key.strip_prefix("compensate:")
+    } else {
+        None
+    };
+    let own = element_unit
+        .and_then(|e| state.units.get(e))
+        .and_then(|u| u.output.as_ref());
+    if let Some(v) = own {
+        scope.own_output = Some((k.step, v));
+    }
     let fail = |code: &str, msg: String| Event::StepFailed {
         step: key.into(),
         error: TaskError::new(code, msg, false),
@@ -70,7 +127,7 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
         }
     }
     let idempotency_key = match &inv.idempotency_key {
-        Some(k) => match eval(k, &scope) {
+        Some(expr) => match eval(expr, &scope) {
             Ok(Value::String(s)) => s,
             Ok(Value::Null) => format!("{}/{key}", state.id),
             Ok(other) => other.to_string(),
@@ -258,16 +315,91 @@ fn deps_done(state: &ExecutionState, step: &StepIr) -> bool {
     })
 }
 
+/// Element unit keys of a fanned-out step, in order.
+fn element_keys(state: &ExecutionState, step: &str) -> Vec<String> {
+    let n = state
+        .units
+        .get(step)
+        .and_then(|u| u.input.as_ref())
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    (0..n).map(|i| element_key(step, i)).collect()
+}
+
+fn in_flight(status: UnitStatus) -> bool {
+    matches!(
+        status,
+        UnitStatus::Scheduled
+            | UnitStatus::Dispatched
+            | UnitStatus::AttemptFailed
+            | UnitStatus::Uncertain
+            | UnitStatus::RetryWait
+    )
+}
+
+/// Progress a running `for` step: schedule elements within `max_parallel`,
+/// and resolve the step once every element is done (or one failed).
+fn advance_fan_out(state: &ExecutionState, def: &WorkflowIr, step: &StepIr, out: &mut Vec<Event>) {
+    let keys = element_keys(state, &step.id);
+    let units: Vec<UnitState> = keys.iter().map(|k| unit(state, k)).collect();
+    if let Some(failed) = units.iter().find(|u| u.status() == UnitStatus::Failed) {
+        out.push(Event::StepFailed {
+            step: step.id.clone(),
+            error: failed
+                .error
+                .clone()
+                .unwrap_or_else(|| TaskError::new("UNKNOWN", "element failed", false)),
+        });
+        return;
+    }
+    if units.iter().all(|u| u.status() == UnitStatus::Succeeded) {
+        let output = Value::Array(
+            units
+                .iter()
+                .map(|u| u.output.clone().unwrap_or(Value::Null))
+                .collect(),
+        );
+        out.push(Event::StepSucceeded {
+            step: step.id.clone(),
+            attempt: 1,
+            output,
+        });
+        return;
+    }
+    let Some(inv) = step.invocation() else { return };
+    let limit = step
+        .for_each
+        .as_ref()
+        .and_then(|f| f.max_parallel)
+        .map(|n| n as usize)
+        .unwrap_or(usize::MAX);
+    let mut running = units.iter().filter(|u| in_flight(u.status())).count();
+    for (key, u) in keys.iter().zip(&units) {
+        if running >= limit {
+            break;
+        }
+        if u.status() == UnitStatus::Pending {
+            out.push(schedule(state, def, key, inv));
+            running += 1;
+        }
+    }
+}
+
 fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> {
     let mut out = vec![];
     if state.abort.is_none() {
         for step in &def.steps {
             let u = unit(state, &step.id);
+            if u.status() == UnitStatus::Running {
+                advance_fan_out(state, def, step, &mut out);
+                continue;
+            }
             if u.status() != UnitStatus::Pending || !deps_done(state, step) {
                 continue;
             }
             if let Some(cond) = &step.condition {
-                match eval(cond, &StateScope { state }) {
+                match eval(cond, &StateScope::new(state)) {
                     Ok(Value::Bool(true)) => {}
                     Ok(Value::Bool(false)) | Ok(Value::Null) => {
                         out.push(Event::StepSkipped {
@@ -300,12 +432,43 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
                     }
                 }
             }
+            if let Some(fe) = &step.for_each {
+                match eval(&fe.items, &StateScope::new(state)) {
+                    Ok(Value::Array(items)) => out.push(Event::StepFanOut {
+                        step: step.id.clone(),
+                        items,
+                    }),
+                    Ok(Value::Null) => out.push(Event::StepFanOut {
+                        step: step.id.clone(),
+                        items: vec![],
+                    }),
+                    Ok(other) => out.push(Event::StepFailed {
+                        step: step.id.clone(),
+                        error: TaskError::new(
+                            codes::EXPRESSION_ERROR,
+                            format!("`for` expected a list, got {other}"),
+                            false,
+                        ),
+                    }),
+                    Err(e) => out.push(Event::StepFailed {
+                        step: step.id.clone(),
+                        error: TaskError::new(
+                            codes::EXPRESSION_ERROR,
+                            format!("evaluating `for`: {e}"),
+                            false,
+                        ),
+                    }),
+                }
+                continue;
+            }
             match &step.action {
                 Action::Sleep { duration_ms } => out.push(Event::TimerStarted {
                     step: step.id.clone(),
                     fire_at_ms: now + duration_ms,
                 }),
-                Action::Task(inv) => out.push(schedule(state, def, &step.id, inv)),
+                Action::Task(inv) | Action::Workflow(inv) => {
+                    out.push(schedule(state, def, &step.id, inv))
+                }
             }
         }
         if !out.is_empty() {
@@ -317,7 +480,7 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
             .all(|s| unit(state, &s.id).status().is_terminal());
         if all_done {
             let output = match &def.result {
-                Some(expr) => match eval(expr, &StateScope { state }) {
+                Some(expr) => match eval(expr, &StateScope::new(state)) {
                     Ok(v) => v,
                     Err(e) => {
                         return vec![Event::WorkflowFailed {
@@ -348,39 +511,72 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
     }
 
     // Aborting: withdraw work that has not started, wait for in-flight work,
-    // then compensate completed steps in reverse completion order.
-    let mut in_flight = false;
-    for step in &def.steps {
-        let u = unit(state, &step.id);
-        match u.status() {
+    // then compensate completed units in reverse completion order.
+    let mut waiting = false;
+    let withdraw =
+        |key: &str, u: &UnitState, out: &mut Vec<Event>, waiting: &mut bool| match u.status() {
             UnitStatus::Pending | UnitStatus::Waiting | UnitStatus::RetryWait => {
-                out.push(Event::StepCancelled {
-                    step: step.id.clone(),
-                })
+                out.push(Event::StepCancelled { step: key.into() })
             }
-            UnitStatus::Scheduled if !u.redelivery => out.push(Event::StepCancelled {
-                step: step.id.clone(),
-            }),
+            UnitStatus::Scheduled if !u.redelivery => {
+                out.push(Event::StepCancelled { step: key.into() })
+            }
             UnitStatus::Scheduled
             | UnitStatus::Dispatched
             | UnitStatus::AttemptFailed
-            | UnitStatus::Uncertain => in_flight = true,
+            | UnitStatus::Uncertain => *waiting = true,
             _ => {}
+        };
+    for step in &def.steps {
+        let u = unit(state, &step.id);
+        if u.status() == UnitStatus::Running {
+            let mut element_waiting = false;
+            let mut failed = None;
+            for key in element_keys(state, &step.id) {
+                let eu = unit(state, &key);
+                if eu.status() == UnitStatus::Failed && failed.is_none() {
+                    failed = eu.error.clone();
+                }
+                withdraw(&key, &eu, &mut out, &mut element_waiting);
+            }
+            if element_waiting {
+                waiting = true;
+            } else {
+                // Every element is resolved: close the step itself.
+                out.push(match failed {
+                    Some(error) => Event::StepFailed {
+                        step: step.id.clone(),
+                        error,
+                    },
+                    None => Event::StepCancelled {
+                        step: step.id.clone(),
+                    },
+                });
+            }
+        } else {
+            withdraw(&step.id, &u, &mut out, &mut waiting);
         }
     }
-    if !out.is_empty() || in_flight {
+    if !out.is_empty() || waiting {
         return out;
     }
-    let mut done: Vec<(&str, u64)> = def
-        .steps
-        .iter()
-        .filter(|s| s.compensation.is_some())
-        .filter_map(|s| {
-            let u = state.units.get(&s.id)?;
-            (u.status() == UnitStatus::Succeeded)
-                .then(|| (s.id.as_str(), u.succeeded_seq.unwrap_or(0)))
-        })
-        .collect();
+    // Units that succeeded and have a compensation: whole steps, or each
+    // succeeded element of a `for` step.
+    let mut done: Vec<(String, u64)> = vec![];
+    for s in def.steps.iter().filter(|s| s.compensation.is_some()) {
+        let keys = if s.for_each.is_some() {
+            element_keys(state, &s.id)
+        } else {
+            vec![s.id.clone()]
+        };
+        for key in keys {
+            if let Some(u) = state.units.get(&key) {
+                if u.status() == UnitStatus::Succeeded {
+                    done.push((key, u.succeeded_seq.unwrap_or(0)));
+                }
+            }
+        }
+    }
     done.sort_by_key(|d| std::cmp::Reverse(d.1));
     if done.is_empty() {
         return vec![finish(state, CompensationOutcome::None)];
@@ -393,12 +589,12 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
     };
     vec![Event::CompensationStarted {
         reason,
-        steps: done.into_iter().map(|(s, _)| s.to_string()).collect(),
+        steps: done.into_iter().map(|(s, _)| s).collect(),
     }]
 }
 
 fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {
-    // Compensations run one at a time, newest completed step first (Saga).
+    // Compensations run one at a time, newest completed unit first (Saga).
     for step in &state.compensation_order {
         let key = compensation_key(step);
         let u = unit(state, &key);

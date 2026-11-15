@@ -1,0 +1,65 @@
+// Fan-out and child workflows.
+//
+// `Fulfilment` reserves every line item in parallel (at most 4 at a time),
+// then runs the `Shipping` workflow as a durable child execution. If shipping
+// fails, every reservation that succeeded is released individually.
+//
+// Workers: examples/workers/python/order_workers.py and
+// examples/workers/typescript/order_workers.ts (plus the shipping worker below).
+
+import "contracts.orbit"
+
+task "shipping.quote" {
+    version "1.0.0"
+    input { order_id: String, items: Int }
+    output { carrier: String, cost: Float }
+}
+
+task "shipping.book" {
+    version "1.0.0"
+    input { order_id: String, carrier: String }
+    output { tracking: String }
+}
+
+workflow Shipping {
+    version "1.0.0"
+    input { order_id: String, items: Int }
+    output { carrier: String, tracking: String, cost: Float }
+
+    step quote { worker "shipping.quote" with { order_id: input.order_id, items: input.items } }
+    step book  { worker "shipping.book" with { order_id: input.order_id, carrier: quote.carrier } timeout 30s }
+
+    return { carrier: quote.carrier, tracking: book.tracking, cost: quote.cost }
+}
+
+workflow Fulfilment {
+    version "1.0.0"
+    input {
+        order_id: String
+        items: List<LineItem>
+    }
+    output {
+        reservations: List<{ reservation_id: String }>
+        tracking: String
+    }
+
+    step reserve {
+        for item in input.items
+        max_parallel 4
+        worker "inventory.reserve"
+        using typescript
+        with { order_id: input.order_id + "-" + item.sku, items: [item] }
+        compensate {
+            worker "inventory.release"
+            with { reservation_id: reserve.reservation_id }
+        }
+    }
+
+    step ship {
+        workflow "Shipping"
+        with { order_id: input.order_id, items: len(input.items) }
+        timeout 1h
+    }
+
+    return { reservations: reserve, tracking: ship.tracking }
+}

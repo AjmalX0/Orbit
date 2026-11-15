@@ -62,6 +62,11 @@ pub enum Expr {
     Execution {
         field: String,
     },
+    /// A loop variable bound by `for <name> in ...`, with an optional field path.
+    Local {
+        name: String,
+        path: Vec<String>,
+    },
     Index {
         target: Box<Expr>,
         index: Box<Expr>,
@@ -127,7 +132,10 @@ impl Expr {
                 then.step_refs(out);
                 otherwise.step_refs(out);
             }
-            Expr::Literal { .. } | Expr::Input { .. } | Expr::Execution { .. } => {}
+            Expr::Literal { .. }
+            | Expr::Input { .. }
+            | Expr::Execution { .. }
+            | Expr::Local { .. } => {}
         }
     }
 }
@@ -138,6 +146,10 @@ pub trait Scope {
     /// `Some(Value::Null)` for a skipped step, `None` if the step has not completed.
     fn step_output(&self, step: &str) -> Option<&Value>;
     fn execution_field(&self, field: &str) -> Option<Value>;
+    /// The value of a loop variable, if one is bound.
+    fn local(&self, _name: &str) -> Option<&Value> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +184,10 @@ pub fn eval(expr: &Expr, scope: &dyn Scope) -> Result<Value, EvalError> {
         Expr::Step { step, path } => match scope.step_output(step) {
             Some(v) => Ok(walk(v.clone(), path)),
             None => err(format!("step `{step}` has not completed")),
+        },
+        Expr::Local { name, path } => match scope.local(name) {
+            Some(v) => Ok(walk(v.clone(), path)),
+            None => err(format!("loop variable `{name}` is not bound here")),
         },
         Expr::Execution { field } => scope
             .execution_field(field)

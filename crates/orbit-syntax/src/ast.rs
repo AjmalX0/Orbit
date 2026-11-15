@@ -95,6 +95,16 @@ pub enum StepAction {
     Worker(String, Span),
     /// `sleep 10s` — a durable timer executed by the runtime itself.
     Sleep(u64, Span),
+    /// `workflow "Name"` — run another workflow as a child execution.
+    Workflow(String, Span),
+}
+
+/// `for item in <list expression>` — fan a step out over a list.
+#[derive(Debug, Clone)]
+pub struct ForEach {
+    pub variable: Ident,
+    pub items: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +127,9 @@ pub struct StepBody {
     pub retry: Option<Retry>,
     pub idempotency_key: Option<Expr>,
     pub condition: Option<Expr>,
+    pub for_each: Option<ForEach>,
+    /// `max_parallel 4` — concurrency limit for a `for` step.
+    pub max_parallel: Option<(i64, Span)>,
 }
 
 #[derive(Debug, Clone)]

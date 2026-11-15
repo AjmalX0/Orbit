@@ -7,6 +7,7 @@ Demo behaviour (so every path of the workflow can be exercised):
   * amounts above 5000 are declined (non-retryable) -> compensation runs
   * an amount of exactly 4242 makes the charge take 3 seconds (crash-test hook)
   * ORBIT_FLAKY=1 makes the first risk attempt fail to show retries
+  * shipping for order ids starting with "noship" fails (examples/fulfilment.orbit)
 """
 
 import os
@@ -44,6 +45,18 @@ def charge(input, ctx):
     result = {"transaction_id": f"tx-{input['order_id']}", "status": "captured"}
     _charges[ctx.idempotency_key] = result
     return result
+
+
+@worker.task("shipping.quote", version="1.0.0")
+def shipping_quote(input, ctx):
+    return {"carrier": "ups" if input["items"] > 2 else "dhl", "cost": 4.5 + input["items"]}
+
+
+@worker.task("shipping.book", version="1.0.0")
+def shipping_book(input, ctx):
+    if input["order_id"].startswith("noship"):
+        raise TaskError("NO_CARRIER", "no carrier serves this address", retryable=False)
+    return {"tracking": f"{input['carrier'].upper()}-{input['order_id']}"}
 
 
 @worker.task("payments.refund", version="1.0.0")

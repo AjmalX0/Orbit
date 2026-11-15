@@ -8,7 +8,7 @@ use crate::decide::{decide, invocation};
 use crate::metrics::Metrics;
 use crate::model::*;
 use crate::store::{ExecutionSummary, PutDefinition, Store, WorkerRecord};
-use orbit_ir::WorkflowIr;
+use orbit_ir::{WorkflowIr, WORKFLOW_CONTRACT_PREFIX};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -159,6 +159,17 @@ pub struct StartResult {
 }
 
 const BUILTIN_SESSION_PREFIX: &str = "builtin:";
+const CHILD_SESSION_PREFIX: &str = "child:";
+
+/// Deterministic id of the child execution started by `unit` of `parent`, so
+/// that starting it again after a crash is a no-op.
+pub fn child_execution_id(parent: &str, unit: &str) -> String {
+    let unit = unit
+        .replace("compensate:", "compensate.")
+        .replace('[', ".")
+        .replace(']', "");
+    format!("{parent}.{unit}")
+}
 
 pub struct Engine {
     store: Store,
@@ -272,6 +283,24 @@ impl Engine {
                 "definition_hash is required",
             ));
         }
+        // A parent pins the exact child definition it was compiled against.
+        for c in ir.contracts.values() {
+            if let Some(hash) = &c.workflow_hash {
+                if !self.by_hash.contains_key(hash) {
+                    return Err(EngineError::new(
+                        400,
+                        "CHILD_NOT_REGISTERED",
+                        format!(
+                            "{}@{} starts child workflow {}@{} ({hash}), which is not registered; register the child first (`orbit deploy` does this automatically)",
+                            ir.name,
+                            ir.version,
+                            c.name.trim_start_matches(WORKFLOW_CONTRACT_PREFIX),
+                            c.version
+                        ),
+                    ));
+                }
+            }
+        }
         let now = self.now();
         match self.store.put_definition(&ir, now).map_err(EngineError::storage)? {
             PutDefinition::Created => {
@@ -316,7 +345,7 @@ impl Engine {
         &mut self,
         workflow: &str,
         version: Option<&str>,
-        mut input: Value,
+        input: Value,
         execution_id: Option<String>,
     ) -> Result<StartResult> {
         let def = self.definition(workflow, version).ok_or_else(|| {
@@ -329,11 +358,24 @@ impl Engine {
                 },
             )
         })?;
+        self.start_with(def, input, execution_id, None)
+    }
+
+    /// Start an execution of a specific definition. Child workflows pass their
+    /// parent link; their input was already validated against the child's
+    /// contract by the parent, so it is checked leniently.
+    fn start_with(
+        &mut self,
+        def: Arc<WorkflowIr>,
+        mut input: Value,
+        execution_id: Option<String>,
+        parent: Option<ParentRef>,
+    ) -> Result<StartResult> {
         if input.is_null() {
             input = json!({});
         }
         def.input.apply_defaults(&mut input);
-        def.input.validate(&input, true).map_err(|e| {
+        def.input.validate(&input, parent.is_none()).map_err(|e| {
             EngineError::new(
                 400,
                 "INVALID_INPUT",
@@ -384,6 +426,7 @@ impl Engine {
             version: def.version.clone(),
             definition_hash: def.definition_hash.clone(),
             input,
+            parent,
         };
         if let Err(e) = self.commit(&id, vec![created, Event::WorkflowStarted {}]) {
             self.active.remove(&id);
@@ -570,6 +613,8 @@ impl Engine {
             self.advance(id)?;
         }
         self.dispatch_builtins()?;
+        self.dispatch_children()?;
+        self.reconcile_children()?;
         Ok(std::mem::take(&mut self.builtin_jobs))
     }
 
@@ -587,7 +632,10 @@ impl Engine {
                     continue;
                 }
                 let session = u.worker_session.clone().unwrap_or_default();
-                let alive = if let Some(inst) = session.strip_prefix(BUILTIN_SESSION_PREFIX) {
+                let alive = if session.starts_with(CHILD_SESSION_PREFIX) {
+                    // Child workflows are durable executions, not processes.
+                    true
+                } else if let Some(inst) = session.strip_prefix(BUILTIN_SESSION_PREFIX) {
                     inst == self.instance
                 } else {
                     self.sessions
@@ -643,6 +691,16 @@ impl Engine {
         let now = self.now();
         let mut warnings = vec![];
         for c in &req.contracts {
+            if c.task_name.starts_with(WORKFLOW_CONTRACT_PREFIX) {
+                return Err(EngineError::new(
+                    400,
+                    "RESERVED_TASK",
+                    format!(
+                        "`{}` names a child workflow, not a worker task",
+                        c.task_name
+                    ),
+                ));
+            }
             if c.task_name.starts_with("orbit.") {
                 return Err(EngineError::new(
                     400,
@@ -888,6 +946,171 @@ impl Engine {
             }],
         )?;
         Ok(assignment)
+    }
+
+    /// Start child executions for scheduled `workflow` steps.
+    fn dispatch_children(&mut self) -> Result<()> {
+        let mut todo = vec![];
+        for (id, state) in &self.active {
+            let Some(def) = self.by_hash.get(&state.definition_hash) else {
+                continue;
+            };
+            for (key, u) in &state.units {
+                if u.status() != UnitStatus::Scheduled {
+                    continue;
+                }
+                if let Some(inv) = invocation(def, key) {
+                    if let Some(hash) = def
+                        .contracts
+                        .get(&inv.task)
+                        .and_then(|c| c.workflow_hash.clone())
+                    {
+                        todo.push((
+                            id.clone(),
+                            key.clone(),
+                            u.attempt,
+                            hash,
+                            u.input.clone().unwrap_or(Value::Null),
+                        ));
+                    }
+                }
+            }
+        }
+        for (id, key, attempt, hash, input) in todo {
+            let child_id = child_execution_id(&id, &key);
+            let failure = |code: &'static str, message: String| Event::StepAttemptFailed {
+                step: key.clone(),
+                attempt,
+                error: TaskError::new(code, message, false),
+            };
+            let Some(child_def) = self.by_hash.get(&hash).cloned() else {
+                self.commit(
+                    &id,
+                    vec![failure(
+                        "CHILD_NOT_REGISTERED",
+                        format!("child definition {hash} is not registered"),
+                    )],
+                )?;
+                self.advance(&id)?;
+                continue;
+            };
+            let parent = ParentRef {
+                execution_id: id.clone(),
+                step: key.clone(),
+            };
+            if let Err(e) = self.start_with(child_def, input, Some(child_id.clone()), Some(parent))
+            {
+                self.commit(&id, vec![failure("CHILD_START_FAILED", e.message)])?;
+                self.advance(&id)?;
+                continue;
+            }
+            if self
+                .active
+                .get(&id)
+                .and_then(|s| s.units.get(&key))
+                .map(|u| u.status())
+                == Some(UnitStatus::Scheduled)
+            {
+                self.dispatch(
+                    &id,
+                    &key,
+                    &format!("{CHILD_SESSION_PREFIX}{child_id}"),
+                    "orbit-runtime",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Deliver finished children's results to their parents, and cancel
+    /// children whose parent is aborting or no longer waits for them. Runs
+    /// every tick, so it also repairs anything a crash interrupted.
+    fn reconcile_children(&mut self) -> Result<()> {
+        let mut finished = vec![];
+        let mut cancel = vec![];
+        for state in self.active.values() {
+            for u in state.units.values() {
+                let Some(child) = u
+                    .worker_session
+                    .as_deref()
+                    .and_then(|s| s.strip_prefix(CHILD_SESSION_PREFIX))
+                else {
+                    continue;
+                };
+                match self.active.get(child) {
+                    Some(c) => {
+                        let parent_gone = u.status() != UnitStatus::Dispatched;
+                        if c.abort.is_none() && (state.abort.is_some() || parent_gone) {
+                            cancel.push(child.to_string());
+                        }
+                    }
+                    None if u.status() == UnitStatus::Dispatched => {
+                        finished.push((child.to_string(), u.token.clone().unwrap_or_default()));
+                    }
+                    None => {}
+                }
+            }
+        }
+        for child in cancel {
+            tracing::info!(execution_id = %child, "cancelling child workflow because its parent no longer needs it");
+            self.cancel(&child, "parent workflow aborted")?;
+        }
+        for (child, token) in finished {
+            let state = match self.execution(&child) {
+                Ok(s) => s,
+                Err(_) => {
+                    self.fail(
+                        &token,
+                        TaskError::new(
+                            "CHILD_MISSING",
+                            format!("child execution `{child}` not found"),
+                            false,
+                        ),
+                    )?;
+                    continue;
+                }
+            };
+            let name = state.workflow.clone();
+            match state.status {
+                WorkflowStatus::Completed => {
+                    self.complete(&token, state.output.unwrap_or(Value::Null))?;
+                }
+                WorkflowStatus::Failed => {
+                    let e = state
+                        .error
+                        .unwrap_or_else(|| TaskError::new("UNKNOWN", "failed", false));
+                    let mut err = TaskError::new(
+                        &e.code,
+                        format!("child workflow `{name}` failed: {}", e.message),
+                        false,
+                    );
+                    err.details = Some(json!({ "child_execution_id": child }));
+                    self.fail(&token, err)?;
+                }
+                WorkflowStatus::Cancelled => {
+                    self.fail(
+                        &token,
+                        TaskError::new(
+                            "CHILD_CANCELLED",
+                            format!("child workflow `{name}` was cancelled"),
+                            false,
+                        ),
+                    )?;
+                }
+                WorkflowStatus::TimedOut => {
+                    self.fail(
+                        &token,
+                        TaskError::new(
+                            "CHILD_TIMED_OUT",
+                            format!("child workflow `{name}` timed out"),
+                            false,
+                        ),
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn dispatch_builtins(&mut self) -> Result<()> {

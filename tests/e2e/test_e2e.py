@@ -144,6 +144,7 @@ class EndToEnd(unittest.TestCase):
         cls.c.start_server()
         cls.c.start_workers()
         cls.c.cli("deploy", WORKFLOW)
+        cls.c.cli("deploy", os.path.join(ROOT, "examples", "fulfilment.orbit"))
 
     @classmethod
     def tearDownClass(cls):
@@ -195,6 +196,28 @@ class EndToEnd(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as e:
             self.start({"order_id": "x"})
         self.assertEqual(e.exception.code, 400)
+
+    def test_fan_out_and_child_workflow(self):
+        fulfil = os.path.join(ROOT, "examples", "fulfilment.orbit")
+        items = [{"sku": f"SKU-{i}", "quantity": 1} for i in range(6)]
+        r = self.c.cli("run", fulfil, "--input", json.dumps({"order_id": "F-1", "items": items}))
+        out = json.loads(r.stdout)
+        self.assertEqual(out["tracking"], "UPS-F-1")
+        self.assertEqual(out["reservations"], [{"reservation_id": f"res-F-1-SKU-{i}"} for i in range(6)])
+        ex = [l for l in r.stderr.splitlines() if "execution" in l][0].split()[-1]
+        child = self.c.get(f"/v1/executions/{ex}.ship")
+        self.assertEqual((child["workflow"], child["status"]), ("Shipping", "COMPLETED"))
+        self.assertEqual(child["parent"], {"execution_id": ex, "step": "ship"})
+
+    def test_child_failure_compensates_every_element(self):
+        items = [{"sku": f"SKU-{i}", "quantity": 1} for i in range(3)]
+        ex = self.c.post("/v1/executions", {"workflow": "Fulfilment", "input": {"order_id": "noship-1", "items": items}})["execution_id"]
+        s = self.c.wait(ex)
+        self.assertEqual(s["status"], "FAILED")
+        self.assertEqual(s["error"]["code"], "NO_CARRIER")
+        self.assertEqual(s["compensation"], "completed")
+        released = sorted(k for k, u in s["units"].items() if k.startswith("compensate:") and u["status"] == "SUCCEEDED")
+        self.assertEqual(released, [f"compensate:reserve[{i}]" for i in range(3)])
 
     def test_z_crash_recovery(self):
         # amount 4242 makes the charge take 3s; kill the runtime while it runs.

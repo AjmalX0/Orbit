@@ -17,6 +17,8 @@ pub struct Env<'a> {
     pub allowed: Option<(&'a HashSet<String>, &'a str)>,
     /// Context name used in messages, e.g. "default value".
     pub context: &'a str,
+    /// Loop variables in scope (`for item in ...`), with their types.
+    pub locals: &'a [(String, Type)],
 }
 
 pub fn execution_type() -> Type {
@@ -46,6 +48,7 @@ pub fn constant(e: &Expr, ty: &Type, diags: &mut Vec<Diagnostic>) -> Option<Valu
         steps: &steps,
         allowed: None,
         context: "a default value",
+        locals: &[],
     };
     let before = diags.len();
     let (_, lowered) = Checker { env: &env, diags }.check(e, Some(ty));
@@ -468,6 +471,16 @@ impl Checker<'_, '_> {
     fn path(&mut self, segs: &[ast::Ident], span: Span) -> (Type, ir::Expr) {
         let root = &segs[0];
         let rest: Vec<String> = segs[1..].iter().map(|s| s.name.clone()).collect();
+        if let Some((_, t)) = self.env.locals.iter().find(|(n, _)| *n == root.name) {
+            let ty = self.walk_fields(t.clone(), &segs[1..]);
+            return (
+                ty,
+                ir::Expr::Local {
+                    name: root.name.clone(),
+                    path: rest,
+                },
+            );
+        }
         match root.name.as_str() {
             "input" => match self.env.input {
                 Some(t) => {

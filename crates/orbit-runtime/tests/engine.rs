@@ -605,3 +605,271 @@ fn history_is_authoritative() {
         Event::WorkflowFailed { .. }
     ));
 }
+
+// ------------------------------------------------------------------ fan-out
+
+fn compile_all(src: &str) -> Vec<WorkflowIr> {
+    let c = orbit_compiler::compile_str("t.orbit", &format!("{CONTRACTS}\n{src}"));
+    assert!(!c.has_errors(), "{}", c.render_diagnostics(false));
+    c.workflows
+}
+
+#[test]
+fn for_each_fans_out_with_max_parallel_and_collects_in_order() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0" input { ns: List<Int> }
+        step each { for n in input.ns  max_parallel 2  worker "a" with { n: n * 10 } }
+        return { results: each } }"#,
+    );
+    let id = h.start(&ir, json!({ "ns": [1, 2, 3, 4, 5] }));
+    let w = h.worker("w", "go", &["a"]);
+    let s = h.state(&id);
+    assert_eq!(s.units["each"].status(), UnitStatus::Running);
+    let scheduled = |s: &ExecutionState| {
+        (0..5)
+            .filter(|i| s.units[&format!("each[{i}]")].status() == UnitStatus::Scheduled)
+            .count()
+    };
+    assert_eq!(scheduled(&s), 2, "max_parallel limits concurrency");
+    // Complete out of order; results still come back in input order.
+    let t0 = h.poll(&w).unwrap();
+    let t1 = h.poll(&w).unwrap();
+    assert_eq!(
+        (t0.step_id.as_str(), t1.step_id.as_str()),
+        ("each[0]", "each[1]")
+    );
+    assert_eq!(t1.idempotency_key, format!("{id}/each[1]"));
+    h.engine.complete(&t1.token, json!({ "n": 21 })).unwrap();
+    assert!(h.poll(&w).is_some(), "a slot opened up");
+    h.engine.complete(&t0.token, json!({ "n": 11 })).unwrap();
+    while let Some(t) = h.poll(&w) {
+        let n = t.input["n"].as_i64().unwrap();
+        h.engine.complete(&t.token, json!({ "n": n + 1 })).unwrap();
+    }
+    // Drain the task started before the second slot was observed.
+    let s = h.state(&id);
+    for i in 0..5 {
+        let key = format!("each[{i}]");
+        if s.units[&key].status() == UnitStatus::Dispatched {
+            let t = s.units[&key].token.clone().unwrap();
+            let n = s.units[&key].input.as_ref().unwrap()["n"].as_i64().unwrap();
+            h.engine.complete(&t, json!({ "n": n + 1 })).unwrap();
+        }
+    }
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Completed, "{s:#?}");
+    assert_eq!(
+        s.output,
+        Some(
+            json!({ "results": [{ "n": 11 }, { "n": 21 }, { "n": 31 }, { "n": 41 }, { "n": 51 }] })
+        )
+    );
+}
+
+#[test]
+fn for_each_over_empty_list_succeeds_immediately() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0" input { ns: List<Int> } step each { for n in input.ns worker "a" with { n: n } } return { r: each } }"#,
+    );
+    let id = h.start(&ir, json!({ "ns": [] }));
+    assert_eq!(h.state(&id).output, Some(json!({ "r": [] })));
+}
+
+#[test]
+fn for_each_failure_compensates_each_succeeded_element() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0" input { ns: List<Int> }
+        step each {
+            for n in input.ns
+            worker "a"
+            with { n: n }
+            compensate { worker "undo" with { n: each.n + n } }
+        } }"#,
+    );
+    let id = h.start(&ir, json!({ "ns": [1, 2, 3] }));
+    let w = h.worker("w", "go", &["a", "undo"]);
+    let t: Vec<TaskAssignment> = (0..3).map(|_| h.poll(&w).unwrap()).collect();
+    h.engine.complete(&t[0].token, json!({ "n": 100 })).unwrap();
+    h.engine
+        .fail(
+            &t[1].token,
+            TaskError::new("NOPE", "element 1 failed", false),
+        )
+        .unwrap();
+    // Element 2 is still in flight: compensation waits for it.
+    assert_eq!(h.state(&id).status, WorkflowStatus::Running);
+    h.engine.complete(&t[2].token, json!({ "n": 300 })).unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Compensating);
+    assert_eq!(s.units["each"].status(), UnitStatus::Failed);
+    // Newest success first; each compensation sees its own element and output.
+    let c1 = h.poll(&w).unwrap();
+    assert_eq!(
+        (c1.step_id.as_str(), c1.input.clone()),
+        ("compensate:each[2]", json!({ "n": 303 }))
+    );
+    h.engine.complete(&c1.token, json!({ "ok": true })).unwrap();
+    let c2 = h.poll(&w).unwrap();
+    assert_eq!(
+        (c2.step_id.as_str(), c2.input.clone()),
+        ("compensate:each[0]", json!({ "n": 101 }))
+    );
+    h.engine.complete(&c2.token, json!({ "ok": true })).unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    assert_eq!(s.error.unwrap().code, "NOPE");
+    assert_eq!(s.compensation, Some(CompensationOutcome::Completed));
+}
+
+// --------------------------------------------------------- child workflows
+
+const PARENT_CHILD: &str = r#"
+workflow Child {
+    version "1.0.0"
+    input { n: Int }
+    output { doubled: Int }
+    step d { worker "b" with { n: input.n * 2 } }
+    return { doubled: d.n }
+}
+workflow Parent {
+    version "1.0.0"
+    input { ns: List<Int> }
+    output { results: List<{ doubled: Int }>, total: Int }
+    step kids { for n in input.ns workflow "Child" with { n: n } }
+    step after_kids { worker "a" after kids with { n: len(kids) } }
+    return { results: kids, total: after_kids.n }
+}
+"#;
+
+fn register_all(h: &mut Harness, wfs: &[WorkflowIr]) {
+    for wf in wfs {
+        h.engine.register_definition(wf.clone()).unwrap();
+    }
+}
+
+#[test]
+fn child_workflows_run_and_return_results() {
+    let mut h = Harness::new();
+    let wfs = compile_all(PARENT_CHILD);
+    assert_eq!(
+        wfs.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+        vec!["Child", "Parent"],
+        "callees first"
+    );
+    // The parent cannot be registered before its child.
+    let err = h.engine.register_definition(wfs[1].clone()).unwrap_err();
+    assert_eq!(err.code, "CHILD_NOT_REGISTERED");
+    register_all(&mut h, &wfs);
+    let id = h
+        .engine
+        .start("Parent", None, json!({ "ns": [3, 4] }), None)
+        .unwrap()
+        .execution_id;
+    h.advance(1);
+    let child_ids = [format!("{id}.kids.0"), format!("{id}.kids.1")];
+    for c in &child_ids {
+        let s = h.state(c);
+        assert_eq!(s.workflow, "Child");
+        assert_eq!(s.parent.as_ref().unwrap().execution_id, id);
+    }
+    let w = h.worker("w", "go", &["a", "b"]);
+    for _ in 0..2 {
+        let t = h.poll(&w).unwrap();
+        let n = t.input["n"].as_i64().unwrap();
+        h.engine.complete(&t.token, json!({ "n": n })).unwrap();
+    }
+    h.advance(1); // reconcile finished children into the parent
+    let t = h.poll(&w).unwrap();
+    assert_eq!(t.input, json!({ "n": 2 }));
+    h.engine.complete(&t.token, json!({ "n": 2 })).unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Completed, "{s:#?}");
+    assert_eq!(
+        s.output,
+        Some(json!({ "results": [{ "doubled": 6 }, { "doubled": 8 }], "total": 2 }))
+    );
+}
+
+#[test]
+fn cancelling_a_parent_cancels_its_children() {
+    let mut h = Harness::new();
+    let wfs = compile_all(PARENT_CHILD);
+    register_all(&mut h, &wfs);
+    let id = h
+        .engine
+        .start("Parent", None, json!({ "ns": [1] }), None)
+        .unwrap()
+        .execution_id;
+    h.advance(1);
+    let child = format!("{id}.kids.0");
+    assert_eq!(h.state(&child).status, WorkflowStatus::Running);
+    h.engine.cancel(&id, "stop").unwrap();
+    h.advance(1);
+    assert_eq!(h.state(&child).status, WorkflowStatus::Cancelled);
+    h.advance(1);
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Cancelled, "{s:#?}");
+}
+
+#[test]
+fn child_failure_fails_the_parent_step() {
+    let mut h = Harness::new();
+    let wfs = compile_all(PARENT_CHILD);
+    register_all(&mut h, &wfs);
+    let id = h
+        .engine
+        .start("Parent", None, json!({ "ns": [1] }), None)
+        .unwrap()
+        .execution_id;
+    h.advance(1);
+    let w = h.worker("w", "go", &["a", "b"]);
+    let t = h.poll(&w).unwrap();
+    h.engine
+        .fail(
+            &t.token,
+            TaskError::new("BROKEN", "child step broke", false),
+        )
+        .unwrap();
+    h.advance(1);
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed, "{s:#?}");
+    let e = s.error.unwrap();
+    assert_eq!(e.code, "BROKEN");
+    assert!(
+        e.message.contains("child workflow `Child` failed"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn child_results_survive_a_parent_crash() {
+    let mut h = Harness::on_disk("children");
+    let wfs = compile_all(PARENT_CHILD);
+    register_all(&mut h, &wfs);
+    let id = h
+        .engine
+        .start("Parent", None, json!({ "ns": [5] }), None)
+        .unwrap()
+        .execution_id;
+    h.advance(1);
+    let w = h.worker("w", "go", &["a", "b"]);
+    let t = h.poll(&w).unwrap();
+    h.engine.complete(&t.token, json!({ "n": 10 })).unwrap();
+    // The child finished; crash before the parent hears about it.
+    let mut h = h.restart();
+    h.advance(1);
+    let w = h.worker("w", "go", &["a", "b"]);
+    let t = h
+        .poll(&w)
+        .expect("parent resumed after reconciling its child");
+    assert_eq!(t.step_id, "after_kids");
+    h.engine.complete(&t.token, json!({ "n": 1 })).unwrap();
+    assert_eq!(
+        h.state(&id).output,
+        Some(json!({ "results": [{ "doubled": 10 }], "total": 1 }))
+    );
+}

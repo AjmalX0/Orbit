@@ -96,6 +96,16 @@ pub fn mermaid(wf: &WorkflowIr) -> String {
                 s.id,
                 duration(*duration_ms as i64)
             ),
+            Action::Workflow(i) => format!(
+                "{}<br/><small>child workflow {}</small>",
+                s.id,
+                i.task
+                    .trim_start_matches(orbit_ir::WORKFLOW_CONTRACT_PREFIX)
+            ),
+        };
+        let label = match &s.for_each {
+            Some(f) => format!("{label}<br/><small>for each {}</small>", f.variable),
+            None => label,
         };
         let shape = if s.condition.is_some() {
             format!("{{\"{label}\"}}")
@@ -129,6 +139,11 @@ pub fn dot(wf: &WorkflowIr) -> String {
             Action::Sleep { duration_ms } => {
                 format!("{}\\nsleep {}", s.id, duration(*duration_ms as i64))
             }
+            Action::Workflow(i) => format!("{}\\nchild {}", s.id, i.task),
+        };
+        let label = match &s.for_each {
+            Some(f) => format!("{label}\\nfor each {}", f.variable),
+            None => label,
         };
         let shape = if s.condition.is_some() {
             ", shape=diamond"
@@ -169,7 +184,7 @@ pub fn ir_summary(wf: &WorkflowIr, tty: bool) -> String {
     let _ = writeln!(out, "\n{}", paint("steps (execution order)", BOLD, tty));
     for s in &wf.steps {
         let what = match &s.action {
-            Action::Task(i) => {
+            Action::Task(i) | Action::Workflow(i) => {
                 let mut extra = vec![];
                 if let Some(l) = &i.language {
                     extra.push(format!("using {l}"));
@@ -182,6 +197,12 @@ pub fn ir_summary(wf: &WorkflowIr, tty: bool) -> String {
                 }
                 if let Some(t) = i.timeout_ms {
                     extra.push(format!("timeout {}", duration(t as i64)));
+                }
+                if let Some(f) = &s.for_each {
+                    extra.push(match f.max_parallel {
+                        Some(n) => format!("for each {} (max {n} parallel)", f.variable),
+                        None => format!("for each {}", f.variable),
+                    });
                 }
                 format!(
                     "{}@{} {}",
