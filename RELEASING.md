@@ -1,14 +1,10 @@
 # Releasing
 
-Releases are cut by pushing a version tag. `.github/workflows/release.yml`
+Releases are cut by pushing a version tag, or with **Actions → release → Run workflow**. `.github/workflows/release.yml`
 builds and checks everything on every push, and publishes only for tags.
 
-1. Update the version everywhere (`0.1.0` → `X.Y.Z`): `Cargo.toml`
-   (`[workspace.package]` and the `version = "…"` on internal dependencies),
-   `sdks/python/pyproject.toml`, `sdks/typescript/package.json`,
-   `sdks/java/pom.xml`, `sdks/csharp/OrbitLang.Sdk/OrbitLang.Sdk.csproj`,
-   `editors/vscode/package.json`, the SDK version constants
-   (`SDK_VERSION` / `Version` / `sdk` strings) and `CHANGELOG.md`.
+1. `./scripts/bump-version.sh X.Y.Z` sets the version in every package and SDK
+   constant; add a `CHANGELOG.md` entry and commit.
 2. Run `./scripts/check.sh`.
 3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. Or, from the browser:
    **Actions → release → Run workflow**, enter `X.Y.Z`; the workflow tags the
