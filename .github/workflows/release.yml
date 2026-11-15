@@ -220,13 +220,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write # npm provenance
-    env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
+    # Trusted publishing (OIDC, no token) when the repository variable
+    # NPM_TRUSTED_PUBLISHING is "true"; otherwise the NPM_TOKEN secret.
+    env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}", NPM_TRUSTED: "${{ vars.NPM_TRUSTED_PUBLISHING }}" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "22", registry-url: "https://registry.npmjs.org" }
-      - if: env.NODE_AUTH_TOKEN != ''
-        run: cd sdks/typescript && npm install --no-save typescript@5.9.3 && npm publish --provenance --access public
+      - if: env.NODE_AUTH_TOKEN != '' || env.NPM_TRUSTED == 'true'
+        run: |
+          npm install -g npm@11
+          cd sdks/typescript && npm install --no-save typescript@5.9.3
+          version=$(node -p "require('./package.json').version")
+          if npm view "orbit-lang@$version" version >/dev/null 2>&1; then echo "orbit-lang@$version already published"; exit 0; fi
+          npm publish --provenance --access public
 
   publish-nuget:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
