@@ -147,8 +147,8 @@ orbit server
 ```
 
 ```text
-INFO orbit: starting ORBIT runtime db=orbit.db backend="sqlite" http_adapter=false auth=false
-INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:7233 tls=false
+INFO orbit: starting ORBIT runtime db=orbit.db backend="sqlite" http_adapter=false auth=false ui=true
+INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:7233 tls=false ui=true
 ```
 
 The runtime listens on `127.0.0.1:7233` and stores everything in `orbit.db` in

@@ -55,6 +55,7 @@
 - [Running several servers](runtime/cluster.md)
 - [Security](runtime/security.md)
 - [Observability](runtime/observability.md)
+- [Web UI](runtime/web-ui.md)
 - [Performance](runtime/performance.md)
 - [Deployment](runtime/deployment.md)
 

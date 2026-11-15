@@ -320,8 +320,20 @@ Every SDK supports client certificates through `ORBIT_CLIENT_CERT` and `ORBIT_CL
 | `POST /v1/workers/heartbeat`, `poll`, `unregister` | yes | yes | yes | own sessions only | 403 | 401 |
 | `POST /v1/tasks/complete`, `fail` | yes | yes | yes | own tokens only | 403 | 401 |
 | gRPC worker protocol | yes | yes | yes | as over HTTP | `PERMISSION_DENIED` | `UNAUTHENTICATED` |
+| `GET /ui/*` (web UI assets) and `GET /` | yes | yes | yes | yes | yes | yes (no credential needed; off with `--no-ui`) |
 
 "with `start`" and the like mean: when the workflow matches one of the client's patterns and the action is granted; otherwise `403`. A client certificate that is verified but matches no worker or client gets `403` everywhere.
+
+## Web UI
+
+The server serves a [web UI](web-ui.md) at `/ui/` unless it is started with `--no-ui` (`ORBIT_NO_UI=true`).
+
+- The UI's files (one HTML page, one script, one stylesheet, one icon) are compiled into the binary and served without authentication, so the sign-in page can load. They contain no data and no secrets. Every piece of data the UI shows comes from the HTTP API, called with the token the user enters, so the permission matrix above applies unchanged: a client identity sees only the workflows and actions it was granted, and refused requests are shown as `Not permitted` with the API's message. Worker credentials cannot sign in, because they cannot read executions.
+- The token is kept in the browser tab's `sessionStorage` (cleared when the tab closes, or by **Sign out**) and sent as `Authorization: Bearer`. It is never put in a URL or a cookie. The UI does not use TLS client certificates: requests are made with `credentials: "omit"`.
+- Every UI response carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`, a `Permissions-Policy` that disables camera, microphone, geolocation and payment, and `Cache-Control: no-cache`. The page has no inline script or style, loads nothing from other origins, and cannot be framed.
+- Values from executions (inputs, outputs, errors, signal payloads, names) are inserted into the page as text, never as markup.
+- Like the API, the UI shows values unredacted to whoever holds a token that may read them.
+- The UI uses the API's normal endpoints, so running it adds no endpoint and no privilege. Turn it off with `--no-ui` if browsers should not reach the server at all.
 
 ## Input validation and limits
 
@@ -358,8 +370,9 @@ The built-in `orbit.http.request` task is off by default. When enabled with `--e
 7. Keep the HTTP adapter disabled unless you need it.
 8. Do not pass `--insecure`.
 9. Restrict network access to the API port to the hosts that need it. `/v1/metrics` requires the admin token, so give your monitoring system a way to send it, or scrape through a proxy that adds it.
-10. Protect the database and its backups as sensitive data: they contain every input and output.
-11. Rotate a token by changing the server's configuration (or the workers file), restarting the server, and giving the new token to its holders. Requests with the old token get `401`, so restart each worker with its new token.
+10. Decide whether operators should use the [web UI](web-ui.md) from a browser; if not, pass `--no-ui`.
+11. Protect the database and its backups as sensitive data: they contain every input and output.
+12. Rotate a token by changing the server's configuration (or the workers file), restarting the server, and giving the new token to its holders. Requests with the old token get `401`, so restart each worker with its new token.
 
 To report a vulnerability, follow the [security policy](https://github.com/AjmalX0/Orbit/blob/main/SECURITY.md): use GitHub's private vulnerability reporting, not a public issue.
 

@@ -25,7 +25,7 @@ orbit server --enable-http-adapter
 ```
 
 ```text
-INFO orbit: starting ORBIT runtime db=orbit.db backend="sqlite" http_adapter=true auth=false
+INFO orbit: starting ORBIT runtime db=orbit.db backend="sqlite" http_adapter=true auth=false ui=true
 ```
 
 If the adapter is disabled, a step that uses it fails immediately with the

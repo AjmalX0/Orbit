@@ -733,6 +733,66 @@ class ReadyProxy:
         self.sock.close()
 
 
+def browser_available():
+    """Node with the `playwright` library and a Chromium it can launch."""
+    if not shutil.which("node"):
+        return False
+    probe = "require('playwright').chromium.launch().then(b => b.close()).then(() => process.exit(0), () => process.exit(1))"
+    try:
+        return subprocess.run(["node", "-e", probe], capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+@unittest.skipUnless(os.environ.get("ORBIT_E2E_REQUIRE_BROWSER") or browser_available(),
+                     "needs Node with the playwright library and Chromium")
+class WebUI(unittest.TestCase):
+    """The built-in web UI in a real browser (tests/e2e/ui_smoke.js): sign-in,
+    executions, graph, queries, a signal sent through the form, cancel, and a
+    client identity's restricted view."""
+
+    @classmethod
+    def setUpClass(cls):
+        import hashlib
+        d = tempfile.mkdtemp(prefix="orbit-ui-")
+        h = hashlib.sha256(b"ui-client-token").hexdigest()
+        workers = os.path.join(d, "workers.toml")
+        with open(workers, "w") as f:
+            f.write(f'[[client]]\nid = "billing"\ntoken_sha256 = "{h}"\nworkflows = ["OrderApproval"]\nactions = ["start", "signal", "query", "read"]\n')
+        cls.c = Cluster(server_args=["--token", "ui-admin-token", "--workers-file", workers], admin_token="ui-admin-token")
+        cls.c.start_server()
+        cls.c.start_workers()
+        cls.c.cli("deploy", os.path.join(ROOT, "examples", "approval.orbit"), WORKFLOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.c.stop()
+
+    def test_web_ui_in_a_browser(self):
+        approval = lambda oid, amount: self.c.post("/v1/executions", {"workflow": "OrderApproval", "input": {"order_id": oid, "customer_id": "c-1", "amount": amount}})["execution_id"]
+        ids = {"big": approval("UI-1", 2500.0), "small": approval("UI-2", 40.0), "cancel": approval("UI-3", 3000.0),
+               "pending": approval("UI-4", 5000.0),
+               "other": self.c.post("/v1/executions", {"workflow": "OrderProcessing", "input": order("UI-5")})["execution_id"]}
+        self.assertEqual(self.c.wait(ids["small"])["status"], "COMPLETED")
+        self.assertEqual(self.c.wait(ids["other"])["status"], "COMPLETED")
+        for ex in (ids["big"], ids["cancel"], ids["pending"]):
+            deadline = time.time() + 10
+            while self.c.get(f"/v1/executions/{ex}")["units"].get("decision", {}).get("status") != "WAITING":
+                self.assertLess(time.time(), deadline, "await step did not start")
+                time.sleep(0.1)
+        env = {**self.c.env, "ORBIT_URL": self.c.url, "ORBIT_ADMIN_TOKEN": "ui-admin-token", "ORBIT_CLIENT_TOKEN": "ui-client-token",
+               "ORBIT_IDS": json.dumps(ids), "ORBIT_UI_FAILURE_SHOT": os.path.join(self.c.dir, "ui-failure.png")}
+        r = subprocess.run(["node", os.path.join(ROOT, "tests", "e2e", "ui_smoke.js")], capture_output=True, text=True, env=env, timeout=300)
+        print(r.stdout, end="")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}\nlogs in {self.c.dir}")
+        # What the browser did is in the history.
+        s = self.c.get(f"/v1/executions/{ids['big']}")
+        self.assertEqual(s["status"], "COMPLETED")
+        self.assertEqual(s["signals"][0]["payload"], {"approved": True, "reviewer": "dana", "comment": "looks fine"})
+        self.assertEqual(self.c.get(f"/v1/executions/{ids['cancel']}")["status"], "CANCELLED")
+        self.assertEqual(self.c.get(f"/v1/executions/{ids['pending']}")["status"], "RUNNING")
+
+
 @unittest.skipUnless(os.environ.get("ORBIT_E2E_POSTGRES_URL"), "set ORBIT_E2E_POSTGRES_URL to run the multi-server tests")
 class HighAvailability(unittest.TestCase):
     """Two `orbit server --cluster` nodes on one PostgreSQL database behind a

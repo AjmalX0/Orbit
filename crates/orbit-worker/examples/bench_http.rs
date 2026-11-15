@@ -86,6 +86,7 @@ fn start_runtime(store: Store) -> String {
                     tls: None,
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(200),
+                    ui: false,
                 };
                 serve(engine, cfg, std::future::pending()).await.unwrap();
             });

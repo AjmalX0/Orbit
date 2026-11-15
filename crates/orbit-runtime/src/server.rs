@@ -830,6 +830,8 @@ pub struct ServerConfig {
     pub grpc_listener: Option<std::net::TcpListener>,
     pub body_limit: usize,
     pub tick_interval: Duration,
+    /// Serve the web UI at `/ui/` ([`crate::ui`]); `orbit server --no-ui` turns it off.
+    pub ui: bool,
 }
 
 pub async fn serve(
@@ -866,6 +868,13 @@ pub async fn serve_node(
     let app = match &shared {
         Some(ctx) => crate::shared::layer(app, ctx.clone(), state.clone()),
         None => crate::cluster::layer(app, cluster.clone(), state.clone()),
+    };
+    // Outside the authentication and cluster layers: the static assets need
+    // no credential and every node serves them.
+    let app = if config.ui {
+        app.merge(crate::ui::router())
+    } else {
+        app
     };
     if let Some(node) = &cluster {
         crate::cluster::start(node.clone(), state.clone())?;
@@ -952,7 +961,7 @@ pub async fn serve_node(
     let result = match config.tls {
         None => {
             let listener = tokio::net::TcpListener::from_std(http_listener)?;
-            tracing::info!(addr = %http_addr, tls = false, "ORBIT runtime listening");
+            tracing::info!(addr = %http_addr, tls = false, ui = config.ui, "ORBIT runtime listening");
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown)
                 .await
@@ -969,7 +978,7 @@ pub async fn serve_node(
                 shutdown.await;
                 h.graceful_shutdown(Some(Duration::from_secs(10)));
             });
-            tracing::info!(addr = %http_addr, tls = true, mtls = tls.client_ca.is_some(), "ORBIT runtime listening");
+            tracing::info!(addr = %http_addr, tls = true, mtls = tls.client_ca.is_some(), ui = config.ui, "ORBIT runtime listening");
             axum_server::from_tcp_rustls(http_listener, rustls)?
                 .handle(handle)
                 .serve(app.into_make_service())

@@ -430,6 +430,9 @@ struct ServerArgs {
     /// (default: derived from --addr when it is not a wildcard address).
     #[arg(long, env = "ORBIT_ADVERTISE_ADDR", requires = "cluster")]
     advertise_addr: Option<String>,
+    /// Do not serve the web UI at /ui/ (the HTTP API is unaffected).
+    #[arg(long, env = "ORBIT_NO_UI", value_parser = clap::builder::BoolishValueParser::new())]
+    no_ui: bool,
 }
 
 fn main() -> ExitCode {
@@ -1201,7 +1204,7 @@ fn server(mut args: ServerArgs) -> Res {
             }),
         )
     });
-    tracing::info!(db = %db_label, backend = store_backend, http_adapter = args.enable_http_adapter, auth = args.token.is_some(), "starting ORBIT runtime");
+    tracing::info!(db = %db_label, backend = store_backend, http_adapter = args.enable_http_adapter, auth = args.token.is_some(), ui = !args.no_ui, "starting ORBIT runtime");
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {
         let shutdown = async {
@@ -1227,6 +1230,7 @@ fn server(mut args: ServerArgs) -> Res {
                 }),
                 body_limit: args.max_body,
                 tick_interval: std::time::Duration::from_millis(100),
+                ui: !args.no_ui,
             },
             cluster,
             shutdown,

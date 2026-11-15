@@ -22,8 +22,8 @@ With no options, the server stores everything in `orbit.db` in the current direc
 
 ```console
 $ orbit server
-2026-11-15T09:35:12.795070Z  INFO orbit: starting ORBIT runtime db=orbit.db backend="sqlite" http_adapter=false auth=false
-2026-11-15T09:35:12.797133Z  INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:7233 tls=false
+2026-11-15T18:32:42.524122Z  INFO orbit: starting ORBIT runtime db=orbit.db backend="sqlite" http_adapter=false auth=false ui=true
+2026-11-15T18:32:42.525870Z  INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:7233 tls=false ui=true
 ```
 
 In another terminal, check it and deploy a workflow:
@@ -34,6 +34,8 @@ $ curl -s http://127.0.0.1:7233/v1/health
 $ orbit deploy examples/order_processing.orbit
 deployed OrderProcessing@1.0.0 (sha256:4fdfac082bf3)
 ```
+
+The same address serves the [web UI](web-ui.md): open <http://127.0.0.1:7233/> in a browser.
 
 An unauthenticated server is allowed only on a loopback address. To listen on another interface, set a token (see [Security](security.md)).
 
@@ -67,6 +69,7 @@ Every option can also be set through the environment variable listed, except whe
 | `--node-timeout` | `ORBIT_NODE_TIMEOUT` | seconds | `5` | Shared mode: a server whose heartbeat is older than this is dead, and the others take over its executions. Values below `2` are raised to `2`. |
 | `--node-id` | `ORBIT_NODE_ID` | string | host name | This server's name in the cluster. Must be unique among running servers. Requires `--cluster`. |
 | `--advertise-addr` | `ORBIT_ADVERTISE_ADDR` | URL | from `--addr` | URL standbys hand out for this server while it leads, and that shared mode lists in `/v1/health`, for example `http://orbit-0.orbit:7233`. Without it, a wildcard `--addr` advertises nothing. Requires `--cluster`. |
+| `--no-ui` | `ORBIT_NO_UI` | flag | off | Do not serve the web UI at `/ui/`, and do not redirect `/` to it. The HTTP API is unaffected. The environment variable accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. See [Web UI](web-ui.md). |
 
 The server also reads `ORBIT_LOG` (log filter), `ORBIT_DB_CA_CERT` (CA for PostgreSQL TLS), `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_SERVICE_NAME`. See [Environment variables](../reference/environment.md).
 
@@ -124,7 +127,7 @@ orbit server --addr 0.0.0.0:7233 --token "$ORBIT_TOKEN" \
 ```
 
 ```console
-INFO orbit_runtime::server: ORBIT runtime listening addr=0.0.0.0:7233 tls=true mtls=false
+INFO orbit_runtime::server: ORBIT runtime listening addr=0.0.0.0:7233 tls=true mtls=false ui=true
 ```
 
 Clients use `https://` and, for a private CA, `--ca-cert` or `ORBIT_CA_CERT`:
@@ -145,7 +148,7 @@ orbit server --addr 0.0.0.0:7233 --token "$ORBIT_TOKEN" \
 ```
 
 ```console
-INFO orbit_runtime::server: ORBIT runtime listening addr=0.0.0.0:7233 tls=true mtls=true
+INFO orbit_runtime::server: ORBIT runtime listening addr=0.0.0.0:7233 tls=true mtls=true ui=true
 ```
 
 Client certificates are optional at the TLS layer: a client without a certificate, such as the admin CLI, can still connect and authenticate with a token. See [Security](security.md#mutual-tls).
@@ -190,7 +193,7 @@ orbit server --token "$ORBIT_TOKEN" --worker-token "$ORBIT_WORKER_TOKEN" \
 
 ```console
 INFO orbit_runtime::server: gRPC worker protocol listening addr=0.0.0.0:7234 tls=false
-INFO orbit_runtime::server: ORBIT runtime listening addr=0.0.0.0:7233 tls=false
+INFO orbit_runtime::server: ORBIT runtime listening addr=0.0.0.0:7233 tls=false ui=true
 ```
 
 The gRPC listener shares the engine, credentials, per-worker identities, TLS and mutual TLS settings with the HTTP API. Only the worker protocol is served over gRPC; the administrative API is HTTP only. The official SDKs use HTTP/JSON. See [Worker protocol](../reference/protocol.md).

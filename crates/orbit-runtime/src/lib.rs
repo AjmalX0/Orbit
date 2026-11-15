@@ -8,6 +8,7 @@
 //! * [`cluster`] — active/standby operation of several servers on PostgreSQL
 //! * [`shared`] — several active servers sharing the work on PostgreSQL
 //! * [`testing`] — in-process simulation for `orbit test` and `orbit simulate`
+//! * [`ui`] — the built-in web UI served at `/ui/`
 //! * [`replay`] — re-run a recorded history through the current decider
 
 // TaskError is returned by value on cold paths; boxing would only add noise.
@@ -27,6 +28,7 @@ pub mod shared;
 pub mod store;
 pub mod telemetry;
 pub mod testing;
+pub mod ui;
 
 pub use engine::{Engine, EngineConfig, EngineError};
 pub use store::Store;

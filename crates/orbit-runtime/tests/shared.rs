@@ -160,6 +160,7 @@ impl TestNode {
                         grpc_listener: None,
                         body_limit: 1 << 20,
                         tick_interval: Duration::from_millis(20),
+                        ui: false,
                     };
                     serve_node(engine, cfg, None, async {
                         let _ = rx.await;
