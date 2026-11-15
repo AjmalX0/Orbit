@@ -1,0 +1,34 @@
+// A one-step workflow served by the Java worker SDK.
+//
+// Worker: examples/workers/java/ (see README there).
+//   orbit run examples/java_hello.orbit --input '{"name": "Ada"}'
+
+task "greeting.java" {
+    version "1.0.0"
+    input { name: String, excited: Bool }
+    output { message: String, letters: Int }
+}
+
+workflow JavaHello {
+    version "1.0.0"
+    input {
+        name: String
+        excited: Bool = false
+    }
+    output {
+        message: String
+        letters: Int
+    }
+
+    step greet {
+        worker "greeting.java"
+        using java
+        with { name: input.name, excited: input.excited }
+        timeout 10s
+    }
+
+    return {
+        message: greet.message
+        letters: greet.letters
+    }
+}
