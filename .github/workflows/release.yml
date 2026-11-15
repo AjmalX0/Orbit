@@ -20,7 +20,7 @@ on:
 
 concurrency:
   # A newer push supersedes older runs on the same branch or pull request.
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch' }}
 
 permissions:
@@ -42,7 +42,7 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-14, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin } # cross-compiled on Apple silicon
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +58,11 @@ jobs:
         run: |
           bin=target/${{ matrix.target }}/release/orbit
           [ -f "$bin.exe" ] && bin="$bin.exe"
-          "$bin" --version
+          if ! "$bin" --version; then
+            # An Intel binary built on Apple silicon runs only where Rosetta is installed.
+            [ "${{ matrix.target }}" = x86_64-apple-darwin ] && echo "cannot execute here; skipped" && exit 0
+            exit 1
+          fi
           "$bin" check examples/order_processing.orbit
           "$bin" fmt --check examples/*.orbit
       - name: Package
@@ -129,7 +133,7 @@ jobs:
           python -m build sdks/python
           twine check sdks/python/dist/*
       - name: npm package
-        run: cd sdks/typescript && npm pack && mkdir -p ../../dist && mv *.tgz ../../dist/
+        run: cd sdks/typescript && npm install --no-save typescript@5.9.3 && npm pack && mkdir -p ../../dist && mv *.tgz ../../dist/
       - name: NuGet package
         run: cd sdks/csharp && dotnet pack OrbitLang.Sdk -c Release -o ../../dist
       - name: Maven artifacts (sources and javadoc; signing only when publishing)
@@ -145,7 +149,10 @@ jobs:
             sdks/java/target/*.jar
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Publishes with whichever platform binaries built; packages and the image are required.
+    if: >-
+      !cancelled() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+      && needs.packages.result == 'success' && needs.container.result == 'success'
     needs: [binaries, container, packages]
     runs-on: ubuntu-latest
     permissions:
@@ -219,7 +226,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "22", registry-url: "https://registry.npmjs.org" }
       - if: env.NODE_AUTH_TOKEN != ''
-        run: cd sdks/typescript && npm publish --provenance --access public
+        run: cd sdks/typescript && npm install --no-save typescript@5.9.3 && npm publish --provenance --access public
 
   publish-nuget:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'

@@ -75,6 +75,14 @@ fn is_infix(k: &TokenKind) -> bool {
 
 /// Format ORBIT source text.
 pub fn format_source(src: &str) -> Result<String, FormatError> {
+    // Files checked out with Windows line endings keep them.
+    if src.contains("\r\n") {
+        return format_lf(&src.replace("\r\n", "\n")).map(|out| out.replace('\n', "\r\n"));
+    }
+    format_lf(src)
+}
+
+fn format_lf(src: &str) -> Result<String, FormatError> {
     let (tokens, comments, diags) = tokenize_with_comments(0, src);
     if let Some(d) = diags.first() {
         return Err(FormatError::Lex(d.message.clone()));
@@ -320,5 +328,14 @@ mod tests {
             format_source("workflow W { x: \"open\n}"),
             Err(FormatError::Lex(_))
         ));
+    }
+
+    #[test]
+    fn crlf_files_keep_their_line_endings() {
+        let lf = "workflow W {\n    version \"1\"\n    return 1\n}\n";
+        let crlf = lf.replace('\n', "\r\n");
+        let out = format_source(&crlf).unwrap();
+        assert_eq!(out, crlf);
+        assert_eq!(format_source(lf).unwrap(), lf);
     }
 }
