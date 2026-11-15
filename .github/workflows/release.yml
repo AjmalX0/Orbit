@@ -261,7 +261,8 @@ jobs:
       - if: env.NUGET_API_KEY != ''
         run: |
           cd sdks/csharp && dotnet pack OrbitLang.Sdk -c Release -o out
-          dotnet nuget push "out/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          # Tolerate a key pasted with a trailing newline.
+          dotnet nuget push "out/*.nupkg" --api-key "$(printf %s "$NUGET_API_KEY" | tr -d '\r\n ')" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   publish-maven:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -271,6 +272,7 @@ jobs:
       MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
       MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
       MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+      MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -280,8 +282,20 @@ jobs:
           server-id: central
           server-username: MAVEN_CENTRAL_USERNAME
           server-password: MAVEN_CENTRAL_PASSWORD
-          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - name: Import the signing key
+        if: env.MAVEN_CENTRAL_USERNAME != ''
+        run: |
+          # Tolerate secrets pasted with surrounding whitespace or Windows line endings.
+          printf '%s\n' "$MAVEN_GPG_PRIVATE_KEY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' > key.asc
+          if ! grep -q -- '-----BEGIN PGP PRIVATE KEY BLOCK-----' key.asc; then
+            echo "::error::MAVEN_GPG_PRIVATE_KEY must be the whole ASCII-armored private key, including the BEGIN and END lines"
+            exit 1
+          fi
+          gpg --batch --pinentry-mode loopback --import key.asc
+          rm key.asc
+          echo "MAVEN_GPG_PASSPHRASE=$(printf %s "$MAVEN_GPG_PASSPHRASE" | tr -d '\r\n')" >> "$GITHUB_ENV"
+          echo "MAVEN_CENTRAL_USERNAME=$(printf %s "$MAVEN_CENTRAL_USERNAME" | tr -d '\r\n ')" >> "$GITHUB_ENV"
+          echo "MAVEN_CENTRAL_PASSWORD=$(printf %s "$MAVEN_CENTRAL_PASSWORD" | tr -d '\r\n ')" >> "$GITHUB_ENV"
       - if: env.MAVEN_CENTRAL_USERNAME != ''
         run: |
           cd sdks/java
@@ -289,7 +303,7 @@ jobs:
           if curl -fsS -o /dev/null "https://repo1.maven.org/maven2/io/github/ajmalx0/orbit-sdk/$version/orbit-sdk-$version.pom"; then
             echo "orbit-sdk $version already on Maven Central"
           else
-            mvn -B -Prelease deploy
+            mvn -B -Prelease -Dgpg.passphraseEnvName=MAVEN_GPG_PASSPHRASE deploy
           fi
 
   publish-vscode:
