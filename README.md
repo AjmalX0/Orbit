@@ -194,7 +194,8 @@ signals and queries, and the version bump they require.
 
 **Runtime:** event-sourced and crash-safe. SQLite or PostgreSQL storage, and
 active/standby clusters on PostgreSQL with automatic failover (`--cluster`).
-Outcome handlers (`on failure`, `on cancel`, `on timeout`), resource limits and
+Event handlers (`on event <signal>`), outcome handlers (`on failure`,
+`on cancel`, `on timeout`), resource limits per server or per workflow, and
 client identities limited to workflows and actions.
 At-least-once delivery with reconciliation of uncertain attempts. The worker
 protocol is served over HTTP/JSON and gRPC. Admin, shared-worker and per-worker

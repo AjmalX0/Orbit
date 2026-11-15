@@ -263,8 +263,8 @@ error: compatibility check failed: 2 error(s), 0 warning(s)</code></pre>
       <div><h3>Durable timers</h3><p><code>sleep 24h</code> survives restarts and needs no worker. Conditions decide at run time whether a step runs.</p></div>
       <div><h3>Signals and queries</h3><p>Typed messages a workflow waits for, and typed read-only views of its state, declared in the workflow itself.</p></div>
       <div><h3>Compute steps</h3><p>Small deterministic transformations with <code>map</code>, <code>filter</code> and <code>sum</code>, evaluated by the runtime and type-checked like everything else.</p></div>
-      <div><h3>Outcome handlers</h3><p><code>on failure</code>, <code>on cancel</code> and <code>on timeout</code> run steps after compensation, with a typed <code>failure</code> value, to notify people or record what happened.</p></div>
-      <div><h3>Limits and permissions</h3><p>Caps on running executions, fan-out, history and payload size, and client identities limited to the workflows and actions they need.</p></div>
+      <div><h3>Handlers</h3><p><code>on event</code> runs steps every time a signal arrives. <code>on failure</code>, <code>on cancel</code> and <code>on timeout</code> run after compensation, with a typed <code>failure</code> value.</p></div>
+      <div><h3>Limits and permissions</h3><p>Caps on running executions, fan-out, history and payload size, per server or per workflow, and client identities limited to the workflows and actions they need.</p></div>
       <div><h3>Tests in the language</h3><p>Mocks, signals and expectations in <code>test</code> blocks, type-checked against the workflow and run with <code>orbit test</code> in milliseconds.</p></div>
       <div><h3>Safe evolution</h3><p>Immutable versions, content hashes, and <code>orbit compat</code> to catch breaking changes to inputs, outputs, signals and queries.</p></div>
     </div>
