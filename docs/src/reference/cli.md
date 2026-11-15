@@ -13,6 +13,7 @@ Commands:
   fmt       Format .orbit files in place (comments and line breaks are preserved)
   lsp       Run the language server (LSP over stdio), used by editor extensions
   graph     Render a workflow's step graph (Mermaid or Graphviz)
+  compat    Check that new workflow and contract versions are compatible with old ones
   server    Run the ORBIT runtime server
   deploy    Compile and register workflow definitions with the runtime
   run       Deploy (if given a file) and start a workflow, then follow it to completion
@@ -35,7 +36,7 @@ Commands:
 
 ## Exit codes
 
-Every command uses the same convention:
+Every command uses the same convention, except `compat`, which also returns `2` for files that cannot be read or compiled (see [orbit compat](#orbit-compat)):
 
 | Code | Meaning |
 |---|---|
@@ -262,6 +263,34 @@ Exit codes: `0` on success; `1` on compilation errors, an unknown `--workflow`, 
 ```console
 $ orbit graph examples/fulfilment.orbit --workflow Nope
 error: no workflow `Nope`; available: Shipping, Fulfilment
+```
+
+## orbit compat
+
+Check that new workflow and contract versions are compatible with old ones. See [Compatibility checks](../tooling/compat.md) for every rule.
+
+```text
+orbit compat [OPTIONS] <OLD> <NEW>
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `<OLD>` | path | required | The old version: a `.orbit` file or a compiled IR `.json` file. |
+| `<NEW>` | path | required | The new version: a `.orbit` file or a compiled IR `.json` file. |
+| `--format <FORMAT>` | `human` or `json` | `human` | `human` prints one line per finding on stdout. `json` prints `{"compatible", "errors", "warnings", "findings": [...]}` on stdout and nothing else. |
+
+Exit codes: `0` when there are no errors (warnings are allowed); `1` when any finding is an error; `2` when a file cannot be read, is not valid IR, or does not compile, or an argument is missing. Unlike the other commands, `compat` uses `2` for compile errors, so that CI can tell an incompatible change from a broken input.
+
+```console
+$ orbit compat v1.orbit minor.orbit
+error   workflow Invoice 1.4.0 → 1.5.0: input.amount: Float → Int: incompatible type: expected `Int`, found `Float`; breaking for callers without a major version bump; hint: bump the major version (1.4.0 → 2.0.0)
+error   workflow Invoice 1.4.0 → 1.5.0: input.currency: (added) → String: required field added without a default; breaking for callers without a major version bump; hint: bump the major version (1.4.0 → 2.0.0)
+ok      workflow Invoice 1.4.0 → 1.5.0: output.total: Float → Int: narrowed; still accepted where the old type is expected
+error: compatibility check failed: 2 error(s), 0 warning(s)
+$ orbit compat v1.orbit major.orbit
+info    workflow Invoice 1.4.0 → 2.0.0: input.amount: Float → Int: incompatible type: expected `Int`, found `Float`; breaking for callers, allowed by the major version bump
+info    workflow Invoice 1.4.0 → 2.0.0: input.currency: (added) → String: required field added without a default; breaking for callers, allowed by the major version bump
+ok      workflow Invoice 1.4.0 → 2.0.0: output.total: Float → Int: narrowed; still accepted where the old type is expected
 ```
 
 ## orbit server
@@ -639,3 +668,4 @@ ts-1                         typescript   offline  0  orders.validate@1.0.0, inv
 - [Running the server](../runtime/server.md)
 - [Executions and history](../runtime/executions.md)
 - [Formatter](../tooling/fmt.md)
+- [Compatibility checks](../tooling/compat.md)

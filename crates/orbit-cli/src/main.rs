@@ -1,6 +1,7 @@
 //! `orbit` — compiler driver, runtime server and runtime client.
 
 mod client;
+mod compat;
 mod lsp;
 mod scaffold;
 mod view;
@@ -140,6 +141,16 @@ enum Command {
         workflow: Option<String>,
         #[arg(long, value_enum, default_value = "mermaid")]
         format: GraphFormat,
+    },
+    /// Check that new workflow and contract versions are compatible with old ones.
+    Compat {
+        /// The old version: a .orbit file or a compiled IR .json file.
+        old: PathBuf,
+        /// The new version: a .orbit file or a compiled IR .json file.
+        new: PathBuf,
+        /// `human` prints one line per finding; `json` prints a single report object.
+        #[arg(long, value_enum, default_value = "human")]
+        format: DiagFormat,
     },
     /// Run the ORBIT runtime server.
     Server(ServerArgs),
@@ -526,6 +537,7 @@ fn run(cmd: Command) -> Res {
             );
             Ok(ExitCode::SUCCESS)
         }
+        Command::Compat { old, new, format } => Ok(compat::run(&old, &new, format)),
         Command::Server(args) => server(args),
         Command::Deploy { files, remote } => {
             let client = remote.client();
