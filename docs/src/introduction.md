@@ -29,7 +29,7 @@ survive crashes. Workers only implement individual tasks.
 ## How the pieces fit
 
 ```text
-  order.orbit ──► orbit compiler ──► orbit-ir/1 (typed, hashed JSON)
+  order.orbit ──► orbit compiler ──► orbit-ir (typed, hashed JSON)
                    type checks,              │
                    dependency graph          │ orbit deploy / orbit run
                                              ▼
@@ -45,10 +45,10 @@ survive crashes. Workers only implement individual tasks.
 
 | Part | What it does |
 |---|---|
-| Language | Declares schemas, task contracts and workflows in `.orbit` files. |
-| Compiler | Resolves imports and names, type-checks every step input and reference, builds the dependency graph, rejects cycles, and lowers the result to the IR. It runs inside the `orbit` CLI (`orbit check`, `orbit compile`). |
-| IR | `orbit-ir/1`: a versioned JSON representation of a workflow, identified by a SHA-256 content hash. The runtime only accepts IR, never source. |
-| Runtime | `orbit server`: stores definitions and executions, decides what runs next, dispatches tasks to workers, applies retries, timeouts and compensations, and recovers after a crash. |
+| Language | Declares schemas, task contracts and workflows in `.orbit` files, including the typed signals a workflow accepts and the queries it answers. |
+| Compiler | Resolves imports and names, type-checks every step input and reference, builds the dependency graph, rejects cycles, warns about missing compensations and other likely mistakes, and lowers the result to the IR. It runs inside the `orbit` CLI (`orbit check`, `orbit compile`). |
+| IR | `orbit-ir/1` and `orbit-ir/2`: a versioned JSON representation of a workflow, identified by a SHA-256 content hash. The runtime only accepts IR, never source. |
+| Runtime | `orbit server`: stores definitions and executions, decides what runs next, dispatches tasks to workers, evaluates compute steps, delivers signals, answers queries, applies retries, timeouts and compensations, and recovers after a crash. |
 | Workers | Your processes. Each registers the task contracts it implements, long-polls the runtime for tasks, and reports results or structured errors through an SDK. |
 
 The CLI is a single binary, `orbit`, that contains the compiler, the runtime
@@ -128,9 +128,12 @@ precise rules.
 
 ## Current scope
 
-Version 0.1 is a single-node runtime. Multi-node execution sharing PostgreSQL,
-signals and queries, and `orbit test` / `orbit replay` / `orbit simulate` are
-planned for later versions.
+The runtime runs on a single node. Workflows can wait for typed signals,
+answer typed queries and compute values without a worker; see
+[Signals and queries](language/signals.md) and
+[Compute steps](language/compute.md). Multi-node execution sharing PostgreSQL,
+and `orbit test` / `orbit replay` / `orbit simulate`, are planned for later
+versions.
 
 ## Next steps
 

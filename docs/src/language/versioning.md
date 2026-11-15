@@ -121,10 +121,43 @@ bump.
 
 ## IR version
 
-The compiler produces IR in the format `orbit-ir/1`, recorded in every
-compiled definition (`ir_version`). The runtime rejects definitions in an IR
-version it does not support, with a clear error, instead of misreading them.
-`GET /v1/health` lists the IR versions a runtime supports.
+Every compiled definition records its IR format in `ir_version`. The compiler
+chooses the lowest version that can express the workflow:
+
+| IR version | Used for |
+|---|---|
+| `orbit-ir/1` | Every workflow that uses none of the features below. |
+| `orbit-ir/2` | A workflow that declares a `signal` or a `query`, has an `await` or `compute` step, or uses a lambda in any expression (`with`, `when`, `for`, `idempotency_key`, `compensate`, `return`). |
+
+A workflow that does not use these features compiles exactly as before: it
+keeps `orbit-ir/1` and the same definition hash, so upgrading the compiler
+never forces a version bump or causes a `DEFINITION_CONFLICT`. Using one of
+the features changes the definition and needs a new workflow version, like
+any other change. `compensated_by` on a contract is not an `orbit-ir/2`
+feature, but it is part of the contract recorded in the definition, so adding
+it changes the hash of every workflow that calls the task.
+
+```console
+$ orbit compile --stdout examples/order_processing.orbit | grep ir_version
+  "ir_version": "orbit-ir/1",
+$ orbit compile --stdout examples/approval.orbit | grep ir_version
+  "ir_version": "orbit-ir/2",
+```
+
+The runtime accepts every IR version it supports and rejects any other with
+`400 INVALID_IR` (`` unsupported IR version `orbit-ir/3`; this runtime supports `orbit-ir/1`, `orbit-ir/2` ``),
+instead of misreading it. It also rejects an `orbit-ir/1` definition that uses
+an `orbit-ir/2` feature. `GET /v1/health` lists the supported versions in
+`ir_versions`:
+
+```json
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":2}
+```
+
+A runtime that only lists `orbit-ir/1` (ORBIT 0.1) cannot register
+workflows that use signals, queries, `await`, `compute` or lambdas. Upgrade
+the runtime before you deploy them; definitions already registered keep
+working after the upgrade.
 
 ## Versioning checklist
 
@@ -135,11 +168,18 @@ version it does not support, with a clear error, instead of misreading them.
   it.
 - Use `MAJOR.MINOR.PATCH` versions, so that "latest" selection works as
   expected.
+- Treat signals and queries like the input and output: senders and readers
+  depend on them. Run [`orbit compat`](../tooling/compat.md) to see which
+  changes break them.
+- Before deploying a workflow that compiles to `orbit-ir/2`, check that the
+  runtime lists it in `GET /v1/health`.
 
 ## See also
 
 - [Workflows](workflows.md)
 - [Task contracts](tasks.md#changing-a-contract)
 - [Child workflows](child-workflows.md)
+- [Signals and queries](signals.md)
+- [Compatibility checks](../tooling/compat.md)
 - [Executions and history](../runtime/executions.md)
 - [CLI](../reference/cli.md)

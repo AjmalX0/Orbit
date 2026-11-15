@@ -1,7 +1,8 @@
 # Steps
 
 A step is one unit of work in a workflow: a task run by a worker, a child
-workflow, or a durable timer. Each step declares what it does, what it needs,
+workflow, a durable timer, a wait for a signal, or a value computed by the
+runtime. Each step declares what it does, what it needs,
 and the policies that apply to it. This page is the reference for the `step`
 block: its actions, every member, where each member is allowed, and the type
 other expressions see when they reference the step.
@@ -49,6 +50,8 @@ Every step has exactly one action:
 | Task | `worker "task.name"` | A task, executed by a worker that implements the contract, or by the runtime for built-in tasks. |
 | Child workflow | `workflow "Name"` | Another workflow, as a durable child execution. See [Child workflows](child-workflows.md). |
 | Timer | `sleep 10s` | A durable timer. See [Durable sleep](sleep.md). |
+| Signal wait | `await review` | Waits for the next `review` signal sent to the execution; the payload is the output. See [Signals and queries](signals.md). |
+| Compute | `compute <expression>` | Evaluates an expression in the runtime; the value is the output. No worker. See [Compute steps](compute.md). |
 
 A step without an action is `E0301`. A step with two actions is `E0106`:
 
@@ -67,7 +70,7 @@ workflow Report {
 ```
 
 ```text
-error[E0106]: a step can only have one `worker`, `workflow` or `sleep`
+error[E0106]: a step can only have one `worker`, `workflow`, `sleep`, `await` or `compute`
  --> report.orbit:9:9
   |
 9 |         sleep 10s
@@ -84,13 +87,15 @@ error: compilation failed: 1 error(s), 0 warning(s)
 | `worker` | `worker "name"` | | Run a task. | [Task contracts](tasks.md) |
 | `workflow` | `workflow "Name"` | | Start a child workflow. | [Child workflows](child-workflows.md) |
 | `sleep` | `sleep DURATION` | | Wait durably. | [Durable sleep](sleep.md) |
+| `await` | `await SIGNAL` | | Wait for a signal declared in the workflow. | [Signals and queries](signals.md) |
+| `compute` | `compute EXPR` | | Evaluate an expression in the runtime. | [Compute steps](compute.md) |
 | `with` | `with EXPR` | `{}` | The input passed to the task or child workflow. | below |
 | `using` | `using LANGUAGE` | any worker | Route the task only to workers of this runtime. | below |
 | `after` | `after a, b` | none | Run after these steps. | [Dependencies](dependencies.md) |
 | `when` | `when EXPR` | always run | Run only if the condition is true; otherwise skip. | [Conditions](conditions.md) |
 | `for` | `for x in EXPR` | none | Run once per list element. | [Fan-out](fan-out.md) |
 | `max_parallel` | `max_parallel N` | unlimited | Concurrency limit for a `for` step, 1 to 10000. | [Fan-out](fan-out.md) |
-| `timeout` | `timeout DURATION` | no limit | Limit for one attempt, from dispatch to result. | [Retries and timeouts](retries-timeouts.md) |
+| `timeout` | `timeout DURATION` | no limit | Limit for one attempt, from dispatch to result. On an `await` step: limit for the wait. | [Retries and timeouts](retries-timeouts.md) |
 | `queue_timeout` | `queue_timeout DURATION` | no limit | Limit for waiting for a worker. | [Retries and timeouts](retries-timeouts.md) |
 | `retry` | `retry { ... }` | one attempt | Retry policy. | [Retries and timeouts](retries-timeouts.md) |
 | `idempotency_key` | `idempotency_key EXPR` | `<execution id>/<unit>` | The key workers use to deduplicate side effects. | [Idempotency](idempotency.md) |
@@ -127,7 +132,7 @@ Syntax notes:
     |
   7 |     step build {
     |          ^^^^^
-    = help: add `worker "task.name"`, `workflow "Name"` or `sleep 10s`
+    = help: add `worker "task.name"`, `workflow "Name"`, `sleep 10s`, `await <signal>` or `compute <expression>`
 
   error[E0102]: unexpected `wroker` in step
    --> report.orbit:8:9
@@ -144,22 +149,22 @@ Syntax notes:
 Not every member makes sense for every kind of step. The compiler rejects
 misplaced members with `E0307` (or `E0308` for compensation):
 
-| Member | Task step | Workflow step | Sleep step | `compensate` block |
-|--------|:---------:|:-------------:|:----------:|:------------------:|
-| `with` | yes | yes | no | yes |
-| `using` | yes | no | no | yes |
-| `after` | yes | yes | yes | no |
-| `when` | yes | yes | yes | no |
-| `for` | yes | yes | no | no |
-| `max_parallel` | with `for` | with `for` | no | no |
-| `timeout` | yes | yes | no | yes |
-| `queue_timeout` | yes | no | no | yes |
-| `retry` | yes | no | no | yes |
-| `idempotency_key` | yes | no | no | yes |
-| `compensate` | yes | yes | no (`E0308`) | not allowed (`E0102`) |
+| Member | Task step | Workflow step | Sleep step | Await step | Compute step | `compensate` block |
+|--------|:---------:|:-------------:|:----------:|:----------:|:------------:|:------------------:|
+| `with` | yes | yes | no | no | no | yes |
+| `using` | yes | no | no | no | no | yes |
+| `after` | yes | yes | yes | yes | yes | no |
+| `when` | yes | yes | yes | yes | yes | no |
+| `for` | yes | yes | no | no | yes | no |
+| `max_parallel` | with `for` | with `for` | no | no | with `for` | no |
+| `timeout` | yes | yes | no | yes | no | yes |
+| `queue_timeout` | yes | no | no | no | no | yes |
+| `retry` | yes | no | no | no | no | yes |
+| `idempotency_key` | yes | no | no | no | no | yes |
+| `compensate` | yes | yes | no (`E0308`) | no (`E0308`) | no (`E0308`) | not allowed (`E0102`) |
 
-A `compensate` block must call a task with `worker`; `sleep` or `workflow`
-there is `E0308`.
+A `compensate` block must call a task with `worker`; `sleep`, `workflow`,
+`await` or `compute` there is `E0308`.
 
 ## Step names
 
@@ -259,6 +264,8 @@ action and on `when` and `for`:
 | `worker "t"` | the output type of task `t` |
 | `workflow "W"` | the output type of workflow `W` |
 | `sleep d` | `{}` |
+| `await s` | the payload record type of signal `s` |
+| `compute e` | the type of expression `e` |
 | with `when` | the type above, made optional (`T?`) |
 | with `for` | `List<T>`, one element per list item |
 | with `for` and `when` | `List<T>?` |
@@ -282,7 +289,7 @@ A unit moves through these states:
 | `SCHEDULED` | Input evaluated, queued for a worker. |
 | `DISPATCHED` | A worker (or the runtime) is executing the attempt. |
 | `RETRY_WAIT` | A retry is scheduled after a backoff delay. |
-| `WAITING` | A `sleep` timer is running. |
+| `WAITING` | A `sleep` timer is running, or an `await` step is waiting for a signal. |
 | `RUNNING` | A `for` step whose elements are in progress. |
 | `SUCCEEDED` | Finished successfully. |
 | `SKIPPED` | Its `when` condition was false or `null`. |
@@ -299,4 +306,6 @@ these transitions.
 - [Retries and timeouts](retries-timeouts.md)
 - [Fan-out](fan-out.md)
 - [Compensation](compensation.md)
+- [Signals and queries](signals.md)
+- [Compute steps](compute.md)
 - [Compiler diagnostics](../reference/diagnostics.md)

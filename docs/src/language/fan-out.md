@@ -141,6 +141,8 @@ is bound to that element. Each element's compensation is a unit keyed
 | `worker "t"` | One task per element. |
 | `workflow "W"` | One child execution per element. |
 | `sleep` | Not allowed (`E0307`). |
+| `await` | Not allowed (`E0307`): an `await` step receives one signal. |
+| `compute` | One value per element, evaluated by the runtime. See [Compute steps](compute.md#fan-out). |
 | `when` | Evaluated once, before fan-out. |
 | `after` | The whole step waits; all elements start after the dependencies. |
 | `retry`, `timeout`, `queue_timeout` | Apply to each element separately. |

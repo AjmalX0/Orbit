@@ -35,6 +35,7 @@ The name is a string literal. By convention it is a dotted, lowercase
 | `description` | string | none | Human-readable description, shown by tooling. |
 | `input` | record type | `{}` | The type of the value the workflow passes in `with`. |
 | `output` | record type | `{}` | The type of the value the worker returns. |
+| `compensated_by` | string | none | The task that undoes this one. Steps that call this task without a compensation that calls the named task get a warning (`W0601`, `W0602`). See [Declaring how a task is undone](#declaring-how-a-task-is-undone). |
 
 Members can appear in any order, each may be followed by an optional `:`
 (`version: "1.0.0"`), and separators between them are optional.
@@ -71,6 +72,49 @@ Wrap scalar values in a record (`input { value: Int }`). A task with no
 | `E0310` | `input` and `output` are record types or `JSON`. |
 | `W0201` | `version` is `MAJOR.MINOR.PATCH`, optionally with `-pre` or `+build` suffixes. |
 | `E0300` | A step's `worker "name"` refers to a declared task. The diagnostic suggests the closest name. |
+| `E0316` | `compensated_by` names a declared task. The diagnostic suggests the closest name. |
+| `W0601` | A step that calls a task with `compensated_by` has a `compensate` block. |
+| `W0602` | That `compensate` block calls the task named by `compensated_by`. |
+
+## Declaring how a task is undone
+
+`compensated_by` records, on the contract, which task reverses its effect:
+
+```orbit
+task "inventory.reserve" {
+    version "1.0.0"
+    input { order_id: String, quantity: Int }
+    output { reservation_id: String }
+    compensated_by "inventory.release"
+}
+
+task "inventory.release" {
+    version "1.0.0"
+    input { reservation_id: String }
+    output { released: Bool }
+}
+
+workflow Reserve {
+    version "1.0.0"
+    input { order_id: String, quantity: Int }
+
+    step reserve {
+        worker "inventory.reserve"
+        with { order_id: input.order_id, quantity: input.quantity }
+        compensate {
+            worker "inventory.release"
+            with { reservation_id: reserve.reservation_id }
+        }
+    }
+}
+```
+
+The contract author knows which tasks have effects that must be undone; the
+compiler then warns every workflow author who calls the task without the
+matching compensation. The runtime does not use `compensated_by`: a step is
+compensated only by its own `compensate` block. Like the rest of the contract,
+`compensated_by` is part of the definition hash of every workflow that uses
+the task. See [Static safety checks](safety.md).
 
 ## How the compiler uses a contract
 
@@ -158,6 +202,8 @@ See [HTTP adapter](http-adapter.md).
 
 - [Schemas](schemas.md)
 - [Steps](steps.md)
+- [Compensation](compensation.md)
+- [Static safety checks](safety.md)
 - [Versioning](versioning.md)
 - [How workers work](../sdks/overview.md)
 - [Worker protocol](../reference/protocol.md)

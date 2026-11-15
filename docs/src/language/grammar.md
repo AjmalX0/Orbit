@@ -38,18 +38,23 @@ identifier naming a primitive or a schema. See [Types](types.md).
 
 ### Task contracts
 
-A `task` declaration has a string name and up to four members: `version`,
-`description`, `input` and `output`. See [Task contracts](tasks.md).
+A `task` declaration has a string name and up to five members: `version`,
+`description`, `input`, `output` and `compensated_by`. See
+[Task contracts](tasks.md).
 
 ### Workflows and steps
 
 A workflow has an identifier name and members: `version`, `description`,
-`timeout`, `input`, `output`, any number of `step` declarations, and
-`return`. The `on` member is parsed only so that the compiler can reject it
+`timeout`, `input`, `output`, any number of `step`, `signal` and `query`
+declarations, and `return`. A `signal` has a name and a record body, like
+`input`. A `query` has a name, `=` and an expression; the parser also accepts
+`:` or nothing in place of `=`, but `=` is the documented form. See
+[Signals and queries](signals.md). The `on` member is parsed only so that the compiler can reject it
 with a clear message (`E0105`).
 
 A step has an identifier name and members. `action` is one of `worker`,
-`workflow` or `sleep`. The `compensate` block contains step members, with the
+`workflow`, `sleep`, `await` (followed by a signal name) or `compute`
+(followed by an expression). The `compensate` block contains step members, with the
 restrictions listed under
 [Restrictions after parsing](#restrictions-after-parsing). See
 [Steps](steps.md).
@@ -68,9 +73,15 @@ left-associative. A unary `-` directly before a number literal is folded into
 a negative literal. See [Expressions](expressions.md).
 
 `primary` covers literals, function calls (an identifier immediately followed
-by `(`), path roots (`input`, `execution`, a step name, or a loop variable),
-object literals, list literals, `if ... then ... else ...`, and parenthesized
-expressions.
+by `(`), path roots (`input`, `execution`, a step name, a loop variable or a
+lambda parameter), object literals, list literals, `if ... then ... else ...`,
+and parenthesized expressions.
+
+A function argument can be a lambda, `IDENTIFIER => expression`. The parser
+recognizes `name =>` wherever a primary expression can start, so a misplaced
+lambda is reported by the compiler (`E0415`) rather than as a syntax error.
+The compiler accepts lambdas only as the second argument of `map`, `filter`,
+`find`, `any` and `all`. See [Expressions](expressions.md#lambdas).
 
 ### Notes on the grammar
 
@@ -85,6 +96,7 @@ The parser differs from the EBNF in a few details:
   unknown member (`E0102`).
 - `retry`, `compensate` and `for` do not accept the optional `:` that other
   members accept.
+- In a lambda, `=>` must be on the same line as the parameter.
 
 ## Lexical rules
 
@@ -104,7 +116,7 @@ character outside a string or comment is `E0001`.
 | duration | an integer or float immediately followed by `ms`, `s`, `m`, `h` or `d` | Normalized to milliseconds, rounded. Any other letters after a number are `E0005`. |
 | string | `"..."` on one line | Escapes: `\n`, `\t`, `\r`, `\"`, `\\`, `\u{hex}`. Unknown escapes are `E0004`; an unterminated or multi-line string is `E0002`. |
 | punctuation | `{ } ( ) [ ] < > , : ; . ? = ! + - * / %` | |
-| operators | `== != <= >= && \|\|` | Two-character operators are lexed greedily. |
+| operators | `== != <= >= && \|\| =>` | Two-character operators are lexed greedily. `=>` separates a lambda parameter from its body. |
 | reserved literals | `true`, `false`, `null` | The only reserved words. |
 
 ### Comments
@@ -151,9 +163,9 @@ or `timeout` can be field names.
 | Position | Words with special meaning |
 |----------|----------------------------|
 | top level | `workflow`, `schema`, `task`, `import` |
-| task body | `version`, `description`, `input`, `output` |
-| workflow body | `version`, `description`, `timeout`, `input`, `output`, `step`, `return`, `on` |
-| step body | `worker`, `workflow`, `sleep`, `using`, `after`, `with`, `timeout`, `queue_timeout`, `retry`, `idempotency_key`, `when`, `for`, `in`, `max_parallel`, `compensate` |
+| task body | `version`, `description`, `input`, `output`, `compensated_by` |
+| workflow body | `version`, `description`, `timeout`, `input`, `output`, `step`, `signal`, `query`, `return`, `on` |
+| step body | `worker`, `workflow`, `sleep`, `await`, `compute`, `using`, `after`, `with`, `timeout`, `queue_timeout`, `retry`, `idempotency_key`, `when`, `for`, `in`, `max_parallel`, `compensate` |
 | type | `List`, `Map`, and the primitive type names |
 | expression | `if`, `then`, `else`; `input` and `execution` as path roots |
 | `retry` values | `fixed`, `exponential` |
@@ -182,6 +194,7 @@ otherwise be ambiguous:
 |----------|----------------|------------|
 | step names | `input`, `execution`, `output`, `if`, `then`, `else` | `E0306` |
 | `for` loop variables | `input`, `execution`, and the names of the workflow's steps | `E0413` |
+| lambda parameters | `input`, `execution`, the names of the workflow's steps, loop variables and enclosing lambda parameters | `E0413` |
 | schema names | the primitive type names, `List`, `Map` | `E0200` |
 | task names | names starting with `orbit.` | `E0200` |
 
@@ -197,10 +210,15 @@ The grammar accepts some programs that the compiler then rejects:
 | Restriction | Code |
 |-------------|------|
 | A workflow has a `version`. | `E0500` |
-| A step has exactly one of `worker`, `workflow` or `sleep`. | `E0301`, `E0106` |
+| A step has exactly one of `worker`, `workflow`, `sleep`, `await` or `compute`. | `E0301`, `E0106` |
 | A step member appears at most once (except `after`). | `E0106` |
 | `workflow` steps take no `using`, `retry`, `idempotency_key` or `queue_timeout`. | `E0307` |
 | `sleep` steps take only `after` and `when`. | `E0307`, `E0308` |
+| `await` steps take only `after`, `when` and `timeout`, and name a declared signal. | `E0307`, `E0308`, `E0315` |
+| `compute` steps take only `after`, `when`, `for` and `max_parallel`. | `E0307`, `E0308` |
+| Signal and query names are unique within a workflow. | `E0317`, `E0318` |
+| `compensated_by` names a declared task. | `E0316` |
+| Lambdas appear only as the second argument of `map`, `filter`, `find`, `any` and `all`. | `E0415` |
 | `max_parallel` requires `for`. | `E0307` |
 | `compensate` calls a `worker` and takes no `when`, `after`, `for` or `max_parallel`. | `E0308`, `E0307` |
 | The loop variable is not in scope in `when`. | `E0401` |

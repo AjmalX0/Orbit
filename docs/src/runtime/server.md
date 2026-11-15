@@ -30,7 +30,7 @@ In another terminal, check it and deploy a workflow:
 
 ```console
 $ curl -s http://127.0.0.1:7233/v1/health
-{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.1.0","ir_versions":["orbit-ir/1"],"active_executions":0,"worker_sessions":0}
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0}
 $ orbit deploy examples/order_processing.orbit
 deployed OrderProcessing@1.0.0 (sha256:4fdfac082bf3)
 ```
@@ -207,7 +207,7 @@ Because recovery runs before the listener is bound, connection attempts fail unt
 `GET /v1/health` never requires authentication and returns `200` once the server is listening:
 
 ```json
-{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.1.0","ir_versions":["orbit-ir/1"],"active_executions":0,"worker_sessions":0}
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0}
 ```
 
 Use it for both liveness and readiness probes: the server answers only after recovery. There is no separate readiness endpoint. If you use mutual TLS, a probe that presents a client certificate matching no worker gets `403`; send probes without a client certificate.

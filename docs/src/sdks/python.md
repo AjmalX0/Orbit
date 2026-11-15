@@ -280,6 +280,35 @@ print(result["status"], result.get("output"))
 Starting with an `execution_id` that already exists returns the existing
 execution instead of creating a duplicate.
 
+### Signals and queries
+
+`signal` sends a typed signal declared with `signal <name> { ... }` in the
+workflow, and `query` evaluates a declared query. Both need the admin token
+when authentication is enabled.
+
+```python
+import os
+
+from orbit_sdk import ApiError, Client
+
+client = Client(token=os.environ["ORBIT_ADMIN_TOKEN"])
+
+print(client.query("order-A-100", "status"))
+# {'needs_approval': True, 'approved': None, 'reviewer': None, 'charged': False}
+
+seq = client.signal("order-A-100", "review", {"approved": True, "reviewer": "dana"})
+
+try:
+    client.signal("order-A-100", "review", {"approved": "yes", "reviewer": "dana"})
+except ApiError as e:
+    print(e.code)  # SIGNAL_PAYLOAD_INVALID
+```
+
+`signal` returns the history sequence number of the recorded
+`SignalReceived` event. The runtime validates the payload and buffers the
+signal until an `await` step takes it. See
+[Signals and queries](../language/signals.md).
+
 ## API reference
 
 ### `Worker`
@@ -344,6 +373,8 @@ Client(server=None, token=None, timeout=70.0, ca_cert=None,
 | `post(path, body)` | `(status, body)` | `POST` request. |
 | `start(workflow, input=None, version=None, execution_id=None)` | `str` | Starts an execution and returns its id. |
 | `wait(execution_id, timeout_ms=30000)` | `dict` | Long-polls until the execution finishes or the timeout elapses, and returns its state. |
+| `signal(execution_id, name, payload=None)` | `int` | Sends the signal `name` with `payload` (`None` sends `{}`) and returns the history sequence number of the recorded signal. Raises `ApiError` with `UNKNOWN_SIGNAL`, `SIGNAL_PAYLOAD_INVALID`, `EXECUTION_FINISHED` or `NOT_FOUND`. |
+| `query(execution_id, name)` | any | Evaluates the query `name` and returns its value. Raises `ApiError` with `UNKNOWN_QUERY`, `QUERY_FAILED` or `NOT_FOUND`. |
 
 ### `ApiError`
 

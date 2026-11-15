@@ -134,6 +134,11 @@ On a `workflow` step, `timeout` limits how long the parent waits for the
 child. When it expires, the step fails with `TIMEOUT` (workflow steps cannot
 retry) and the child execution is cancelled.
 
+On an `await` step, `timeout` limits how long the step waits for its signal,
+from the moment it starts waiting. When it expires, the step fails with
+`SIGNAL_TIMEOUT`, which is never retried. See
+[Signals and queries](signals.md#timeouts).
+
 ## Queue timeout
 
 `queue_timeout` limits how long an attempt may wait for a worker to pick it up:
@@ -161,7 +166,7 @@ Use `queue_timeout` to fail fast when no worker for a task (or for the
 ## Workflow timeout
 
 The workflow-level `timeout` limits the whole execution, measured from its
-creation, across all steps, retries and sleeps. When it passes, the runtime
+creation, across all steps, retries, sleeps and waits for signals. When it passes, the runtime
 stops scheduling work, waits for in-flight attempts, runs compensations, and
 ends the execution as `TIMED_OUT`. See [Workflows](workflows.md#timeout).
 
@@ -172,6 +177,10 @@ ends the execution as `TIMED_OUT`. See [Workflows](workflows.md#timeout).
 | `retry` | yes | no (`E0307`) | no (`E0307`) | yes |
 | `timeout` | yes | yes | no (`E0307`) | yes |
 | `queue_timeout` | yes | no (`E0307`) | no (`E0307`) | yes |
+
+`await` steps accept `timeout` only, and `compute` steps accept none of the
+three (`E0307`): a compute step is evaluated by the runtime and cannot time
+out or be retried.
 
 A child workflow is durable on its own. Put retries on the child's steps.
 

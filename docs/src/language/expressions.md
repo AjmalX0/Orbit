@@ -15,8 +15,10 @@ precedence and the evaluation rules, including the behavior with `null`.
 | step `when` | `Bool` or `Bool?` | `input`, `execution`, steps |
 | step `idempotency_key` | `String` | `input`, `execution`, steps, loop variable |
 | step `for x in ...` | a list | `input`, `execution`, steps |
+| step `compute` | any (the type becomes the step's output type) | `input`, `execution`, steps, loop variable |
 | `compensate` members | as above | `input`, `execution`, the step and its ancestors, loop variable |
 | workflow `return` | the workflow `output` | `input`, `execution`, steps |
+| `query name = ...` | any | `input`, `execution`, steps (every step output optional) |
 | field defaults (`= ...`) | the field type | constants only |
 | `retry` settings | literals only | nothing |
 
@@ -262,6 +264,55 @@ workflow Route {
 user-defined functions. An unknown function or a wrong number of arguments is
 `E0407`. The opening parenthesis must be on the same line as the name.
 
+## Lambdas
+
+A lambda is a one-parameter function, written `parameter => body`:
+
+```orbit
+workflow Prices {
+    version "1.0.0"
+    input { items: List<{ sku: String, price: Float, quantity: Int }> }
+    return {
+        totals: map(input.items, item => item.price * float(item.quantity))
+        expensive: filter(input.items, item => item.price > 100.0)
+        all_in_stock: all(input.items, item => item.quantity > 0)
+    }
+}
+```
+
+| Rule | Detail |
+|---|---|
+| Where | Only as the second argument of `map`, `filter`, `find`, `any` and `all`. Anywhere else is `E0415`. See [Collection functions](functions.md#collection-functions). |
+| Parameter | One identifier. Its type is the element type of the list. It must not reuse the name of a step, a loop variable, an enclosing lambda parameter, `input` or `execution` (`E0413`). |
+| Body | Any expression, up to the end of the argument. It can read `input`, `execution`, step outputs, loop variables and enclosing lambda parameters, so lambdas can nest: `map(a, x => map(b, y => x * y))`. |
+| Body type | Any type for `map`; `Bool` for `filter`, `find`, `any` and `all`. |
+| Line breaks | `=>` must be on the same line as the parameter. The body may start on the next line. |
+| Precedence | `=>` binds loosest: `x => x * 2 + 1` is `x => ((x * 2) + 1)`. |
+
+```orbit
+workflow Totals {
+    version "1.0.0"
+    input { prices: List<Float> }
+    step total {
+        compute { doubled: p => p * 2.0 }
+    }
+}
+```
+
+```text
+error[E0415]: a lambda can only be passed to `map`, `filter`, `any`, `all` or `find`
+ --> lambda.orbit:5:28
+  |
+5 |         compute { doubled: p => p * 2.0 }
+  |                            ^^^^^^^^^^^^
+  = help: for example `map(input.items, item => item.price)`
+
+error: compilation failed: 1 error(s), 0 warning(s)
+```
+
+A workflow that contains a lambda anywhere compiles to `orbit-ir/2`. See
+[Versioning](versioning.md#ir-version).
+
 ## Line breaks and operators
 
 An infix operator, and a postfix `.`, `[` or `(`, must be on the same line as
@@ -330,11 +381,13 @@ integer overflow, division by zero, a failed conversion such as
 `int("abc")`, or an operation on a `JSON` value of the wrong shape. An error
 while evaluating:
 
-- a step's `with`, `when`, `for` or `idempotency_key` fails that step with the
-  non-retryable code `EXPRESSION_ERROR`, which aborts the workflow and starts
-  compensation,
+- a step's `with`, `when`, `for`, `idempotency_key` or `compute` expression
+  fails that step with the non-retryable code `EXPRESSION_ERROR`, which aborts
+  the workflow and starts compensation,
 - the workflow `return` fails the workflow with `EXPRESSION_ERROR`, without
-  compensation.
+  compensation,
+- a query fails only that request, with `422 QUERY_FAILED`; the execution is
+  not affected.
 
 The error message names the expression and the cause, for example
 `evaluating input: division by zero`.
@@ -342,6 +395,7 @@ The error message names the expression and the cause, for example
 ## See also
 
 - [Built-in functions](functions.md)
+- [Compute steps](compute.md)
 - [Types](types.md)
 - [Conditions](conditions.md)
 - [Grammar](grammar.md)

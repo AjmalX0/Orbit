@@ -275,7 +275,7 @@ an API that deduplicates on it. See [Delivery guarantees](runtime/guarantees.md)
 
 ### Can I run several runtime nodes?
 
-Not in v0.1. The runtime is a single process that owns all workflow state.
+Not yet. The runtime is a single process that owns all workflow state.
 You can run any number of workers against it, and store state in PostgreSQL
 instead of SQLite, but run only one `orbit server` per database.
 Multiple runtime nodes sharing PostgreSQL are planned. Until then, run one
@@ -288,14 +288,16 @@ Both record workflow history durably, recover by replaying it, deliver work
 to workers at least once, and support workers in several languages. The main
 differences:
 
-| | ORBIT 0.1 | Temporal |
+| | ORBIT 0.2 | Temporal |
 |---|---|---|
 | Workflow definition | A declarative `.orbit` file, compiled and type-checked against task contracts before deployment | Code in an SDK language, with determinism rules enforced at replay |
-| Business logic | Workers, one handler per task contract | Activities, called from workflow code |
-| Control flow | Dependencies, conditions, fan-out, child workflows, sleep and compensation, declared in the language | Anything the host language can express |
-| Changing a workflow | A new immutable `name@version`; running executions keep their definition | Versioning APIs and worker build IDs |
+| Business logic | Workers, one handler per task contract; small deterministic transformations as `compute` steps | Activities, called from workflow code |
+| Control flow | Dependencies, conditions, fan-out, child workflows, sleep, waiting for signals and compensation, declared in the language | Anything the host language can express |
+| Signals and queries | Declared in the workflow with typed payloads and results; every `await`, every use of a payload field and every query expression is type-checked at compile time, and the runtime validates each payload against its declaration | Defined in workflow code through SDK handlers |
+| Static checks | Type checking plus warnings for missing compensations, constant conditions, unused signals and unbounded waits (`orbit check --strict`) | The host language's type checker and tooling |
+| Changing a workflow | A new immutable `name@version`; running executions keep their definition; `orbit compat` reports breaking changes | Versioning APIs and worker build IDs |
 | Deployment | One binary with SQLite or PostgreSQL; single node | A multi-service cluster with several supported databases |
-| Features not yet in ORBIT | | Signals, queries, updates, schedules, a web UI, multi-node clusters |
+| Features not yet in ORBIT | | Updates, schedules, a web UI, multi-node clusters |
 
 ORBIT suits processes that you want to read, review and check as a whole,
 across services in different languages. Temporal is a mature platform that

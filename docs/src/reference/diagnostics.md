@@ -1,6 +1,6 @@
 # Compiler diagnostics
 
-Every diagnostic the ORBIT compiler reports has a stable code. A code never changes meaning, and retired codes are not reused, so you can search for a code, link to it, or match it in CI. This page lists every code with its meaning and how to fix it. Codes starting with `E` are errors and stop compilation; codes starting with `W` are warnings.
+Every diagnostic the ORBIT compiler reports has a stable code. A code never changes meaning, and retired codes are not reused, so you can search for a code, link to it, or match it in CI. This page lists every code with its meaning and how to fix it. Codes starting with `E` are errors and stop compilation; codes starting with `W` are warnings, which `orbit check --strict` and `orbit compile --strict` treat as errors.
 
 ## Reading a diagnostic
 
@@ -47,6 +47,7 @@ The first line has the severity, the code and the message. The `-->` line gives 
 | [E03xx, W03xx](#steps-and-dependencies-e03xx) | Steps, dependencies, tasks and child workflows. |
 | [E04xx](#expressions-e04xx) | Expressions, types of values, retry and timeout settings. |
 | [E05xx](#workflows-e05xx) | Workflow-level rules. |
+| [W06xx](#static-safety-w06xx) | Static safety checks: compensations, constant conditions, signals and waits. |
 
 ## Lexical (E00xx)
 
@@ -102,7 +103,7 @@ At the top level of a file, only `import`, `schema`, `task` and `workflow` decla
 
 ### E0106: duplicate member
 
-A member appears twice in the same block (``duplicate `timeout` ``), or a step has more than one of `worker`, `workflow` and `sleep` (``a step can only have one `worker`, `workflow` or `sleep` ``). Keep one.
+A member appears twice in the same block (``duplicate `timeout` ``), or a step has more than one action (``a step can only have one `worker`, `workflow`, `sleep`, `await` or `compute` ``). Keep one, or split the work into separate steps.
 
 ### E0107: duplicate field in object literal
 
@@ -150,7 +151,7 @@ A step names a task with `worker "..."` that has no `task` contract in scope. Th
 
 ### E0301: step does nothing
 
-A step has no `worker`, `workflow` or `sleep`. Message: ``step `a` does nothing``. Add one of them.
+A step has no action. Message: ``step `a` does nothing``, with help ``add `worker "task.name"`, `workflow "Name"`, `sleep 10s`, `await <signal>` or `compute <expression>` ``. Add one of them.
 
 ### E0302: duplicate step name
 
@@ -174,11 +175,11 @@ A step is named `input`, `execution`, `output`, `if`, `then` or `else`. These na
 
 ### E0307: member not allowed here
 
-A member is valid ORBIT but not in this position. Examples: `retry` on a `sleep` step, `when` or `for` inside `compensate`, `retry`, `using`, `idempotency_key` or `queue_timeout` on a `workflow` step, `for` on a `sleep` step, and `max_parallel` without `for` (help: ``add `for item in <list>` to fan the step out``).
+A member is valid ORBIT but not in this position. Examples: `retry` on a `sleep` step, `when` or `for` inside `compensate`, `retry`, `using`, `idempotency_key` or `queue_timeout` on a `workflow` step, `for` on a `sleep` step, and `max_parallel` without `for` (help: ``add `for item in <list>` to fan the step out``). An `await` step takes only `after`, `when` and `timeout` (``` `retry` is not allowed in an `await` step ```; for `for`, the note ``an `await` step receives one signal``). A `compute` step takes no `with`, `using`, `timeout`, `queue_timeout`, `retry` or `idempotency_key` (``` `timeout` is not allowed in a `compute` step ```). See [Signals and queries](../language/signals.md#members-of-an-await-step) and [Compute steps](../language/compute.md#members).
 
 ### E0308: invalid compensation
 
-A compensation cannot run as written: a `sleep` step has a `compensate` block (`a sleep step has nothing to compensate`), the block has no `worker` (``` `compensate` block needs a `worker` ```), it calls something other than a worker task (`compensation must call a worker task`), or it reads a step that is not an ancestor of the compensated step.
+A compensation cannot run as written: a `sleep`, `await` or `compute` step has a `compensate` block (``a `compute` step has nothing to compensate``), the block has no `worker` (``` `compensate` block needs a `worker` ```), it calls something other than a worker task (`compensation must call a worker task`), or it reads a step that is not an ancestor of the compensated step.
 
 ### E0310: task input or output is not a record
 
@@ -191,6 +192,33 @@ Child workflows form a cycle, for example `A` starts `B` and `B` starts `A`. Mes
 ### E0312: unknown child workflow
 
 A `workflow "Name"` step names a workflow that is not declared in scope. The compiler suggests the closest name.
+
+### E0315: unknown signal
+
+An `await` step names a signal the workflow does not declare. Message: ``unknown signal `reveiw` ``, with help ``did you mean `review`?`` for a close name, or ``declare it in the workflow: `signal approval { ... }` `` otherwise.
+
+```text
+error[E0315]: unknown signal `reveiw`
+ --> approvals.orbit:5:27
+  |
+5 |     step decision { await reveiw }
+  |                           ^^^^^^
+  = help: did you mean `review`?
+```
+
+Signals are declared per workflow; a signal of another workflow is not in scope.
+
+### E0316: unknown compensated_by task
+
+A task contract's `compensated_by` names a task that is not declared in the compilation. Message: ``` `compensated_by` names unknown task `payments.refnud` ```, with help ``did you mean `payments.refund`?``. Declare the task or import the file that declares it. See [Static safety checks](../language/safety.md#declaring-how-a-task-is-undone-compensated_by).
+
+### E0317: duplicate signal
+
+A workflow declares two signals with the same name. Message: ``signal `review` is declared more than once``; a label marks the first declaration. Merge the two payloads into one declaration, or rename one.
+
+### E0318: duplicate query
+
+A workflow declares two queries with the same name. Message: ``query `state` is declared more than once``; a label marks the first declaration.
 
 ### W0301: unknown worker language
 
@@ -238,13 +266,17 @@ A `when` condition or an `if` expression's condition does not have type `Bool`. 
 
 A retry policy, timeout or `max_parallel` value is out of range or malformed. Messages include: `timeouts must be greater than zero`, ``` `attempts` must be between 1 and 1000 ``` (note: `attempts` counts every execution, including the first), ``unknown backoff strategy `linear` ``, ``unknown retry setting `max_attempts` ``, ``duplicate retry setting `attempts` ``, `error codes must be string literals`, ``` `max_delay` must be at least `initial_delay` ``` and ``` `max_parallel` must be between 1 and 10000 ```.
 
-### E0413: loop variable shadows a name
+### E0413: loop variable or lambda parameter shadows a name
 
-The variable of a `for` loop has the same name as a step or a built-in name such as `input`. Message: ``loop variable `input` shadows <what>``. Rename the variable.
+The variable of a `for` loop has the same name as a step or a built-in name such as `input`. Message: ``loop variable `input` shadows <what>``. The same code reports a lambda parameter that reuses the name of a step, a loop variable, an enclosing lambda parameter, `input` or `execution`: ``lambda parameter `base` shadows a name already in scope``. Rename the variable or parameter.
 
 ### E0414: for over something that is not a list
 
 The expression after `for <var> in` does not have a `List` type. Message: ``` `for` needs a list, found `Int` ```.
+
+### E0415: lambda outside a collection function
+
+A lambda (`x => ...`) appears somewhere other than the second argument of `map`, `filter`, `find`, `any` or `all`. Message: ``a lambda can only be passed to `map`, `filter`, `any`, `all` or `find` ``, with help ``for example `map(input.items, item => item.price)` ``. Lambdas are not values: they cannot be stored in a field, returned or passed to other functions. See [Expressions](../language/expressions.md#lambdas).
 
 ## Workflows (E05xx)
 
@@ -256,9 +288,38 @@ Every workflow needs a `version`. Message: ``workflow `Order` has no version``. 
 
 The workflow declares an `output` with required fields but has no `return`. Message: ``workflow declares an `output` but has no `return` ``. Add a `return` that builds the output.
 
+## Static safety (W06xx)
+
+These warnings flag workflows that compile but are likely to misbehave. [Static safety checks](../language/safety.md) has a full example of each.
+
+### W0601: missing compensation
+
+A step calls a task whose contract declares `compensated_by`, and the step has no `compensate` block. Message: ``step `charge` calls `payments.charge` but has no compensation``, with the note ``` `payments.charge` declares `compensated_by "payments.refund"`: if a later step fails, its effect would be left in place ``` and help ``add `compensate { worker "payments.refund" with { ... } }` ``.
+
+### W0602: compensation uses a different task
+
+The step's `compensate` block calls another task than the contract's `compensated_by`. Message: ``step `charge` compensates `payments.charge` with `payments.void`, but the contract names `payments.refund` ``. Use the named task, or change the contract.
+
+### W0603: step never runs
+
+A `when` condition reads no input, step output, execution field or variable, and evaluates to `false` or `null`. Message: ``step `legacy_audit` never runs: its `when` condition is always false``, with help `remove the step, or make the condition depend on input or step results`.
+
+### W0604: condition always true
+
+A `when` condition reads nothing and evaluates to `true`. Message: ``the `when` condition of step `audit` is always true``, with help ``remove `when`; it also makes the step's output optional for no reason``.
+
+### W0605: signal declared but never awaited
+
+No step awaits a declared signal. Message: ``signal `escalate` is declared but no step awaits it``, with help ``add a step with `await escalate`, or remove the declaration``. The runtime still accepts the signal, but nothing reads it.
+
+### W0606: wait without a timeout
+
+An `await` step has no `timeout`, and the workflow has no `timeout`. Message: ``step `decision` waits for signal `review` with no timeout``, with help ``add `timeout 7d` to the step (or a workflow `timeout`) so the execution cannot wait forever``.
+
 ## See also
 
 - [CLI: orbit check](cli.md#orbit-check)
+- [Static safety checks](../language/safety.md)
 - [Editor support](../tooling/editors.md)
 - [Grammar](../language/grammar.md)
 - [Expressions](../language/expressions.md)

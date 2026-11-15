@@ -41,6 +41,8 @@ Each step's label contains the step name and what it runs:
 | Worker task | task name, and `· <language>` with `using` | task name |
 | `sleep` | `sleep <duration>` | `sleep <duration>` |
 | Child workflow | `child workflow <Name>` | `child workflow:<Name>` |
+| `await` | `await signal <signal>` | `await <signal>` |
+| `compute` | `compute` | `compute` |
 | `for` step | adds `for each <variable>` | adds `for each <variable>` |
 
 Mermaid output starts with a comment that names the workflow and version (`%% OrderProcessing@1.0.0`).

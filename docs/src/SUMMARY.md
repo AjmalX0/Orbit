@@ -24,11 +24,14 @@
 - [Durable sleep](language/sleep.md)
 - [Fan-out](language/fan-out.md)
 - [Child workflows](language/child-workflows.md)
+- [Signals and queries](language/signals.md)
+- [Compute steps](language/compute.md)
 - [Compensation](language/compensation.md)
 - [Expressions](language/expressions.md)
 - [Built-in functions](language/functions.md)
 - [HTTP adapter](language/http-adapter.md)
 - [Versioning](language/versioning.md)
+- [Static safety checks](language/safety.md)
 - [Grammar](language/grammar.md)
 
 # Workers and SDKs

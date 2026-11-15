@@ -43,7 +43,7 @@ Errors produced by ORBIT have this body:
 | Code | Status | Returned by | Meaning |
 |---|---|---|---|
 | `INVALID_REQUEST` | 400 | worker register, task complete/fail | A required field is missing or empty: `worker_id is required`, `a worker must announce at least one task contract`, `token is required`, `error_code is required`. |
-| `INVALID_IR` | 400 | `POST /v1/workflows` | The body is not valid `orbit-ir/1`: a missing field, a failed validation, a missing `definition_hash`, or a `definition_hash` that does not match the content. |
+| `INVALID_IR` | 400 | `POST /v1/workflows` | The body is not valid IR in a supported version (`orbit-ir/1` or `orbit-ir/2`): an unsupported `ir_version`, a missing field, a failed validation, a missing `definition_hash`, or a `definition_hash` that does not match the content. |
 | `CHILD_NOT_REGISTERED` | 400 | `POST /v1/workflows` | The definition starts a child workflow whose exact definition is not registered. Register the child first; `orbit deploy` does this. |
 | `INVALID_INPUT` | 400 | `POST /v1/executions` | The workflow input does not match the workflow's `input` type. The message names the path, for example `$.order_id`. |
 | `INVALID_EXECUTION_ID` | 400 | `POST /v1/executions` | `execution_id` is empty, longer than 200 characters, or contains characters other than letters, digits, `-`, `_`, `.` and `:`. |
@@ -51,11 +51,15 @@ Errors produced by ORBIT have this body:
 | `UNAUTHENTICATED` | 401 | any authenticated endpoint | No credential, or a credential that matches nothing. |
 | `FORBIDDEN` | 403 | any authenticated endpoint | The credential is valid but not allowed: a worker credential on an administrative endpoint, a per-worker identity acting for another worker, announcing a task outside its patterns or the wrong runtime, using another worker's session or token, or an unmatched client certificate. |
 | `NOT_FOUND` | 404 | execution endpoints | The execution does not exist. |
+| `UNKNOWN_SIGNAL` | 404 | `POST /v1/executions/{id}/signals/{name}` | The execution's workflow does not declare this signal. The message lists the declared signals. |
+| `UNKNOWN_QUERY` | 404 | `GET /v1/executions/{id}/queries/{name}` | The execution's workflow does not declare this query. The message lists the declared queries. |
 | `WORKFLOW_NOT_FOUND` | 404 | workflow endpoints, `POST /v1/executions` | No such workflow, or no such version. |
 | `UNKNOWN_SESSION` | 404 | heartbeat, poll, unregister | The worker session does not exist or has expired. Register again. |
 | `DEFINITION_CONFLICT` | 409 | `POST /v1/workflows` | A different definition is already registered under this name and version. Definitions are immutable; bump the version. |
 | `EXECUTION_EXISTS` | 409 | `POST /v1/executions` | An execution with this `execution_id` exists for a different workflow definition. |
-| `EXECUTION_FINISHED` | 409 | `POST /v1/executions/{id}/cancel` | The execution is already terminal. |
+| `EXECUTION_FINISHED` | 409 | `POST /v1/executions/{id}/cancel`, `POST /v1/executions/{id}/signals/{name}` | The execution is already terminal. |
+| `SIGNAL_PAYLOAD_INVALID` | 422 | `POST /v1/executions/{id}/signals/{name}` | The payload does not match the signal's declaration. The message names the path, for example `$.approved`. Nothing is recorded. |
+| `QUERY_FAILED` | 422 | `GET /v1/executions/{id}/queries/{name}` | Evaluating the query failed at runtime, for example with a division by zero. |
 | `STORAGE_ERROR` | 500 | any endpoint that reads or writes the database | The database operation failed. The message contains the backend error. Nothing was changed. |
 
 Some errors are produced by the HTTP layer before a request reaches ORBIT. They have a plain-text body (`content-type: text/plain`), not the JSON envelope:
@@ -87,6 +91,8 @@ A client should check the status first, and parse the JSON error envelope only w
 | `GET` | [`/v1/executions/{id}/history`](#get-v1executionsidhistory) | admin | Event history. |
 | `GET` | [`/v1/executions/{id}/wait`](#get-v1executionsidwait) | admin | Long-poll until terminal. |
 | `POST` | [`/v1/executions/{id}/cancel`](#post-v1executionsidcancel) | admin | Request cancellation. |
+| `POST` | [`/v1/executions/{id}/signals/{name}`](#post-v1executionsidsignalsname) | admin | Send a typed signal. |
+| `GET` | [`/v1/executions/{id}/queries/{name}`](#get-v1executionsidqueriesname) | admin | Evaluate a declared query. |
 | `GET` | [`/v1/workers`](#get-v1workers) | admin | Registered workers. |
 | `POST` | [`/v1/workers/register`](#post-v1workersregister) | worker | Open a worker session. |
 | `POST` | [`/v1/workers/heartbeat`](#post-v1workersheartbeat) | worker | Keep a session alive; receive cancellations. |
@@ -109,8 +115,8 @@ Response `200`:
 {
   "status": "ok",
   "api_version": "orbit-api/1",
-  "runtime_version": "0.1.0",
-  "ir_versions": ["orbit-ir/1"],
+  "runtime_version": "0.2.0",
+  "ir_versions": ["orbit-ir/1", "orbit-ir/2"],
   "active_executions": 0,
   "worker_sessions": 0
 }
@@ -121,7 +127,7 @@ Response `200`:
 | `status` | string | Always `ok`. |
 | `api_version` | string | `orbit-api/1`. |
 | `runtime_version` | string | Version of the `orbit` binary. |
-| `ir_versions` | array of strings | IR versions this runtime accepts. |
+| `ir_versions` | array of strings | IR versions this runtime accepts. ORBIT 0.1 lists only `orbit-ir/1`; workflows that use signals, queries, `await` or `compute` steps, or lambdas need a runtime that lists `orbit-ir/2`. |
 | `active_executions` | integer | Executions not yet terminal, held in memory. |
 | `worker_sessions` | integer | Worker sessions the runtime remembers, including ones that recently went silent. |
 
@@ -143,7 +149,7 @@ orbit_active_executions 0
 
 ### POST /v1/workflows
 
-Register a compiled workflow definition: the `orbit-ir/1` JSON produced by `orbit compile`. Registering identical content again is a no-op.
+Register a compiled workflow definition: the `orbit-ir/1` or `orbit-ir/2` JSON produced by `orbit compile`. Registering identical content again is a no-op.
 
 Request body: the IR document. Abbreviated:
 
@@ -346,6 +352,7 @@ Execution fields:
 | `units` | object | Unit state by unit key (`step`, `step[i]`, `compensate:<unit>`). Only units that have been touched appear. |
 | `abort` | object, optional | Why the execution is being wound down: `{"kind": "failed", "error"}`, `{"kind": "cancelled", "reason"}` or `{"kind": "timed_out"}`. |
 | `compensation_order` | array, optional | Units being compensated, in order. |
+| `signals` | array, optional | The signal buffer: every signal received, in arrival order. Absent when none was received. See below. |
 | `compensation` | string, optional | `none`, `completed` or `failed`. Set when terminal after an abort. |
 | `output` | any, optional | Workflow output, when `COMPLETED`. |
 | `error` | object, optional | `{"code", "message", "retryable", "details"?}`, when `FAILED`. |
@@ -365,12 +372,29 @@ Unit fields:
 | `redelivery` | boolean | The current attempt is a redelivery of an uncertain one. |
 | `scheduled_at_ms`, `dispatched_at_ms`, `finished_at_ms` | integer, optional | Transition times. |
 | `deadline_ms` | integer, optional | When the in-flight attempt times out. |
-| `wake_at_ms` | integer, optional | When a `sleep` timer fires or a retry becomes due. |
+| `wake_at_ms` | integer, optional | When a `sleep` timer fires, a retry becomes due, or an `await` step times out. |
 | `worker_id`, `worker_session` | string, optional | Who holds or held the latest dispatch. Child workflows show `orbit-runtime` and `child:<child id>`; built-in tasks `orbit-runtime` and `builtin:<instance>`. |
 | `token` | string, optional | Token of the in-flight dispatch. |
 | `tokens` | array, optional | Every `[token, attempt]` issued for the unit. |
 | `succeeded_seq` | integer, optional | Sequence number of the success, used to order compensation. |
 | `dispatch_count` | integer | Number of dispatches, including redeliveries. |
+
+Signal fields (`signals[]`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `seq` | integer | Sequence number of the `SignalReceived` event. Identifies the signal. |
+| `name` | string | Signal name. |
+| `payload` | object | Validated payload, with defaults applied. |
+| `received_at_ms` | integer | When the signal was recorded. |
+| `delivered_to` | string, optional | The `await` unit that took the signal. Absent while it is buffered. |
+
+```json
+"signals": [
+  {"seq": 5, "name": "review", "payload": {"approved": true, "reviewer": "dana", "comment": "verified by phone"},
+   "received_at_ms": 1794746714669, "delivered_to": "decision"}
+]
+```
 
 ### GET /v1/executions/{id}/history {#get-v1executionsidhistory}
 
@@ -430,6 +454,60 @@ Errors: `404 NOT_FOUND`; `409 EXECUTION_FINISHED`:
 
 ```json
 {"error":{"code":"EXECUTION_FINISHED","message":"execution is already CANCELLED"}}
+```
+
+### POST /v1/executions/{id}/signals/{name} {#post-v1executionsidsignalsname}
+
+Send the signal `name` to an execution. The body is the payload, a JSON object; a request without a body sends `{}`. The runtime applies the declared defaults, validates the payload against the workflow's `signal` declaration, records `SignalReceived` and buffers the signal until an `await` step takes it. See [Signals and queries](../language/signals.md).
+
+```bash
+curl -X POST http://127.0.0.1:7233/v1/executions/order-A-100/signals/review \
+  -H 'content-type: application/json' \
+  -d '{"approved": true, "reviewer": "dana"}'
+```
+
+Response `200`:
+
+```json
+{"execution_id": "order-A-100", "signal": "review", "accepted": true, "seq": 5}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `execution_id` | string | The execution. |
+| `signal` | string | The signal name. |
+| `accepted` | boolean | Always `true` in a `200` response. |
+| `seq` | integer | Sequence number of the recorded `SignalReceived` event. |
+
+Errors: `404 NOT_FOUND`; `409 EXECUTION_FINISHED` (checked first); `404 UNKNOWN_SIGNAL`; `422 SIGNAL_PAYLOAD_INVALID`:
+
+```json
+{"error":{"code":"UNKNOWN_SIGNAL","message":"OrderApproval@1.0.0 has no signal `reveiw`; declared: review"}}
+{"error":{"code":"SIGNAL_PAYLOAD_INVALID","message":"payload for signal `review` is invalid at $.approved: expected Bool, found a string"}}
+```
+
+A body sent without `content-type: application/json`, or a body that is not valid JSON, is rejected by the HTTP layer with a plain-text `415` or `400` (see [Errors](#errors)).
+
+### GET /v1/executions/{id}/queries/{name} {#get-v1executionsidqueriesname}
+
+Evaluate the query `name` against the execution's current state. Steps that have not succeeded read as `null`. Nothing is recorded. Works on running and terminal executions.
+
+Response `200`:
+
+```json
+{"execution_id":"order-A-100","query":"status","value":{"needs_approval":true,"approved":true,"reviewer":"dana","charged":true}}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `execution_id` | string | The execution. |
+| `query` | string | The query name. |
+| `value` | any | The query result, of the query's declared type. |
+
+Errors: `404 NOT_FOUND`; `404 UNKNOWN_QUERY`; `422 QUERY_FAILED` (`` evaluating query `<name>`: <cause> ``):
+
+```json
+{"error":{"code":"UNKNOWN_QUERY","message":"OrderApproval@1.0.0 has no query `stat`; declared: status"}}
 ```
 
 ## Workers

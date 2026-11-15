@@ -210,7 +210,7 @@ curl -s http://127.0.0.1:7233/v1/health
 ```
 
 ```json
-{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.1.0","ir_versions":["orbit-ir/1"],"active_executions":0,"worker_sessions":0}
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0}
 ```
 
 By default `orbit server` listens on `127.0.0.1:7233` and creates `orbit.db`

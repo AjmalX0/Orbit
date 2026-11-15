@@ -1,6 +1,6 @@
 # CLI
 
-The `orbit` binary is the compiler driver, the runtime server and the runtime client in one executable. This page lists every command and every flag, generated from `orbit <command> --help` for ORBIT 0.1, with the exit codes each command returns and examples you can run against a local server. Flags are long options (`--name value`) unless a short form is shown.
+The `orbit` binary is the compiler driver, the runtime server and the runtime client in one executable. This page lists every command and every flag, generated from `orbit <command> --help` for ORBIT 0.2, with the exit codes each command returns and examples you can run against a local server. Flags are long options (`--name value`) unless a short form is shown.
 
 ```text
 orbit <COMMAND>
@@ -9,7 +9,7 @@ Commands:
   init      Create a new ORBIT project with an example workflow and workers
   check     Type-check workflow files without producing output
   validate  Check workflow files, and validate compiled IR (.json) files
-  compile   Compile workflow files to orbit-ir/1 JSON
+  compile   Compile workflow files to orbit-ir JSON
   fmt       Format .orbit files in place (comments and line breaks are preserved)
   lsp       Run the language server (LSP over stdio), used by editor extensions
   graph     Render a workflow's step graph (Mermaid or Graphviz)
@@ -21,6 +21,8 @@ Commands:
   inspect   Inspect a compiled IR file, or an execution's full state
   logs      Show an execution's event history as a timeline
   cancel    Request cancellation of an execution (runs compensations)
+  signal    Send a typed signal to a running execution
+  query     Evaluate a query declared in the workflow against an execution
   ps        List recent executions
   token     Generate a random bearer token and the workers-file entry for it
   workers   Worker commands
@@ -116,8 +118,9 @@ orbit check [OPTIONS] [FILES]...
 |---|---|---|---|
 | `[FILES]...` | paths | none | One or more `.orbit` files. Imports are followed. |
 | `--format <FORMAT>` | `human` or `json` | `human` | `human` prints diagnostics on stderr and one `ok` line per workflow on stdout. `json` prints `{"diagnostics": [...]}` on stdout and nothing else. |
+| `--strict` | flag | off | Treat warnings (missing compensations, unreachable steps, unused signals, waits without a timeout, ...) as errors. |
 
-Exit codes: `0` when there are no errors (warnings are allowed); `1` when any file has an error, or no files are given.
+Exit codes: `0` when there are no errors (warnings are allowed, unless `--strict` is given); `1` when any file has an error, when `--strict` is given and there is any warning, or when no files are given. With `--strict` and only warnings, the human format prints the warnings, then `error: <n> warning(s) treated as errors (--strict)`, and no `ok` lines.
 
 ```console
 $ orbit check examples/order_processing.orbit
@@ -160,7 +163,28 @@ The same file with `--format json`:
 }
 ```
 
-Every code is described in [Compiler diagnostics](diagnostics.md).
+With `--strict`:
+
+```console
+$ orbit check --strict review.orbit
+warning[W0605]: signal `escalate` is declared but no step awaits it
+ --> review.orbit:5:12
+  |
+5 |     signal escalate { reason: String }
+  |            ^^^^^^^^
+  = help: add a step with `await escalate`, or remove the declaration
+
+warning[W0606]: step `decision` waits for signal `review` with no timeout
+ --> review.orbit:7:27
+  |
+7 |     step decision { await review }
+  |                           ^^^^^^
+  = help: add `timeout 7d` to the step (or a workflow `timeout`) so the execution cannot wait forever
+
+error: 2 warning(s) treated as errors (--strict)
+```
+
+Every code is described in [Compiler diagnostics](diagnostics.md). See [Static safety checks](../language/safety.md) for the `W06xx` warnings.
 
 ## orbit validate
 
@@ -184,7 +208,7 @@ ok Plain@1.0.0 (1 steps)
 
 ## orbit compile
 
-Compile workflow files to `orbit-ir/1` JSON.
+Compile workflow files to orbit-ir JSON. Each workflow is compiled to `orbit-ir/1`, or to `orbit-ir/2` when it uses signals, queries, `await` or `compute` steps, or lambdas (see [Versioning](../language/versioning.md#ir-version)).
 
 ```text
 orbit compile [OPTIONS] [FILES]...
@@ -193,12 +217,13 @@ orbit compile [OPTIONS] [FILES]...
 | Argument or option | Type | Default | Meaning |
 |---|---|---|---|
 | `[FILES]...` | paths | none | One or more `.orbit` files. |
+| `--strict` | flag | off | Treat warnings as errors: with any warning, print the diagnostics and `error: <n> warning(s) treated as errors (--strict)`, write nothing and exit `1`. |
 | `-o`, `--out-dir <OUT_DIR>` | path | `build` | Output directory, created if needed. |
 | `--stdout` | flag | off | Print the IR to stdout instead of writing files. |
 
 Each workflow is written to `<out-dir>/<file stem>.orbit.json`. When one file defines several workflows, each is written to `<out-dir>/<file stem>.<Workflow>.orbit.json`.
 
-Exit codes: `0` on success; `1` on compilation errors, when no files are given, or when the files contain no workflow declarations (`nothing to compile: no workflow declarations found`).
+Exit codes: `0` on success; `1` on compilation errors, on warnings with `--strict`, when no files are given, or when the files contain no workflow declarations (`nothing to compile: no workflow declarations found`).
 
 ```console
 $ orbit compile demo.orbit -o build
@@ -575,6 +600,70 @@ $ orbit cancel c-1 --reason "duplicate order"
 cancellation requested; execution is CANCELLED
 $ orbit cancel c-1
 error: EXECUTION_FINISHED (409): execution is already CANCELLED
+```
+
+## orbit signal
+
+Send a typed signal to a running execution. The runtime validates the payload against the workflow's `signal` declaration and buffers it until an `await` step takes it. See [Signals and queries](../language/signals.md).
+
+```text
+orbit signal [OPTIONS] <EXECUTION_ID> <NAME>
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `<EXECUTION_ID>` | string | required | The execution to signal. |
+| `<NAME>` | string | required | The signal name declared in the workflow (`signal <name> { ... }`). |
+| `--data <DATA>` | JSON or `@path` | `{}` | The payload as JSON. `@file.json` reads it from a file. |
+| runtime connection options | | | See [Runtime connection options](#runtime-connection-options). |
+
+On success the command prints the history sequence number of the recorded `SignalReceived` event on stdout. "Delivered" here means that the runtime recorded the signal; whether a step has taken it shows in the history as `SignalDelivered`.
+
+Exit codes: `0` when the signal was recorded; `1` when `--data` is not valid JSON or the file cannot be read, or on an API error: `NOT_FOUND`, `UNKNOWN_SIGNAL` (404), `EXECUTION_FINISHED` (409) or `SIGNAL_PAYLOAD_INVALID` (422).
+
+```console
+$ orbit signal order-A-100 reveiw --data '{}'
+error: UNKNOWN_SIGNAL (404): OrderApproval@1.0.0 has no signal `reveiw`; declared: review
+$ orbit signal order-A-100 review --data '{"approved": "yes", "reviewer": "dana"}'
+error: SIGNAL_PAYLOAD_INVALID (422): payload for signal `review` is invalid at $.approved: expected Bool, found a string
+$ orbit signal order-A-100 review --data 'x'
+error: --data is not valid JSON: expected value at line 1 column 1
+$ orbit signal order-A-100 review --data '{"approved": true, "reviewer": "dana", "comment": "verified by phone"}'
+signal `review` delivered to order-A-100 (history #5)
+$ orbit signal order-A-100 review --data @review.json
+error: EXECUTION_FINISHED (409): execution is already COMPLETED
+```
+
+The execution in this example completes as soon as the signal is delivered, so the last command fails. An execution that is already terminal returns `EXECUTION_FINISHED` before the signal name and payload are checked.
+
+## orbit query
+
+Evaluate a query declared in the workflow against the current state of an execution, and print its value as JSON. Works on running and finished executions. See [Signals and queries](../language/signals.md#queries).
+
+```text
+orbit query [OPTIONS] <EXECUTION_ID> <NAME>
+```
+
+| Argument or option | Type | Default | Meaning |
+|---|---|---|---|
+| `<EXECUTION_ID>` | string | required | The execution to query. |
+| `<NAME>` | string | required | The query name declared in the workflow (`query <name> = ...`). |
+| runtime connection options | | | See [Runtime connection options](#runtime-connection-options). |
+
+The value is printed on stdout as indented JSON, without the surrounding response object, so it can be piped to `jq`.
+
+Exit codes: `0` on success; `1` on an API error: `NOT_FOUND`, `UNKNOWN_QUERY` (404) or `QUERY_FAILED` (422).
+
+```console
+$ orbit query order-A-100 status
+{
+  "needs_approval": true,
+  "approved": null,
+  "reviewer": null,
+  "charged": false
+}
+$ orbit query order-A-100 stat
+error: UNKNOWN_QUERY (404): OrderApproval@1.0.0 has no query `stat`; declared: status
 ```
 
 ## orbit ps

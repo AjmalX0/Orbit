@@ -134,8 +134,9 @@ Compensation starts when the workflow is aborted, for any of these reasons:
 
 The runtime then proceeds in this order:
 
-1. **Withdraw** work that has not started: pending and queued units, timers
-   and retries waiting for their delay become `CANCELLED`.
+1. **Withdraw** work that has not started: pending and queued units, timers,
+   `await` steps waiting for a signal, and retries waiting for their delay
+   become `CANCELLED`.
 2. **Wait** for attempts that are in flight. They may still succeed, and a
    step that succeeds now also needs compensating. Failed attempts are not
    retried while the workflow is aborting.
@@ -190,6 +191,11 @@ Compensation units are keyed `compensate:<unit>`, for example
 
 ## Designing compensations
 
+- Declare `compensated_by` on contracts whose effect must be undone. The
+  compiler then warns about every step that calls the task without the
+  matching compensation (`W0601`, `W0602`). See
+  [Static safety checks](safety.md).
+
 - Make compensations idempotent. They are delivered at least once, like any
   task, and their key is stable.
 - Prefer business actions with clear semantics (refund, release, cancel)
@@ -205,4 +211,5 @@ Compensation units are keyed `compensate:<unit>`, for example
 - [Steps](steps.md)
 - [Fan-out](fan-out.md#compensation)
 - [Retries and timeouts](retries-timeouts.md)
+- [Static safety checks](safety.md)
 - [Executions and history](../runtime/executions.md)

@@ -1,4 +1,4 @@
-(* ORBIT v0.1 grammar: the language accepted by orbit-syntax 0.1.0.
+(* ORBIT grammar: the language accepted by orbit-syntax 0.2.0.
    Notation: ISO EBNF. { x } = zero or more, [ x ] = optional.
 
    Lexical notes
@@ -25,7 +25,8 @@ task_decl        = "task" , STRING , "{" , { task_member , [ sep ] } , "}" ;
 task_member      = "version" , [ ":" ] , STRING
                  | "description" , [ ":" ] , STRING
                  | "input" , [ ":" ] , type
-                 | "output" , [ ":" ] , type ;
+                 | "output" , [ ":" ] , type
+                 | "compensated_by" , [ ":" ] , STRING ;        (* the task that undoes this one *)
 
 workflow_decl    = "workflow" , IDENTIFIER , "{" , { workflow_member , [ sep ] } , "}" ;
 workflow_member  = "version" , [ ":" ] , STRING
@@ -34,8 +35,10 @@ workflow_member  = "version" , [ ":" ] , STRING
                  | "input" , record_body
                  | "output" , record_body
                  | step_decl
+                 | "signal" , IDENTIFIER , record_body           (* typed message the execution accepts *)
+                 | "query" , IDENTIFIER , [ "=" | ":" ] , expression   (* read-only view; written with "=" *)
                  | "return" , expression
-                 | "on" , IDENTIFIER , [ STRING ] , block ;      (* reserved; rejected in v0.1 (E0105) *)
+                 | "on" , IDENTIFIER , [ STRING ] , block ;      (* reserved; rejected (E0105) *)
 
 step_decl        = "step" , IDENTIFIER , "{" , { step_member , [ sep ] } , "}" ;
 step_member      = action
@@ -52,12 +55,16 @@ step_member      = action
                  | "compensate" , "{" , { step_member , [ sep ] } , "}" ;
 action           = "worker" , [ ":" ] , STRING                   (* a task contract name *)
                  | "workflow" , [ ":" ] , STRING                 (* a child workflow name *)
-                 | "sleep" , [ ":" ] , DURATION ;
+                 | "sleep" , [ ":" ] , DURATION
+                 | "await" , [ ":" ] , IDENTIFIER                (* a signal declared in the workflow *)
+                 | "compute" , [ ":" ] , expression ;            (* evaluated by the runtime *)
 (* Restrictions checked by the compiler (see docs/src/reference/diagnostics.md):
    - `workflow` steps take no `using`, `retry`, `idempotency_key` or `queue_timeout` (E0307);
    - `compensate` blocks call a `worker` and take no `when`, `after`, `for` or `max_parallel`;
    - `for` is not allowed on `sleep` steps; the loop variable is in scope in `with`,
-     `idempotency_key` and `compensate`, but not in `when` (evaluated once per step). *)
+     `idempotency_key` and `compensate`, but not in `when` (evaluated once per step);
+   - `await` steps take only `after`, `when` and `timeout`; `compute` steps take only
+     `after`, `when`, `for` and `max_parallel`; neither takes `compensate` (E0307, E0308). *)
 
 (* retry settings: attempts: INTEGER, backoff: fixed | exponential,
    initial_delay: DURATION, max_delay: DURATION, non_retryable: [STRING, ...] *)
@@ -79,12 +86,14 @@ mul_expr         = unary , { ( "*" | "/" | "%" ) , unary } ;
 unary            = ( "!" | "-" ) , unary | postfix ;
 postfix          = primary , { "." , IDENTIFIER | "[" , expression , "]" } ;
 primary          = literal
-                 | IDENTIFIER , "(" , [ expression , { "," , expression } ] , ")"   (* built-in call *)
+                 | IDENTIFIER , "(" , [ argument , { "," , argument } ] , ")"   (* built-in call *)
                  | IDENTIFIER                                    (* path root: input | execution | step | loop variable *)
                  | "{" , { ( IDENTIFIER | STRING ) , ":" , expression , [ sep ] } , "}"
                  | "[" , [ expression , { [ "," ] , expression } ] , "]"   (* items: "," or newline, not ";" *)
                  | "if" , expression , "then" , expression , "else" , expression
                  | "(" , expression , ")" ;
+argument         = IDENTIFIER , "=>" , expression                (* lambda: only as argument 2 of map, filter, find, any, all (E0415) *)
+                 | expression ;
 literal          = STRING | INTEGER | FLOAT | DURATION | "true" | "false" | "null" ;
 block            = "{" , { ANY_TOKEN | block } , "}" ;
 sep              = "," | ";" ;

@@ -182,9 +182,18 @@ Inside a step's own `compensate` block, the step's output is not optional: a
 compensation only runs for a step that succeeded. See
 [Compensation](compensation.md#what-a-compensation-can-read).
 
+## Constant conditions
+
+A condition that reads nothing (no `input`, step output, `execution` field or
+variable) has the same value in every execution. The compiler evaluates it
+and warns: `W0603` when it is `false` or `null` (the step never runs) and
+`W0604` when it is `true` (the `when` only makes the output optional). See
+[Static safety checks](safety.md#w0603-step-never-runs).
+
 ## See also
 
 - [Expressions](expressions.md)
+- [Static safety checks](safety.md)
 - [Built-in functions](functions.md)
 - [Types](types.md#optional-types-and-null)
 - [Dependencies](dependencies.md)

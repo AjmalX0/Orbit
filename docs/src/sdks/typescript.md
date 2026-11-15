@@ -243,6 +243,35 @@ const result = await client.wait(id, 60_000);
 console.log(result.status, result.output);
 ```
 
+### Signals and queries
+
+`signal` sends a typed signal declared with `signal <name> { ... }` in the
+workflow, and `query` evaluates a declared query. Both need the admin token
+when authentication is enabled.
+
+```ts
+import { ApiError, Client } from "orbit-lang";
+
+const client = new Client({ token: process.env.ORBIT_ADMIN_TOKEN });
+
+type Status = { needs_approval: boolean; approved: boolean | null; reviewer: string | null; charged: boolean };
+const status = await client.query<Status>("order-A-100", "status");
+console.log(status.approved); // null while the review is pending
+
+const seq = await client.signal("order-A-100", "review", { approved: true, reviewer: "dana" });
+
+try {
+  await client.signal("order-A-100", "review", { approved: "yes", reviewer: "dana" });
+} catch (e) {
+  if (e instanceof ApiError) console.log(e.code); // SIGNAL_PAYLOAD_INVALID
+}
+```
+
+`signal` resolves to the history sequence number of the recorded
+`SignalReceived` event. The runtime validates the payload and buffers the
+signal until an `await` step takes it. See
+[Signals and queries](../language/signals.md).
+
 ## API reference
 
 ### `Worker`
@@ -300,6 +329,8 @@ new Client(options?: ClientOptions)
 | `request<T>(method, path, body?, signal?)` | `Promise<{ status: number; body: T }>` | Sends a JSON request. `body` is `null` for an empty response. Throws `ApiError` for status 400 and above. |
 | `start(workflow, input = {}, { version?, executionId? })` | `Promise<string>` | Starts an execution and returns its id. |
 | `wait(executionId, timeoutMs = 30000)` | `Promise<any>` | Long-polls until the execution finishes or the timeout elapses, and returns its state. |
+| `signal(executionId, name, payload = {})` | `Promise<number>` | Sends the signal `name` and resolves to the history sequence number of the recorded signal. Rejects with `ApiError` (`UNKNOWN_SIGNAL`, `SIGNAL_PAYLOAD_INVALID`, `EXECUTION_FINISHED`, `NOT_FOUND`). |
+| `query<T = any>(executionId, name)` | `Promise<T>` | Evaluates the query `name` and resolves to its value. `T` is not checked at runtime. Rejects with `ApiError` (`UNKNOWN_QUERY`, `QUERY_FAILED`, `NOT_FOUND`). |
 | `server` | `string` | The resolved runtime URL. |
 
 ### `ApiError`

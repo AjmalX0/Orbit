@@ -1,8 +1,8 @@
 # Built-in functions
 
 ORBIT provides a fixed set of pure functions for mapping data between steps:
-null handling, conversions, string and collection helpers, and numeric
-helpers. Like all expressions, they are deterministic and perform no I/O.
+null handling, conversions, string and collection helpers, numeric helpers,
+and collection functions that take a lambda. Like all expressions, they are deterministic and perform no I/O.
 This page lists every function with its signature, argument and result types,
 behavior with `null`, runtime errors, and examples.
 
@@ -15,7 +15,7 @@ behavior with `null`, runtime errors, and examples.
 | [`len`](#len) | `len(String \| List<T> \| Map<String, T>)` | `Int` |
 | [`string`](#string) | `string(x)` | `String` |
 | [`int`](#int) | `int(Int \| Float \| String \| Bool)` | `Int` |
-| [`float`](#float) | `float(Int \| Float \| String)` | `Float` |
+| [`float`](#float) | `float(Int \| Float \| String \| Bool)` | `Float` |
 | [`contains`](#contains) | `contains(haystack, needle)` | `Bool` |
 | [`lower`](#lower-upper-trim) | `lower(String)` | `String` |
 | [`upper`](#lower-upper-trim) | `upper(String)` | `String` |
@@ -25,6 +25,12 @@ behavior with `null`, runtime errors, and examples.
 | [`min`](#min-max) | `min(number, ...)` | number |
 | [`max`](#min-max) | `max(number, ...)` | number |
 | [`abs`](#abs) | `abs(number)` | number |
+| [`sum`](#sum) | `sum(List<Int> \| List<Float>)` | `Int` or `Float` |
+| [`map`](#map) | `map(List<T>, T => U)` | `List<U>` |
+| [`filter`](#filter) | `filter(List<T>, T => Bool)` | `List<T>` |
+| [`find`](#find) | `find(List<T>, T => Bool)` | `T?` |
+| [`any`](#any-all) | `any(List<T>, T => Bool)` | `Bool` |
+| [`all`](#any-all) | `all(List<T>, T => Bool)` | `Bool` |
 
 General rules:
 
@@ -153,23 +159,22 @@ Use `int(coalesce(x, 0))` when the argument may be `null`.
 ## float
 
 ```text
-float(x: Int | Float | String) -> Float
+float(x: Int | Float | String | Bool) -> Float
 ```
 
 | Argument | Result |
 |----------|--------|
 | `Int` or `Float` | the value as a float: `float(5)` is `5.0` |
 | `String` | parsed after trimming whitespace: `float("2.5")` is `2.5`; an invalid string is a runtime error |
-| `Bool` | runtime error |
+| `Bool` | `1.0` for `true`, `0.0` for `false` |
 | `null` | runtime error |
 
 Use `float` to force float arithmetic on a value that may arrive as a JSON
 integer: `float(input.price) / 2`. See
 [Arithmetic](expressions.md#arithmetic).
 
-The compiler accepts a `Bool` argument for `float` (the signature it prints is
-`float(Int | Float | String | Bool)`), but the runtime rejects it. Use
-`if flag then 1.0 else 0.0` instead.
+Before ORBIT 0.2, the compiler accepted a `Bool` argument but the runtime
+rejected it with `EXPRESSION_ERROR`.
 
 ## contains
 
@@ -310,8 +315,143 @@ workflow Abs {
 }
 ```
 
+## sum
+
+```text
+sum(list: List<Int>) -> Int
+sum(list: List<Float>) -> Float
+```
+
+Adds the elements of a list of numbers. The result is `Int` for a
+`List<Int>` and `Float` otherwise. The list may be optional; `sum` of `null`
+and of an empty list is `0`. An element that is not a number is a runtime
+error (possible only with `JSON` values), and so is `Int` overflow. Any other
+argument type is `E0400`
+(``argument 1 of `sum` must be a List of Int or Float, found `List<String>` ``).
+
+At runtime, the result is an integer whenever every element is an integer
+JSON number, so the sum of an empty `List<Float>` is the JSON number `0`, not
+`0.0`. JSON consumers that distinguish the two should not rely on the
+representation.
+
+```orbit
+workflow Invoice {
+    version "1.0.0"
+    input { quantities: List<Int>, prices: List<Float> }
+    return { units: sum(input.quantities), total: sum(input.prices) }
+}
+```
+
+## Collection functions
+
+`map`, `filter`, `find`, `any` and `all` take a list and a lambda: a
+one-parameter function written `parameter => expression`. The function calls
+the lambda once per element, in list order, with the parameter bound to the
+element. See [Expressions](expressions.md#lambdas) for the lambda syntax.
+
+Rules shared by all five:
+
+- They take exactly two arguments (`E0407` otherwise, with the signature in a
+  note). The first must be a list (`E0400`:
+  ``argument 1 of `map` must be a List, found `String` ``); a `List<T>?` is
+  accepted, and `null` behaves like an empty list. The second must be a
+  lambda (`E0400`: ``argument 2 of `any` must be a lambda``).
+- The lambda body can read `input`, `execution`, step outputs, loop variables
+  and the parameters of enclosing lambdas. Reading a step's output adds a
+  dependency, as anywhere else.
+- For `filter`, `find`, `any` and `all`, the body must have type `Bool`
+  (`E0400`, or `E0405` for a `Bool?`). At runtime a `null` condition counts as
+  false.
+- The parameter must not reuse the name of a step, a loop variable, an
+  enclosing lambda parameter, `input` or `execution` (`E0413`).
+- A lambda anywhere else is `E0415`.
+- An error inside the body, such as a division by zero for one element,
+  fails the whole call.
+
+### map
+
+```text
+map(list: List<T>, f: T => U) -> List<U>
+```
+
+Returns the list of `f(x)` for each element `x`.
+
+```orbit
+workflow Emails {
+    version "1.0.0"
+    input { users: List<{ email: String, name: String }> }
+    return { emails: map(input.users, u => lower(u.email)) }
+}
+```
+
+### filter
+
+```text
+filter(list: List<T>, f: T => Bool) -> List<T>
+```
+
+Returns the elements for which `f` is true, in their original order.
+
+```orbit
+workflow Restock {
+    version "1.0.0"
+    input { items: List<{ sku: String, stock: Int }> }
+    return { low: map(filter(input.items, i => i.stock < 5), i => i.sku) }
+}
+```
+
+### find
+
+```text
+find(list: List<T>, f: T => Bool) -> T?
+```
+
+Returns the first element for which `f` is true, or `null` when there is
+none. The result is always optional.
+
+```orbit
+workflow Primary {
+    version "1.0.0"
+    input { addresses: List<{ city: String, primary: Bool }> }
+    return { city: coalesce(find(input.addresses, a => a.primary).city, "unknown") }
+}
+```
+
+### any, all
+
+```text
+any(list: List<T>, f: T => Bool) -> Bool
+all(list: List<T>, f: T => Bool) -> Bool
+```
+
+`any` is true when `f` is true for at least one element, and `all` when it is
+true for every element. Both stop at the first element that decides the
+result. For an empty list, `any` is `false` and `all` is `true`.
+
+```orbit
+task "mail.send" {
+    input { to: List<String> }
+    output { sent: Int }
+}
+
+workflow Notify {
+    version "1.0.0"
+    input { users: List<{ email: String, active: Bool }> }
+
+    step send {
+        worker "mail.send"
+        when any(input.users, u => u.active)
+        with { to: map(filter(input.users, u => u.active), u => u.email) }
+    }
+}
+```
+
+A workflow that uses a lambda anywhere compiles to `orbit-ir/2`. See
+[Versioning](versioning.md#ir-version).
+
 ## See also
 
 - [Expressions](expressions.md)
+- [Compute steps](compute.md)
 - [Types](types.md)
 - [Conditions](conditions.md)

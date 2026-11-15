@@ -167,7 +167,7 @@ a running server.
 |---|---|
 | `orbit check <files>` | a file has a compile error (exit status 1) |
 | `orbit fmt --check <files>` | a file is not formatted (exit status 1, and `would reformat <file>` for each) |
-| `orbit compile <files> -o build` | a file has a compile error; otherwise writes `orbit-ir/1` JSON to `build/` |
+| `orbit compile <files> -o build` | a file has a compile error; otherwise writes `orbit-ir` JSON to `build/` |
 
 `orbit check --format json` prints machine-readable diagnostics with codes,
 file, line and column, which you can turn into review annotations:

@@ -22,7 +22,8 @@ you can rely on it when you design workflows and workers.
 ```
 
 A **workflow** is a set of **steps**. Each step calls a **task contract**, a
-child workflow, or a timer. Compiling a workflow produces a **definition**
+child workflow, or a timer, waits for a **signal**, or computes a value. A
+workflow can also declare **queries** that report its state. Compiling a workflow produces a **definition**
 identified by `name@version` and a content hash. Starting a definition creates
 an **execution**. The runtime splits the execution into **units**, dispatches
 each task unit to a **worker** that implements the contract, and records every
@@ -88,13 +89,15 @@ runtime. See [How workers work](../sdks/overview.md).
 
 ## Step and unit
 
-A **step** is a named node in a workflow. It does one of three things:
+A **step** is a named node in a workflow. It does one of five things:
 
 | Step kind | Declared with | Executed by |
 |---|---|---|
 | Task step | `worker "task.name"` | a worker that implements the contract (or the runtime, for `orbit.http.request`) |
 | Child workflow step | `workflow "Name"` | the runtime, which starts a child execution |
 | Sleep step | `sleep 24h` | the runtime, as a durable timer |
+| Await step | `await review` | the runtime, which waits for a [signal](#signal) |
+| Compute step | `compute <expression>` | the runtime, which evaluates the expression (see [compute step](#compute-step)) |
 
 A step also declares its policies: dependencies (`after`), a condition
 (`when`), input (`with`), `retry`, `timeout`, `queue_timeout`,
@@ -114,13 +117,44 @@ exactly one unit, keyed by the step name. Two cases create more:
 Each unit has its own status, attempt counter, timeouts and idempotency key. A
 unit moves through `PENDING → SCHEDULED → DISPATCHED → SUCCEEDED`, or ends
 `SKIPPED`, `FAILED` or `CANCELLED`; it waits in `RETRY_WAIT` between attempts,
-in `WAITING` during a sleep, and a fanned-out step is `RUNNING` while its
+in `WAITING` during a sleep or while waiting for a signal, and a fanned-out step is `RUNNING` while its
 elements execute. `orbit status` prints one row per unit. See
 [Steps](../language/steps.md) and [Executions and history](../runtime/executions.md).
 
 An **attempt** is one try at running a unit. `retry { attempts: 3 }` allows
 three attempts in total, including the first. A redelivery after an uncertain
 outcome reuses the same attempt number and does not count as a retry.
+
+## Signal
+
+A signal is a typed message that a person or another system sends to a
+running execution, declared in the workflow with `signal <name> { fields }`.
+An `await <name>` step waits for the next signal of that name, durably, and
+its payload becomes the step's output. The runtime validates every payload
+against the declaration before it records it, and buffers signals that arrive
+before a step waits for them, delivering them in order. Send one with
+`orbit signal <id> <name> --data '{...}'` or
+`POST /v1/executions/{id}/signals/{name}`. See
+[Signals and queries](../language/signals.md).
+
+## Query
+
+A query is a named, typed, read-only view of an execution's state, declared
+with `query <name> = <expression>`. The runtime evaluates it on demand with
+`orbit query <id> <name>` or `GET /v1/executions/{id}/queries/{name}`, against
+the current input and step outputs; steps that have not succeeded read as
+`null`, and the compiler types every step output as optional in a query for
+that reason. A query records nothing and changes nothing. See
+[Signals and queries](../language/signals.md#queries).
+
+## Compute step
+
+A compute step (`compute <expression>`) is a step that the runtime evaluates
+itself, with no worker: a deterministic expression over the input and earlier
+step outputs, whose value is recorded in the history as the step's output.
+Use it for small data transformations between tasks, such as a total, a flag
+or a filtered list; lambdas (`x => ...`) with `map`, `filter`, `find`, `any`
+and `all` work on lists. See [Compute steps](../language/compute.md).
 
 ## Execution
 
@@ -157,7 +191,8 @@ prints the raw events. See [Executions and history](../runtime/executions.md).
 ## Definition, version and hash
 
 Compiling a workflow produces a definition in the intermediate representation
-`orbit-ir/1`. Registering it with the runtime (`orbit deploy`, or implicitly
+(`orbit-ir/1`, or `orbit-ir/2` for workflows that use signals, queries,
+`await` or `compute` steps, or lambdas). Registering it with the runtime (`orbit deploy`, or implicitly
 `orbit run`) stores it under its `name@version`, together with a SHA-256
 `definition_hash` of its semantic content.
 
@@ -232,6 +267,8 @@ the parent cancels its running children. See
 | Definition | the runtime | `name@version` and `definition_hash` |
 | Execution | a definition | execution id |
 | Unit | an execution | unit key (`step`, `step[i]`, `compensate:step`) |
+| Signal | an execution's buffer | name, and the sequence number of its `SignalReceived` event |
+| Query | a workflow | name |
 | Attempt | a unit | attempt number |
 | Event | an execution's history | sequence number (`#1`, `#2`, ...) |
 | Child execution | a parent unit | `<parent>.<step>` |
@@ -241,6 +278,7 @@ the parent cancels its running children. See
 
 - [Quick start](quickstart.md)
 - [Steps](../language/steps.md)
+- [Signals and queries](../language/signals.md)
 - [Delivery guarantees](../runtime/guarantees.md)
 - [Executions and history](../runtime/executions.md)
 - [Worker protocol](../reference/protocol.md)

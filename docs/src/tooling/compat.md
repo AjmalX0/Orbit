@@ -1,6 +1,6 @@
 # Compatibility checks
 
-`orbit compat` compares two versions of your workflows and task contracts and reports every change that would break callers, result consumers or workers, before you deploy. Run it in CI against the version on your main branch to catch a forgotten version bump or an accidental breaking change in review instead of in production.
+`orbit compat` compares two versions of your workflows and task contracts and reports every change that would break callers, result consumers, signal senders, query readers or workers, before you deploy. Run it in CI against the version on your main branch to catch a forgotten version bump or an accidental breaking change in review instead of in production.
 
 ## Why versions need checking
 
@@ -40,7 +40,7 @@ Each line has the same parts:
 <severity> <workflow|contract> <name> <old version> → <new version>: <field path>: <old type> → <new type>: <message>; hint: <hint>
 ```
 
-The field path starts at `input` or `output`. `[]` is a list item and `{}` is a map value, for example `input.lines[].sku`. A field that only exists on one side is shown as `(added)` or `(removed)`. When both versions are equal, the version is shown once as `name@version`.
+The field path starts at `input`, `output`, `signal <name>` or `query <name>`. `[]` is a list item and `{}` is a map value, for example `input.lines[].sku`. A field that only exists on one side is shown as `(added)` or `(removed)`. When both versions are equal, the version is shown once as `name@version`.
 
 | Severity | Meaning | Affects the exit code |
 |---|---|---|
@@ -168,6 +168,108 @@ $ orbit compat r1.orbit r2.orbit
 error   workflow Reminder 0.3.1 → 0.3.2: input.locale: (added) → String: required field added without a default; breaking for callers without a major version bump; hint: bump the minor version (0.3.1 → 0.4.0); in 0.x versions the minor version is the major version
 error: compatibility check failed: 1 error(s), 0 warning(s)
 ```
+
+### Signals and queries
+
+[Signals](../language/signals.md) are inputs that other systems send to running executions, and [queries](../language/signals.md#queries) are outputs they read, so `orbit compat` compares them like the workflow input and output. Signals and queries are matched by name; paths are `signal <name>` and `query <name>`, followed by the field path.
+
+| Change | Result |
+|---|---|
+| Signal removed | breaking: senders get `UNKNOWN_SIGNAL` |
+| Signal payload field added as optional (`T?`) or with a default | compatible |
+| Signal payload field added as required, without a default | breaking |
+| Signal payload field removed | breaking (the check applies the strict rule it uses for workflow inputs) |
+| Signal payload field widened or narrowed | as for an input field: widening is compatible, narrowing or an unrelated type is breaking |
+| Query removed | breaking: readers get `UNKNOWN_QUERY` |
+| Query result changed | as for an output: a field added or a type narrowed is compatible; a field removed, a type made optional, widened or changed is breaking |
+| Signal or query added | not reported |
+
+A breaking change is an `error` without a major version bump and `info` with one, as for inputs and outputs. The message names who is affected: `breaking for senders of the signal` or `breaking for readers of the query`.
+
+Old version:
+
+```orbit
+workflow Approval {
+    version "1.0.0"
+    timeout 7d
+
+    signal review { approved: Bool, comment: String? }
+    signal escalate { reason: String }
+
+    step decision { await review }
+    step escalation { await escalate after decision when !decision.approved }
+
+    query state = { approved: decision.approved, comment: decision.comment }
+    query escalated = !is_null(escalation)
+
+    return { approved: decision.approved }
+}
+```
+
+A minor version that drops the `escalate` signal and the `escalated` query, adds a required `reviewer` field to `review`, and makes `state.comment` non-optional:
+
+```orbit
+workflow Approval {
+    version "1.1.0"
+    timeout 7d
+
+    signal review { approved: Bool, comment: String?, reviewer: String }
+
+    step decision { await review }
+
+    query state = { approved: decision.approved, comment: coalesce(decision.comment, "") }
+
+    return { approved: decision.approved }
+}
+```
+
+```console
+$ orbit compat a1.orbit a2.orbit
+error   workflow Approval 1.0.0 → 1.1.0: signal escalate: { reason: String } → (removed): signal removed: senders get UNKNOWN_SIGNAL; breaking for senders of the signal without a major version bump; hint: bump the major version (1.0.0 → 2.0.0)
+error   workflow Approval 1.0.0 → 1.1.0: signal review.reviewer: (added) → String: required field added without a default; breaking for senders of the signal without a major version bump; hint: bump the major version (1.0.0 → 2.0.0)
+error   workflow Approval 1.0.0 → 1.1.0: query escalated: Bool → (removed): query removed: readers get UNKNOWN_QUERY; breaking for readers of the query without a major version bump; hint: bump the major version (1.0.0 → 2.0.0)
+ok      workflow Approval 1.0.0 → 1.1.0: query state.comment: String? → String: no longer null
+error: compatibility check failed: 3 error(s), 0 warning(s)
+```
+
+The same changes as `2.0.0` are reported as `info` (`breaking for senders of the signal, allowed by the major version bump`). A compatible minor version keeps both signals and queries, gives the new `reviewer` field a default, and adds fields:
+
+```orbit
+workflow Approval {
+    version "1.2.0"
+    timeout 7d
+
+    signal review { approved: Bool, comment: String?, reviewer: String = "unknown", priority: Int? }
+    signal escalate { reason: String }
+
+    step decision { await review }
+    step escalation { await escalate after decision when !decision.approved }
+
+    query state = { approved: decision.approved, comment: decision.comment, reviewer: decision.reviewer }
+    query escalated = !is_null(escalation)
+
+    return { approved: decision.approved }
+}
+```
+
+```console
+$ orbit compat a1.orbit a3.orbit
+ok      workflow Approval 1.0.0 → 1.2.0: signal review.reviewer: (added) → String: field with a default added
+ok      workflow Approval 1.0.0 → 1.2.0: signal review.priority: (added) → Int?: optional field added
+ok      workflow Approval 1.0.0 → 1.2.0: query state.reviewer: (added) → String?: field added
+```
+
+Query result types follow the [query typing rules](../language/signals.md#typing-rules): every step output is optional in a query, so `decision.approved` has type `Bool?` there. In this pair, the new version (`1.1.0`) changes `review.approved` from `Bool` to `Int`, removes the optional `review.comment`, and returns `string(decision.approved)` in `state.approved`:
+
+```console
+$ orbit compat b1.orbit b2.orbit
+error   workflow Approval 1.0.0 → 1.1.0: signal review.approved: Bool → Int: incompatible type: expected `Int`, found `Bool`; breaking for senders of the signal without a major version bump; hint: bump the major version (1.0.0 → 2.0.0)
+error   workflow Approval 1.0.0 → 1.1.0: signal review.comment: String? → (removed): field removed; values that still contain it are rejected, because inputs are validated strictly; breaking for senders of the signal without a major version bump; hint: bump the major version (1.0.0 → 2.0.0)
+error   workflow Approval 1.0.0 → 1.1.0: query state.approved: Bool? → String: incompatible type: expected `Bool`, found `String`; breaking for readers of the query without a major version bump; hint: bump the major version (1.0.0 → 2.0.0)
+error: compatibility check failed: 3 error(s), 0 warning(s)
+```
+
+The runtime itself does not reject undeclared signal payload fields (it keeps them in the payload), so a removed payload field breaks senders only in the sense that the field is no longer read. `orbit compat` reports it as breaking all the same, so that removing a field is a deliberate, major change.
 
 ### Removed and added workflows
 
@@ -313,7 +415,7 @@ With `--format json`, stdout holds one object:
 | `findings[].kind` | string | `workflow` or `contract`. |
 | `findings[].name` | string | Workflow or contract name. |
 | `findings[].old_version`, `new_version` | string | Absent on the side where the workflow or contract does not exist. |
-| `findings[].path` | string | Field path; absent for findings about a whole workflow or contract. |
+| `findings[].path` | string | Field path, starting with `input`, `output`, `signal <name>` or `query <name>`; absent for findings about a whole workflow or contract. |
 | `findings[].old_type`, `new_type` | string | Types at `path`; absent when the field does not exist on that side. |
 | `findings[].message` | string | What changed and why it matters. |
 | `findings[].hint` | string | Suggested fix, when there is one. |
@@ -331,6 +433,7 @@ Findings list workflows first, then contracts, each sorted by name.
 ## See also
 
 - [Versioning](../language/versioning.md)
+- [Signals and queries](../language/signals.md)
 - [Task contracts](../language/tasks.md#changing-a-contract)
 - [CLI: orbit compat](../reference/cli.md#orbit-compat)
 - [Formatter](fmt.md)

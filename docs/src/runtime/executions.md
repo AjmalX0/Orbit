@@ -6,7 +6,7 @@ An execution is one run of a workflow definition with one input. The runtime rec
 
 Every state change is an event appended to the `execution_events` table. The current state of an execution is the left fold of its events: replaying the history from the first event always produces the same state. A projection table, `workflow_executions`, is updated in the same transaction for listing, but the history is authoritative.
 
-Decisions come from a pure function, `decide(state, definition, now)`, that returns the events that should happen next: schedule ready steps, fan out `for` steps, fire timers, apply retry policies, start compensation, finish the workflow. The engine runs it until it returns nothing and commits the result as one batch. Because the decider performs no I/O and expressions cannot read the clock, every decision can be explained from the history.
+Decisions come from a pure function, `decide(state, definition, now)`, that returns the events that should happen next: schedule ready steps, fan out `for` steps, evaluate `compute` steps, fire timers, deliver buffered signals to `await` steps, apply retry policies, start compensation, finish the workflow. The engine runs it until it returns nothing and commits the result as one batch. Because the decider performs no I/O and expressions cannot read the clock, every decision can be explained from the history.
 
 ## Starting an execution
 
@@ -69,7 +69,7 @@ Each unit has a status, an attempt number, its evaluated input and idempotency k
 | `ATTEMPT_FAILED` | no | Transient: an attempt failed and the decider is choosing between a retry and failure. Never observed between commits. |
 | `UNCERTAIN` | no | Transient: the outcome of the attempt is unknown and it will be redelivered. Never observed between commits. |
 | `RETRY_WAIT` | no | Waiting for the backoff delay before the next attempt. |
-| `WAITING` | no | A `sleep` timer is running. |
+| `WAITING` | no | A `sleep` timer is running, or an `await` step is waiting for a signal. |
 | `RUNNING` | no | A `for` step whose elements are running. |
 | `SUCCEEDED` | yes | Finished with an output. |
 | `SKIPPED` | yes | Its `when` condition was false (or `null`). Its output is `null`. |
@@ -86,7 +86,8 @@ PENDING ─► SCHEDULED ─► DISPATCHED ─► SUCCEEDED
    │           │             └─► UNCERTAIN ─► SCHEDULED (redelivery)
    │           └─► CANCELLED
    ├─► SKIPPED
-   ├─► WAITING ─► SUCCEEDED            (sleep)
+   ├─► SUCCEEDED                       (compute)
+   ├─► WAITING ─► SUCCEEDED | FAILED   (sleep, await)
    └─► RUNNING ─► SUCCEEDED | FAILED   (for)
 ```
 
@@ -133,6 +134,43 @@ Error objects (`error`) have the fields `code` (string), `message` (string), `re
 | `TimerFired` | `step` | The timer fired. The `sleep` step succeeds with `{}`. |
 | `StaleResultIgnored` | `step`, `token`, `outcome` | A result arrived that no longer matters. `outcome` is `duplicate` (the unit was already resolved) or `failure` (a failure for an attempt that is not the one in flight). It has no effect on the execution. |
 
+### Signal events
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `SignalReceived` | `name`, `payload` | A signal was sent with `POST /v1/executions/{id}/signals/{name}` (or `orbit signal`), validated against the declaration and buffered. `payload` has defaults applied. The event's `seq` identifies the signal. |
+| `SignalAwaitStarted` | `step`, `signal`, `deadline_ms`? | An `await` step started waiting; the unit is `WAITING`. `deadline_ms` is set when the step has a `timeout`. |
+| `SignalDelivered` | `step`, `signal_seq` | The `await` unit took the buffered signal recorded at `seq` `signal_seq`, and succeeded with its payload as output. |
+
+An `await` step whose `timeout` passes is recorded as `StepFailed` with `SIGNAL_TIMEOUT`; one that is withdrawn during an abort as `StepCancelled`. A `compute` step is recorded as a single `StepSucceeded` (or `StepFailed` with `EXPRESSION_ERROR`), without `StepScheduled` or `StepDispatched`. Evaluating a query records nothing. See [Signals and queries](../language/signals.md) and [Compute steps](../language/compute.md).
+
+```json
+{"seq":4,"timestamp_ms":1794746714132,"type":"SignalAwaitStarted","step":"decision","signal":"review","deadline_ms":1794919514132}
+{"seq":5,"timestamp_ms":1794746714669,"type":"SignalReceived","name":"review","payload":{"approved":true,"reviewer":"dana","comment":"verified by phone"}}
+{"seq":6,"timestamp_ms":1794746714671,"type":"SignalDelivered","step":"decision","signal_seq":5}
+```
+
+### The signal buffer
+
+Every received signal is kept in the execution state, in the `signals` array of `GET /v1/executions/{id}` and `orbit inspect <id>`, in arrival order. A signal is buffered until an `await` step of the same name takes it; each step takes the oldest undelivered signal of its name, and each signal is delivered at most once. A signal that no step takes stays in the buffer without `delivered_to`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `seq` | integer | Sequence number of its `SignalReceived` event. |
+| `name` | string | Signal name. |
+| `payload` | object | Validated payload. |
+| `received_at_ms` | integer | When it was recorded. |
+| `delivered_to` | string, optional | The unit that took it. |
+
+```json
+"signals": [
+  {"seq": 5, "name": "review", "payload": {"approved": true, "reviewer": "dana", "comment": "verified by phone"},
+   "received_at_ms": 1794746714669, "delivered_to": "decision"}
+]
+```
+
+The field is absent for executions that never received a signal.
+
 ### Compensation events
 
 | Event | Fields | Meaning |
@@ -151,7 +189,8 @@ Errors that the runtime itself produces use these codes:
 |---|---|---|
 | `TIMEOUT` | yes | An attempt exceeded its step `timeout`. |
 | `QUEUE_TIMEOUT` | no | No worker picked up the task within `queue_timeout`. |
-| `EXPRESSION_ERROR` | no | Evaluating `with`, `when`, `for`, `idempotency_key` or `return` failed, or `when` did not produce a `Bool`. |
+| `EXPRESSION_ERROR` | no | Evaluating `with`, `when`, `for`, `idempotency_key`, a `compute` step or `return` failed, or `when` did not produce a `Bool`. |
+| `SIGNAL_TIMEOUT` | no | An `await` step's `timeout` passed before a signal of its name arrived. |
 | `INPUT_CONTRACT_VIOLATION` | no | The evaluated step input does not match the task's input contract. |
 | `OUTPUT_CONTRACT_VIOLATION` | no | A worker's output does not match the task's output contract, or the workflow output does not match its `output` type. |
 | `ADAPTER_DISABLED` | no | An `orbit.http.request` step ran on a server without `--enable-http-adapter`. |
@@ -257,7 +296,7 @@ For automation, use the [HTTP API](../reference/http-api.md): `GET /v1/execution
 
 `orbit cancel <id> [--reason R]` or `POST /v1/executions/{id}/cancel` requests cancellation. The runtime records `CancelRequested` and aborts the execution:
 
-1. Units that have not started are withdrawn (`StepCancelled`): pending units, queued units, running `sleep` timers and retries waiting for their backoff. A redelivery that is queued is not withdrawn, because its first delivery may have run.
+1. Units that have not started are withdrawn (`StepCancelled`): pending units, queued units, running `sleep` timers, `await` steps waiting for a signal, and retries waiting for their backoff. A redelivery that is queued is not withdrawn, because its first delivery may have run.
 2. Attempts in flight are awaited, because they may still succeed and then need compensating. Their workers see the tokens in the `cancel` list of their next heartbeat (`ctx.cancelled` or `ctx.signal` in the SDKs). Stopping is cooperative: the runtime cannot stop an external operation that is already running.
 3. A child workflow whose parent is aborting is cancelled too, with the reason `parent workflow aborted`.
 4. Every succeeded unit with a `compensate` block is compensated, one at a time, newest first. Compensations run even though the execution is aborting, with their own retry policy.
@@ -272,12 +311,13 @@ cancellation requested; execution is CANCELLED
 
 ## Timeouts
 
-Three timeouts apply, at different levels:
+These timeouts apply, at different levels:
 
 | Timeout | Declared on | Measures | On expiry |
 |---|---|---|---|
 | `timeout` | a step | One attempt, from dispatch to result. | The attempt fails with `TIMEOUT` (retryable); the step is retried if attempts remain. The worker sees the token in its heartbeat `cancel` list. A late success for that attempt is still accepted while the step is unresolved. |
 | `queue_timeout` | a step | How long a scheduled task waits for a worker. Does not apply to redeliveries. | The attempt fails with `QUEUE_TIMEOUT` (not retried). |
+| `timeout` | an `await` step | The wait for a signal, from `SignalAwaitStarted`. | The step fails with `SIGNAL_TIMEOUT` (not retried), and the execution aborts. |
 | `timeout` | the workflow | The whole execution, from `WorkflowCreated`. | `WorkflowTimeoutReached`, then the abort described under cancellation, ending `TIMED_OUT`. |
 
 The workflow timeout is checked only while the execution is `RUNNING` and not already aborting, so compensation is not cut short by the workflow timeout. A `workflow "Name"` step's `timeout` bounds the child execution; when it expires, the child is cancelled.
@@ -286,6 +326,7 @@ The workflow timeout is checked only while the execution is `RUNNING` and not al
 
 - [Delivery guarantees](guarantees.md)
 - [Compensation](../language/compensation.md)
+- [Signals and queries](../language/signals.md)
 - [Retries and timeouts](../language/retries-timeouts.md)
 - [HTTP API](../reference/http-api.md)
 - [CLI](../reference/cli.md)
