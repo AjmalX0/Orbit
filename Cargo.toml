@@ -27,6 +27,8 @@ postgres = "0.19"
 tokio-postgres-rustls = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 webpki-roots = "1"
+x509-parser = "0.18"
+toml = "1"
 rustls-pemfile = "2"
 axum = "0.8"
 axum-server = { version = "0.9", features = ["tls-rustls"] }

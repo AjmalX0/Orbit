@@ -290,6 +290,29 @@ class Polyglot(unittest.TestCase):
         )
 
 
+def make_pki(clients=()):
+    """A throwaway CA, a server certificate for 127.0.0.1, and one client
+    certificate per name (CN and DNS SAN), in a new temp directory."""
+    d = tempfile.mkdtemp(prefix="orbit-certs-")
+    run = lambda *a: subprocess.run(a, cwd=d, check=True, capture_output=True)
+    run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca-key.pem", "-out", "ca.pem", "-days", "2",
+        "-subj", "/CN=ORBIT test CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+
+    def issue(name, ext, out):
+        run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{out}-key.pem", "-out", f"{out}.csr", "-subj", f"/CN={name}")
+        with open(os.path.join(d, f"{out}.cnf"), "w") as f:
+            f.write(ext)
+        run("openssl", "x509", "-req", "-in", f"{out}.csr", "-CA", "ca.pem", "-CAkey", "ca-key.pem", "-CAcreateserial",
+            "-out", f"{out}.pem", "-days", "2", "-extfile", f"{out}.cnf")
+
+    issue("localhost", "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n", "server")
+    os.rename(os.path.join(d, "server.pem"), os.path.join(d, "cert.pem"))
+    os.rename(os.path.join(d, "server-key.pem"), os.path.join(d, "key.pem"))
+    for name in clients:
+        issue(name, f"subjectAltName=DNS:{name}\nextendedKeyUsage=clientAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n", name)
+    return d
+
+
 class Security(unittest.TestCase):
     """HTTPS with a private CA, an admin token and a restricted worker token."""
 
@@ -297,15 +320,7 @@ class Security(unittest.TestCase):
     def setUpClass(cls):
         if not shutil.which("openssl"):
             raise unittest.SkipTest("openssl not installed")
-        d = tempfile.mkdtemp(prefix="orbit-certs-")
-        run = lambda *a: subprocess.run(a, cwd=d, check=True, capture_output=True)
-        run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca-key.pem", "-out", "ca.pem", "-days", "2",
-            "-subj", "/CN=ORBIT test CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-        run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", "key.pem", "-out", "srv.csr", "-subj", "/CN=localhost")
-        with open(os.path.join(d, "ext.cnf"), "w") as f:
-            f.write("subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n")
-        run("openssl", "x509", "-req", "-in", "srv.csr", "-CA", "ca.pem", "-CAkey", "ca-key.pem", "-CAcreateserial",
-            "-out", "cert.pem", "-days", "2", "-extfile", "ext.cnf")
+        d = make_pki()
         ca = os.path.join(d, "ca.pem")
         cls.c = Cluster(
             server_args=["--token", "admin-secret", "--worker-token", "worker-secret",
@@ -345,6 +360,142 @@ class Security(unittest.TestCase):
         r = subprocess.run([ORBIT, "ps", "--server", self.c.url, "--token", "admin-secret"], capture_output=True, text=True,
                            env={k: v for k, v in self.c.env.items() if k != "ORBIT_CA_CERT"})
         self.assertNotEqual(r.returncode, 0, "an untrusted certificate must be rejected")
+
+
+class Identities(unittest.TestCase):
+    """Per-worker identities: mutual TLS for real workers, a token identity for
+    a rogue worker whose every overreach must be refused."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("openssl"):
+            raise unittest.SkipTest("openssl not installed")
+        d = make_pki(clients=["orders-python", "orders-typescript", "stranger", "text-go", "text-rust"])
+        cls.pki = d
+        rogue_hash = subprocess.run([sys.executable, "-c", "import hashlib;print(hashlib.sha256(b'rogue-token').hexdigest())"],
+                                    capture_output=True, text=True).stdout.strip()
+        workers = os.path.join(d, "workers.toml")
+        with open(workers, "w") as f:
+            f.write(f"""
+[[worker]]
+id = "orders-python"
+client_cert = "orders-python"
+runtime = "python"
+tasks = ["risk.*", "payments.*", "shipping.*"]
+
+[[worker]]
+id = "orders-typescript"
+client_cert = "orders-typescript"
+tasks = ["orders.*", "inventory.*", "notifications.*"]
+
+[[worker]]
+id = "text-go"
+client_cert = "text-go"
+tasks = ["text.*"]
+
+[[worker]]
+id = "text-rust"
+client_cert = "text-rust"
+tasks = ["text.*"]
+
+[[worker]]
+id = "rogue"
+token_sha256 = "{rogue_hash}"
+tasks = ["risk.analyze"]
+""")
+        cls.c = Cluster(
+            server_args=["--token", "admin-secret", "--workers-file", workers, "--tls-cert", os.path.join(d, "cert.pem"),
+                         "--tls-key", os.path.join(d, "key.pem"), "--tls-client-ca", os.path.join(d, "ca.pem")],
+            tls_ca=os.path.join(d, "ca.pem"), admin_token="admin-secret",
+        )
+        cls.c.start_server()
+        for name, argv in [
+            ("orders-python", [sys.executable, os.path.join(ROOT, "examples", "workers", "python", "order_workers.py")]),
+            ("orders-typescript", ["node", os.path.join(ROOT, "examples", "workers", "typescript", "order_workers.ts")]),
+        ]:
+            # No token at all: the certificate is the credential.
+            cls.c.spawn(name, argv, ORBIT_TOKEN="", ORBIT_WORKER_ID=name,
+                        ORBIT_CLIENT_CERT=os.path.join(d, f"{name}.pem"), ORBIT_CLIENT_KEY=os.path.join(d, f"{name}-key.pem"))
+        cls.c.wait_online(2)
+        cls.c.cli("deploy", WORKFLOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.c.stop()
+
+    def rogue(self, path, body, cert=None):
+        ctx = ssl.create_default_context(cafile=os.path.join(self.pki, "ca.pem"))
+        headers = {"content-type": "application/json"}
+        if cert:
+            ctx.load_cert_chain(os.path.join(self.pki, f"{cert}.pem"), os.path.join(self.pki, f"{cert}-key.pem"))
+        else:
+            headers["authorization"] = "Bearer rogue-token"
+        req = urllib.request.Request(self.c.url + path, data=json.dumps(body).encode(), method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+                return r.status, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null")
+
+    def test_workers_authenticated_by_certificate_run_the_workflow(self):
+        r = self.c.cli("run", WORKFLOW, "--input", json.dumps(order("I-1")))
+        self.assertEqual(json.loads(r.stdout)["status"], "completed")
+        online = {w["worker_id"] for w in self.c.get("/v1/workers")["workers"] if w["online"]}
+        self.assertTrue({"orders-python", "orders-typescript"} <= online, online)
+
+    def test_go_and_rust_sdks_authenticate_with_certificates(self):
+        if not shutil.which("go"):
+            self.skipTest("go toolchain not installed")
+        go_bin = os.path.join(self.c.dir, "text-go")
+        subprocess.run(["go", "build", "-o", go_bin, "."], cwd=os.path.join(ROOT, "examples", "workers", "polyglot", "go"), check=True)
+        subprocess.run(["cargo", "build", "-q", "-p", "orbit-worker", "--example", "text_worker"], cwd=ROOT, check=True)
+        for name, argv in [("text-go", [go_bin]), ("text-rust", [os.path.join(ROOT, "target", "debug", "examples", "text_worker")])]:
+            self.c.spawn(name, argv, ORBIT_TOKEN="", ORBIT_CLIENT_CERT=os.path.join(self.pki, f"{name}.pem"),
+                         ORBIT_CLIENT_KEY=os.path.join(self.pki, f"{name}-key.pem"))
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            online = {w["worker_id"] for w in self.c.get("/v1/workers")["workers"] if w["online"]}
+            if {"text-go", "text-rust"} <= online:
+                return
+            time.sleep(0.2)
+        self.fail(f"Go/Rust workers did not register over mTLS; logs in {self.c.dir}")
+
+    def test_identities_cannot_overreach(self):
+        contract = lambda t: [{"task_name": t, "contract_version": "1.0.0"}]
+        # Impersonating another worker.
+        status, body = self.rogue("/v1/workers/register", {"worker_id": "orders-python", "runtime": "python", "contracts": contract("risk.analyze")})
+        self.assertEqual((status, body["error"]["code"]), (403, "FORBIDDEN"))
+        # Announcing a task it is not allowed to serve.
+        status, body = self.rogue("/v1/workers/register", {"worker_id": "rogue", "runtime": "go", "contracts": contract("payments.charge")})
+        self.assertEqual(status, 403)
+        self.assertIn("may not serve: payments.charge", body["error"]["message"])
+        # Admin endpoints.
+        req = urllib.request.Request(self.c.url + "/v1/executions", headers={"authorization": "Bearer rogue-token"})
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=10, context=self.c.ssl)
+        self.assertEqual(e.exception.code, 403)
+        # Completing a task token issued to another worker: amount 4242 keeps the
+        # Python worker busy with the payment for 3 seconds.
+        ex = self.c.post("/v1/executions", {"workflow": "OrderProcessing", "input": order("I-2", amount=4242)})["execution_id"]
+        deadline = time.time() + 20
+        while True:
+            unit = self.c.get(f"/v1/executions/{ex}")["units"].get("process_payment", {})
+            if unit.get("status") == "DISPATCHED":
+                break
+            self.assertLess(time.time(), deadline)
+            time.sleep(0.05)
+        status, body = self.rogue("/v1/tasks/complete", {"token": unit["token"], "output": {"transaction_id": "forged", "status": "x"}})
+        self.assertEqual(status, 403)
+        self.assertIn("issued to worker `orders-python`", body["error"]["message"])
+        s = self.c.wait(ex)
+        self.assertEqual(s["output"]["transaction_id"], "tx-I-2", "the forged result was not recorded")
+        # A certificate from the trusted CA that is not in the workers file.
+        status, body = self.rogue("/v1/workers/register", {"worker_id": "stranger", "runtime": "go", "contracts": contract("risk.analyze")}, cert="stranger")
+        self.assertEqual(status, 403)
+        self.assertIn("matches no worker", body["error"]["message"])
+        # Allowed registration still works for the rogue's own identity.
+        status, body = self.rogue("/v1/workers/register", {"worker_id": "rogue", "runtime": "go", "contracts": contract("risk.analyze")})
+        self.assertEqual(status, 200, body)
 
 
 if __name__ == "__main__":

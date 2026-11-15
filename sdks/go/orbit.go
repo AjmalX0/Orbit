@@ -99,14 +99,18 @@ type Handler func(ctx context.Context, t *Task) (any, error)
 // Options configures a Worker. Zero values use sensible defaults and the
 // ORBIT_SERVER, ORBIT_WORKER_TOKEN / ORBIT_TOKEN and ORBIT_CA_CERT environment variables.
 type Options struct {
-	WorkerID    string
-	Server      string
-	Token       string
-	CACertFile  string
-	Concurrency int
-	Runtime     string
-	PollWait    time.Duration
-	Logger      *log.Logger
+	WorkerID   string
+	Server     string
+	Token      string
+	CACertFile string
+	// ClientCertFile and ClientKeyFile (PEM) enable mutual TLS: the certificate
+	// identifies this worker to the runtime.
+	ClientCertFile string
+	ClientKeyFile  string
+	Concurrency    int
+	Runtime        string
+	PollWait       time.Duration
+	Logger         *log.Logger
 }
 
 type registered struct {
@@ -145,6 +149,12 @@ func NewWorker(opts Options) *Worker {
 	if opts.CACertFile == "" {
 		opts.CACertFile = os.Getenv("ORBIT_CA_CERT")
 	}
+	if opts.ClientCertFile == "" {
+		opts.ClientCertFile = os.Getenv("ORBIT_CLIENT_CERT")
+	}
+	if opts.ClientKeyFile == "" {
+		opts.ClientKeyFile = os.Getenv("ORBIT_CLIENT_KEY")
+	}
 	if opts.WorkerID == "" {
 		host, _ := os.Hostname()
 		opts.WorkerID = fmt.Sprintf("go-%s-%d", host, os.Getpid())
@@ -163,6 +173,17 @@ func NewWorker(opts Options) *Worker {
 		logger = log.New(os.Stderr, "[orbit] ", log.LstdFlags)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if opts.CACertFile != "" || opts.ClientCertFile != "" {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if opts.ClientCertFile != "" {
+		pair, err := tls.LoadX509KeyPair(opts.ClientCertFile, opts.ClientKeyFile)
+		if err != nil {
+			logger.Printf("cannot load client certificate %s: %v", opts.ClientCertFile, err)
+		} else {
+			transport.TLSClientConfig.Certificates = []tls.Certificate{pair}
+		}
+	}
 	if opts.CACertFile != "" {
 		pool, err := x509.SystemCertPool()
 		if err != nil || pool == nil {
@@ -173,7 +194,7 @@ func NewWorker(opts Options) *Worker {
 		} else {
 			logger.Printf("cannot read CA certificate %s: %v", opts.CACertFile, err)
 		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		transport.TLSClientConfig.RootCAs = pool
 	}
 	return &Worker{
 		opts:           opts,

@@ -12,6 +12,7 @@
 pub mod decide;
 pub mod engine;
 pub mod http_adapter;
+pub mod identity;
 pub mod metrics;
 pub mod model;
 pub mod server;

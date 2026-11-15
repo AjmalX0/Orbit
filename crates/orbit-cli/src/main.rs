@@ -36,6 +36,22 @@ struct Remote {
     /// Extra PEM CA certificate to trust (for a runtime with a private certificate).
     #[arg(long, env = "ORBIT_CA_CERT", global = true)]
     ca_cert: Option<PathBuf>,
+    /// PEM client certificate for mutual TLS (with --client-key).
+    #[arg(
+        long,
+        env = "ORBIT_CLIENT_CERT",
+        global = true,
+        requires = "client_key"
+    )]
+    client_cert: Option<PathBuf>,
+    /// PEM private key for --client-cert.
+    #[arg(
+        long,
+        env = "ORBIT_CLIENT_KEY",
+        global = true,
+        requires = "client_cert"
+    )]
+    client_key: Option<PathBuf>,
 }
 
 impl Remote {
@@ -46,10 +62,22 @@ impl Remote {
                 std::process::exit(2)
             })
         });
+        let read = |p: &PathBuf| {
+            std::fs::read(p).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {}: {e}", p.display());
+                std::process::exit(2)
+            })
+        };
+        let identity = self
+            .client_cert
+            .as_ref()
+            .zip(self.client_key.as_ref())
+            .map(|(c, k)| (read(c), read(k)));
         Client::new(
             &self.server,
             self.token.clone().filter(|t| !t.is_empty()),
             ca,
+            identity,
         )
     }
 }
@@ -168,6 +196,15 @@ enum Command {
         #[command(flatten)]
         remote: Remote,
     },
+    /// Generate a random bearer token and the workers-file entry for it.
+    Token {
+        /// Worker id for the generated `[[worker]]` entry.
+        #[arg(long, default_value = "my-worker")]
+        worker: String,
+        /// Task patterns the worker may serve.
+        #[arg(long = "task", default_value = "*")]
+        tasks: Vec<String>,
+    },
     /// Worker commands.
     Workers {
         #[command(subcommand)]
@@ -213,6 +250,14 @@ struct ServerArgs {
     /// PEM private key for --tls-cert.
     #[arg(long, env = "ORBIT_TLS_KEY", requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+    /// Enable mutual TLS: verify client certificates signed by this PEM CA.
+    /// Certificates identify workers declared with `client_cert` in --workers-file.
+    #[arg(long, env = "ORBIT_TLS_CLIENT_CA", requires = "tls_cert")]
+    tls_client_ca: Option<PathBuf>,
+    /// TOML file declaring per-worker identities: id, token hash or client
+    /// certificate name, allowed task patterns. See docs/runtime.md.
+    #[arg(long, env = "ORBIT_WORKERS_FILE")]
+    workers_file: Option<PathBuf>,
     /// Execute `orbit.http.request` steps inside the runtime.
     #[arg(long)]
     enable_http_adapter: bool,
@@ -562,6 +607,25 @@ fn run(cmd: Command) -> Res {
             print!("{}", view::executions(&r, tty));
             Ok(ExitCode::SUCCESS)
         }
+        Command::Token { worker, tasks } => {
+            // Two v4 UUIDs from the OS CSPRNG: 244 random bits.
+            let token = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            let tasks = tasks
+                .iter()
+                .map(|t| format!("{t:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("{token}");
+            eprintln!(
+                "\nGive the token above to the worker (ORBIT_WORKER_TOKEN). Add this to the workers file:\n\n[[worker]]\nid = {worker:?}\ntoken_sha256 = {:?}\ntasks = [{tasks}]\n",
+                orbit_runtime::identity::sha256_hex(&token)
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Workers {
             command: WorkersCommand::List { remote },
         } => {
@@ -658,6 +722,16 @@ fn server(mut args: ServerArgs) -> Res {
     if args.worker_token.is_some() && args.worker_token == args.token {
         return Err("--worker-token must differ from --token".into());
     }
+    let identities = match &args.workers_file {
+        Some(path) => orbit_runtime::identity::Identities::load(path)?,
+        None => Default::default(),
+    };
+    if !identities.is_empty() && args.token.is_none() {
+        return Err("--workers-file requires --token: without an admin token administrative endpoints would be open".into());
+    }
+    if args.tls_client_ca.is_some() && identities.is_empty() {
+        return Err("--tls-client-ca needs --workers-file entries with `client_cert` to map certificates to workers".into());
+    }
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_env("ORBIT_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     if args.log_format == "json" {
@@ -702,10 +776,14 @@ fn server(mut args: ServerArgs) -> Res {
                 addr: args.addr,
                 auth_token: args.token,
                 worker_token: args.worker_token,
-                tls: args
-                    .tls_cert
-                    .zip(args.tls_key)
-                    .map(|(cert, key)| orbit_runtime::server::TlsConfig { cert, key }),
+                identities,
+                tls: args.tls_cert.zip(args.tls_key).map(|(cert, key)| {
+                    orbit_runtime::server::TlsConfig {
+                        cert,
+                        key,
+                        client_ca: args.tls_client_ca,
+                    }
+                }),
                 body_limit: args.max_body,
                 tick_interval: std::time::Duration::from_millis(100),
             },

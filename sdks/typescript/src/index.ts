@@ -74,6 +74,9 @@ export class ApiError extends Error {
 export interface ClientOptions {
   server?: string;
   token?: string;
+  /** PEM client certificate and key paths for mutual TLS (or ORBIT_CLIENT_CERT / ORBIT_CLIENT_KEY). */
+  clientCert?: string;
+  clientKey?: string;
 }
 
 /** Minimal client for the ORBIT runtime HTTP API. */
@@ -86,24 +89,66 @@ export class Client {
     // Workers should use the restricted worker credential when the runtime has one.
     // For a private CA over HTTPS, Node.js honours NODE_EXTRA_CA_CERTS=/path/ca.pem.
     this.token = options.token ?? (process.env.ORBIT_WORKER_TOKEN || process.env.ORBIT_TOKEN);
+    this.clientCert = options.clientCert ?? process.env.ORBIT_CLIENT_CERT;
+    this.clientKey = options.clientKey ?? process.env.ORBIT_CLIENT_KEY;
+  }
+
+  private readonly clientCert?: string;
+  private readonly clientKey?: string;
+
+  /**
+   * Mutual-TLS transport. The global `fetch` cannot present client
+   * certificates, so requests go through `node:https` when one is configured.
+   */
+  private async httpsRequest(
+    method: string,
+    url: string,
+    headers: Record<string, string>,
+    body: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<{ status: number; text: string }> {
+    const https = await import("node:https");
+    const fs = await import("node:fs");
+    const cert = fs.readFileSync(this.clientCert as string);
+    const key = fs.readFileSync((this.clientKey ?? this.clientCert) as string);
+    const ca = process.env.ORBIT_CA_CERT ? fs.readFileSync(process.env.ORBIT_CA_CERT) : undefined;
+    return new Promise((resolve, reject) => {
+      const req = https.request(url, { method, headers, cert, key, ca, signal }, (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => (text += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+        res.on("error", reject);
+      });
+      req.on("error", reject);
+      if (body !== undefined) req.write(body);
+      req.end();
+    });
   }
 
   async request<T = any>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<{ status: number; body: T }> {
     const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json" };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
-    let res: Response;
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    let status: number;
+    let text: string;
     try {
-      res = await fetch(this.server + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
+      if (this.clientCert && this.server.startsWith("https:")) {
+        ({ status, text } = await this.httpsRequest(method, this.server + path, headers, payload, signal));
+      } else {
+        const res = await fetch(this.server + path, { method, headers, body: payload, signal });
+        status = res.status;
+        text = await res.text();
+      }
     } catch (e) {
       throw new ApiError(0, "CONNECTION", `cannot reach ORBIT runtime at ${this.server}: ${(e as Error).message}`);
     }
-    const text = await res.text();
     const parsed = text ? JSON.parse(text) : null;
-    if (res.status >= 400) {
+    if (status >= 400) {
       const err = parsed?.error ?? {};
-      throw new ApiError(res.status, err.code ?? "HTTP_ERROR", err.message ?? text);
+      throw new ApiError(status, err.code ?? "HTTP_ERROR", err.message ?? text);
     }
-    return { status: res.status, body: parsed as T };
+    return { status, body: parsed as T };
   }
 
   /** Start a workflow execution and return its id. */

@@ -2,13 +2,14 @@
 //! protocol (§8). See `protocol/README.md` for the wire format.
 
 use crate::engine::{Engine, EngineError, RegisterWorker, TaskAssignment};
+use crate::identity::{Identities, WorkerIdentity};
 use crate::model::TaskError;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -24,6 +25,8 @@ pub struct AppState {
     pub auth_token: Option<String>,
     /// Optional credential restricted to the worker protocol.
     pub worker_token: Option<String>,
+    /// Per-worker identities (`--workers-file`).
+    pub identities: Identities,
 }
 
 pub type Shared = Arc<AppState>;
@@ -87,49 +90,139 @@ fn is_worker_path(path: &str) -> bool {
     path.starts_with("/v1/workers/") || path.starts_with("/v1/tasks/")
 }
 
-/// Authentication. With an admin token configured, every endpoint except
-/// `/v1/health` requires a bearer token. The admin token can call anything;
-/// the optional worker token can only call the worker protocol endpoints, so
-/// a compromised worker host cannot start, cancel or read executions.
-async fn auth(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    let path = req.uri().path();
-    if let Some(admin) = &state.auth_token {
-        if path != "/v1/health" {
-            let presented = req
-                .headers()
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .map(str::as_bytes);
-            let is_admin = presented.is_some_and(|t| constant_time_eq(t, admin.as_bytes()));
-            let is_worker = presented.is_some_and(|t| {
-                state
+/// Who is calling, as established by [`auth`].
+#[derive(Clone)]
+pub enum Caller {
+    /// No authentication is configured (loopback development).
+    Open,
+    Admin,
+    /// The shared, restricted worker token (`--worker-token`).
+    SharedWorker,
+    /// A worker from the workers file, by token or client certificate.
+    Worker(Arc<WorkerIdentity>),
+}
+
+impl Caller {
+    fn identity(&self) -> Option<&WorkerIdentity> {
+        match self {
+            Caller::Worker(w) => Some(w),
+            _ => None,
+        }
+    }
+}
+
+fn forbidden(msg: impl Into<String>) -> ApiError {
+    ApiError(EngineError::new(403, "FORBIDDEN", msg))
+}
+
+/// Authentication.
+///
+/// When any credential is configured, every endpoint except `/v1/health`
+/// requires one. The admin token can call anything. Worker credentials (the
+/// shared `--worker-token`, a per-worker token from the workers file, or a
+/// client certificate under mutual TLS) can only call the worker protocol
+/// endpoints, so a compromised worker host cannot start, cancel or read
+/// executions. Per-worker identities are further limited by the handlers to
+/// their own id, tasks, sessions and task tokens.
+async fn auth(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let secured = state.auth_token.is_some() || !state.identities.is_empty();
+    let caller = if !secured {
+        Caller::Open
+    } else {
+        let bearer = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::to_string);
+        let cert = req
+            .extensions()
+            .get::<Arc<axum_server::tls::TlsInfo>>()
+            .and_then(|info| info.peer_certificates.first().cloned());
+        let by_token = |t: &str| state.identities.by_token(t).cloned();
+        match (bearer.as_deref(), cert) {
+            (Some(t), _)
+                if state
+                    .auth_token
+                    .as_ref()
+                    .is_some_and(|a| constant_time_eq(t.as_bytes(), a.as_bytes())) =>
+            {
+                Caller::Admin
+            }
+            (Some(t), _) if by_token(t).is_some() => Caller::Worker(Arc::new(by_token(t).unwrap())),
+            (Some(t), _)
+                if state
                     .worker_token
                     .as_ref()
-                    .is_some_and(|w| constant_time_eq(t, w.as_bytes()))
-            });
-            if !is_admin && !is_worker {
+                    .is_some_and(|w| constant_time_eq(t.as_bytes(), w.as_bytes())) =>
+            {
+                Caller::SharedWorker
+            }
+            (_, Some(der)) => {
+                match state.identities.by_certificate(&der) {
+                    Some(w) => Caller::Worker(Arc::new(w.clone())),
+                    None => return ApiError(EngineError::new(
+                        403,
+                        "FORBIDDEN",
+                        "the client certificate is valid but matches no worker in the workers file",
+                    ))
+                    .into_response(),
+                }
+            }
+            _ if path == "/v1/health" => Caller::Open,
+            _ => {
                 return ApiError(EngineError::new(
                     401,
                     "UNAUTHENTICATED",
-                    "missing or invalid bearer token",
+                    "missing or invalid credentials",
                 ))
-                .into_response();
-            }
-            if !is_admin && !is_worker_path(path) {
-                return ApiError(EngineError::new(
-                    403,
-                    "FORBIDDEN",
-                    "the worker credential may only call /v1/workers/* and /v1/tasks/*",
-                ))
-                .into_response();
+                .into_response()
             }
         }
+    };
+    if matches!(caller, Caller::SharedWorker | Caller::Worker(_))
+        && !is_worker_path(&path)
+        && path != "/v1/health"
+    {
+        return forbidden("worker credentials may only call /v1/workers/* and /v1/tasks/*")
+            .into_response();
     }
+    req.extensions_mut().insert(caller);
     let mut resp = next.run(req).await;
     resp.headers_mut()
         .insert("x-orbit-api-version", HeaderValue::from_static(API_VERSION));
     resp
+}
+
+/// A per-worker identity may only use sessions it opened.
+fn authorize_session(state: &Shared, caller: &Caller, session: &str) -> ApiResult<()> {
+    if let Some(id) = caller.identity() {
+        if let Some(owner) = engine(state).session_worker(session) {
+            if owner != id.id {
+                return Err(forbidden(format!(
+                    "session belongs to worker `{owner}`, not `{}`",
+                    id.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A per-worker identity may only report results for tokens issued to it.
+fn authorize_token(state: &Shared, caller: &Caller, token: &str) -> ApiResult<()> {
+    if let Some(id) = caller.identity() {
+        if let Some(owner) = engine(state).token_worker(token) {
+            if owner != id.id {
+                return Err(forbidden(format!(
+                    "task token was issued to worker `{owner}`, not `{}`",
+                    id.id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -335,8 +428,39 @@ async fn list_workers(State(state): State<Shared>) -> ApiResult<Json<Value>> {
 
 async fn register_worker(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<RegisterWorker>,
 ) -> ApiResult<Json<Value>> {
+    if let Some(id) = caller.identity() {
+        if req.worker_id != id.id {
+            return Err(forbidden(format!(
+                "this credential belongs to worker `{}`, not `{}`",
+                id.id, req.worker_id
+            )));
+        }
+        if let Some(rt) = &id.runtime {
+            if !rt.eq_ignore_ascii_case(&req.runtime) {
+                return Err(forbidden(format!(
+                    "worker `{}` must announce runtime `{rt}`",
+                    id.id
+                )));
+            }
+        }
+        let denied: Vec<&str> = req
+            .contracts
+            .iter()
+            .map(|c| c.task_name.as_str())
+            .filter(|t| !id.may_serve(t))
+            .collect();
+        if !denied.is_empty() {
+            return Err(forbidden(format!(
+                "worker `{}` may not serve: {} (allowed: {})",
+                id.id,
+                denied.join(", "),
+                id.tasks.join(", ")
+            )));
+        }
+    }
     Ok(Json(
         serde_json::to_value(engine(&state).register_worker(req)?).unwrap_or_default(),
     ))
@@ -351,8 +475,10 @@ struct SessionRequest {
 
 async fn heartbeat(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<SessionRequest>,
 ) -> ApiResult<Json<Value>> {
+    authorize_session(&state, &caller, &req.worker_session_id)?;
     Ok(Json(
         serde_json::to_value(engine(&state).heartbeat(&req.worker_session_id)?).unwrap_or_default(),
     ))
@@ -360,14 +486,21 @@ async fn heartbeat(
 
 async fn unregister(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<SessionRequest>,
 ) -> ApiResult<Json<Value>> {
+    authorize_session(&state, &caller, &req.worker_session_id)?;
     engine(&state).unregister_worker(&req.worker_session_id)?;
     Ok(Json(json!({ "accepted": true })))
 }
 
 /// Long-poll for a task. Returns 204 when nothing arrived within `wait_ms`.
-async fn poll(State(state): State<Shared>, Json(req): Json<SessionRequest>) -> ApiResult<Response> {
+async fn poll(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    Json(req): Json<SessionRequest>,
+) -> ApiResult<Response> {
+    authorize_session(&state, &caller, &req.worker_session_id)?;
     let wait = Duration::from_millis(req.wait_ms.unwrap_or(20_000).min(60_000));
     let deadline = tokio::time::Instant::now() + wait;
     loop {
@@ -394,11 +527,13 @@ struct CompleteRequest {
 
 async fn complete_task(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<CompleteRequest>,
 ) -> ApiResult<Json<Value>> {
     if req.token.is_empty() {
         return Err(bad_request("token is required"));
     }
+    authorize_token(&state, &caller, &req.token)?;
     Ok(Json(
         serde_json::to_value(engine(&state).complete(&req.token, req.output)?).unwrap_or_default(),
     ))
@@ -422,11 +557,13 @@ fn default_true() -> bool {
 
 async fn fail_task(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<FailRequest>,
 ) -> ApiResult<Json<Value>> {
     if req.error_code.is_empty() {
         return Err(bad_request("error_code is required"));
     }
+    authorize_token(&state, &caller, &req.token)?;
     let error = TaskError {
         code: req.error_code,
         message: req.error_message,
@@ -478,12 +615,76 @@ pub async fn run_ticker(state: Shared, interval: Duration) {
 pub struct TlsConfig {
     pub cert: std::path::PathBuf,
     pub key: std::path::PathBuf,
+    /// Enables mutual TLS: client certificates signed by this CA are verified
+    /// and identify workers. Clients without a certificate can still connect
+    /// and authenticate with a token.
+    pub client_ca: Option<std::path::PathBuf>,
+}
+
+fn io_err(msg: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+}
+
+fn read_pem_certs(
+    path: &std::path::Path,
+) -> std::io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let pem =
+        std::fs::read(path).map_err(|e| io_err(format!("cannot read {}: {e}", path.display())))?;
+    let certs = rustls_pemfile::certs(&mut pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| io_err(format!("{}: {e}", path.display())))?;
+    if certs.is_empty() {
+        return Err(io_err(format!(
+            "{} contains no certificates",
+            path.display()
+        )));
+    }
+    Ok(certs)
+}
+
+/// Build the rustls server configuration (with client verification for mTLS).
+fn rustls_config(tls: &TlsConfig) -> std::io::Result<rustls::ServerConfig> {
+    let chain = read_pem_certs(&tls.cert)?;
+    let key_pem = std::fs::read(&tls.key)
+        .map_err(|e| io_err(format!("cannot read {}: {e}", tls.key.display())))?;
+    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+        .map_err(|e| io_err(format!("{}: {e}", tls.key.display())))?
+        .ok_or_else(|| io_err(format!("{} contains no private key", tls.key.display())))?;
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| io_err(e.to_string()))?;
+    let builder = match &tls.client_ca {
+        Some(ca) => {
+            let mut roots = rustls::RootCertStore::empty();
+            for c in read_pem_certs(ca)? {
+                roots
+                    .add(c)
+                    .map_err(|e| io_err(format!("{}: {e}", ca.display())))?;
+            }
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(roots),
+                provider,
+            )
+            .allow_unauthenticated()
+            .build()
+            .map_err(|e| io_err(format!("client CA: {e}")))?;
+            builder.with_client_cert_verifier(verifier)
+        }
+        None => builder.with_no_client_auth(),
+    };
+    let mut config = builder
+        .with_single_cert(chain, key)
+        .map_err(|e| io_err(format!("TLS certificate/key: {e}")))?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 pub struct ServerConfig {
     pub addr: SocketAddr,
     pub auth_token: Option<String>,
     pub worker_token: Option<String>,
+    pub identities: Identities,
     pub tls: Option<TlsConfig>,
     pub body_limit: usize,
     pub tick_interval: Duration,
@@ -500,6 +701,7 @@ pub async fn serve(
         changed,
         auth_token: config.auth_token,
         worker_token: config.worker_token,
+        identities: config.identities,
     });
     let app = router(state.clone(), config.body_limit);
     let ticker = tokio::spawn(run_ticker(state, config.tick_interval));
@@ -515,18 +717,15 @@ pub async fn serve(
             // Several rustls crypto backends are compiled in (via different
             // dependencies); pick one explicitly so the choice is not ambiguous.
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-            let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
-                .await
-                .map_err(|e| {
-                    std::io::Error::new(e.kind(), format!("loading TLS certificate/key: {e}"))
-                })?;
+            let rustls =
+                axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls_config(&tls)?));
             let handle = axum_server::Handle::new();
             let h = handle.clone();
             tokio::spawn(async move {
                 shutdown.await;
                 h.graceful_shutdown(Some(Duration::from_secs(10)));
             });
-            tracing::info!(addr = %config.addr, tls = true, "ORBIT runtime listening");
+            tracing::info!(addr = %config.addr, tls = true, mtls = tls.client_ca.is_some(), "ORBIT runtime listening");
             axum_server::bind_rustls(config.addr, rustls)
                 .handle(handle)
                 .serve(app.into_make_service())

@@ -181,6 +181,8 @@ pub struct Engine {
     by_hash: HashMap<String, Arc<WorkflowIr>>,
     active: BTreeMap<String, ExecutionState>,
     tokens: HashMap<String, (String, String)>,
+    /// Which worker each task token was issued to (for per-worker authorization).
+    token_workers: HashMap<String, String>,
     sessions: HashMap<String, Session>,
     /// Built-in tasks dispatched to the runtime itself, waiting to be run.
     builtin_jobs: Vec<TaskAssignment>,
@@ -210,6 +212,7 @@ impl Engine {
             by_hash: HashMap::new(),
             active: BTreeMap::new(),
             tokens: HashMap::new(),
+            token_workers: HashMap::new(),
             sessions: HashMap::new(),
             builtin_jobs: vec![],
             metrics: Metrics::default(),
@@ -247,6 +250,14 @@ impl Engine {
         let mut in_flight = 0;
         for id in &ids {
             let history = self.store.history(id).map_err(EngineError::storage)?;
+            for h in &history {
+                if let Event::StepDispatched {
+                    token, worker_id, ..
+                } = &h.event
+                {
+                    self.token_workers.insert(token.clone(), worker_id.clone());
+                }
+            }
             let state = ExecutionState::replay(id, &history);
             for (key, u) in &state.units {
                 for (t, _) in &u.tokens {
@@ -523,9 +534,16 @@ impl Engine {
             .map_err(EngineError::storage)?;
         for h in &history {
             self.metrics.observe(&h.event);
-            if let Event::StepDispatched { token, step, .. } = &h.event {
+            if let Event::StepDispatched {
+                token,
+                step,
+                worker_id,
+                ..
+            } = &h.event
+            {
                 self.tokens
                     .insert(token.clone(), (id.to_string(), step.clone()));
+                self.token_workers.insert(token.clone(), worker_id.clone());
             }
             tracing::debug!(execution_id = %id, seq = h.seq, event = h.event.name(), step = h.event.step().unwrap_or(""), "event");
             match &h.event {
@@ -562,6 +580,7 @@ impl Engine {
             for u in state.units.values() {
                 for (t, _) in &u.tokens {
                     self.tokens.remove(t);
+                    self.token_workers.remove(t);
                 }
             }
             self.active.remove(id);
@@ -1287,6 +1306,16 @@ impl Engine {
 
     pub fn store_stats(&self) -> Result<Vec<(String, u64)>> {
         self.store.count_by_status().map_err(EngineError::storage)
+    }
+
+    /// The worker id that owns a session, if the session exists.
+    pub fn session_worker(&self, session_id: &str) -> Option<&str> {
+        self.sessions.get(session_id).map(|s| s.worker_id.as_str())
+    }
+
+    /// The worker id a task token was issued to, if the token is known.
+    pub fn token_worker(&self, token: &str) -> Option<&str> {
+        self.token_workers.get(token).map(String::as_str)
     }
 
     pub fn session_count(&self) -> usize {
