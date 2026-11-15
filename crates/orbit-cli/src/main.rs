@@ -782,6 +782,8 @@ fn server(mut args: ServerArgs) -> Res {
                 worker_token: args.worker_token,
                 identities,
                 grpc_addr: args.grpc_addr,
+                listener: None,
+                grpc_listener: None,
                 tls: args.tls_cert.zip(args.tls_key).map(|(cert, key)| {
                     orbit_runtime::server::TlsConfig {
                         cert,

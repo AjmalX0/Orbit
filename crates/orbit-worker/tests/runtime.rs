@@ -23,11 +23,9 @@ workflow Math {
 "#;
 
 fn start_runtime() -> String {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Keep the bound listener so the port cannot be taken before the server starts.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let addr = format!("127.0.0.1:{port}").parse().unwrap();
     std::thread::spawn(move || {
         let engine = Engine::open(
@@ -45,6 +43,8 @@ fn start_runtime() -> String {
                     worker_token: Some("worker".into()),
                     identities: Default::default(),
                     grpc_addr: None,
+                    listener: Some(listener),
+                    grpc_listener: None,
                     tls: None,
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(20),

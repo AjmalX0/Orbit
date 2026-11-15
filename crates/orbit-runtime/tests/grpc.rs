@@ -25,17 +25,17 @@ workflow Calc {
 }
 "#;
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Bind an ephemeral port and keep the listener, so no other test can take
+/// the port between choosing it and the server starting.
+fn listen() -> (std::net::TcpListener, u16) {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    (l, port)
 }
 
 /// Start a server with HTTP + gRPC; returns (http url, grpc url, execution ids).
 fn start() -> (String, String, Vec<String>) {
-    let (http, grpc) = (free_port(), free_port());
+    let ((http_l, http), (grpc_l, grpc)) = (listen(), listen());
     let c = orbit_compiler::compile_str("calc.orbit", SRC);
     assert!(!c.has_errors(), "{}", c.render_diagnostics(false));
     let mut engine = Engine::open(
@@ -69,7 +69,9 @@ fn start() -> (String, String, Vec<String>) {
                     worker_token: Some("shared-worker".into()),
                     identities,
                     tls: None,
-                    grpc_addr: Some(format!("127.0.0.1:{grpc}").parse().unwrap()),
+                    grpc_addr: None,
+                    listener: Some(http_l),
+                    grpc_listener: Some(grpc_l),
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(20),
                 };
@@ -422,11 +424,14 @@ fn pki(client: &str) -> Option<std::path::PathBuf> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn grpc_over_mutual_tls() {
+    // Two rustls crypto backends are compiled into this binary; a TLS client
+    // must choose one explicitly (the server does the same in `serve`).
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let Some(dir) = pki("calc-mtls") else {
         eprintln!("skipping: openssl not available");
         return;
     };
-    let grpc = free_port();
+    let ((http_l, _), (grpc_l, grpc)) = (listen(), listen());
     let identities = Identities::parse(
         "[[worker]]\nid = \"calc-mtls\"\nclient_cert = \"calc-mtls\"\ntasks = [\"calc.*\"]\n",
     )
@@ -447,12 +452,14 @@ async fn grpc_over_mutual_tls() {
                 )
                 .unwrap();
                 let cfg = ServerConfig {
-                    addr: format!("127.0.0.1:{}", free_port()).parse().unwrap(),
+                    addr: "127.0.0.1:0".parse().unwrap(),
                     auth_token: Some("admin".into()),
                     worker_token: None,
                     identities,
                     tls: Some(tls),
-                    grpc_addr: Some(format!("127.0.0.1:{grpc}").parse().unwrap()),
+                    grpc_addr: None,
+                    listener: Some(http_l),
+                    grpc_listener: Some(grpc_l),
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(20),
                 };
