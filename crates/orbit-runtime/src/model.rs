@@ -46,6 +46,7 @@ pub mod codes {
     pub const ADAPTER_DISABLED: &str = "ADAPTER_DISABLED";
     pub const HTTP_ERROR: &str = "HTTP_ERROR";
     pub const SIGNAL_TIMEOUT: &str = "SIGNAL_TIMEOUT";
+    pub const LIMIT_EXCEEDED: &str = "LIMIT_EXCEEDED";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,6 +170,12 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deadline_ms: Option<u64>,
     },
+    /// A server resource limit was reached; the execution is failed with
+    /// `LIMIT_EXCEEDED` (compensation and `on failure` still run).
+    LimitExceeded {
+        limit: String,
+        message: String,
+    },
     /// Compensation (if any) is done and the `on <kind>` handler steps start.
     /// `compensation` is the outcome recorded on the terminal event afterwards.
     HandlersStarted {
@@ -212,6 +219,7 @@ impl Event {
             Event::WorkflowTimedOut { .. } => "WorkflowTimedOut",
             Event::SignalReceived { .. } => "SignalReceived",
             Event::HandlersStarted { .. } => "HandlersStarted",
+            Event::LimitExceeded { .. } => "LimitExceeded",
             Event::SignalAwaitStarted { .. } => "SignalAwaitStarted",
             Event::SignalDelivered { .. } => "SignalDelivered",
         }
@@ -725,6 +733,13 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             s.status = WorkflowStatus::TimedOut;
             s.compensation = Some(*compensation);
             s.finished_at_ms = Some(ts);
+        }
+        Event::LimitExceeded { message, .. } => {
+            if s.abort.is_none() {
+                s.abort = Some(AbortReason::Failed {
+                    error: TaskError::new(codes::LIMIT_EXCEEDED, message.clone(), false),
+                });
+            }
         }
         Event::HandlersStarted { kind, compensation } => {
             s.handlers = Some(HandlerPhase {

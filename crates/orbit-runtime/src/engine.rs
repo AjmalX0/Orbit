@@ -32,6 +32,24 @@ pub struct EngineConfig {
     pub heartbeat_interval_ms: u64,
     /// Execute `orbit.http.request` steps inside the runtime.
     pub http_adapter: bool,
+    /// Resource limits (all optional; `None` means unlimited).
+    pub limits: Limits,
+}
+
+/// Server-wide resource limits.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Limits {
+    /// Running executions at once; further starts get 429 `RESOURCE_EXHAUSTED`.
+    pub max_active_executions: Option<usize>,
+    /// Elements one `for` step may fan out to; larger lists fail the step with
+    /// `LIMIT_EXCEEDED`.
+    pub max_fan_out: Option<usize>,
+    /// History events per execution; past it the execution is failed with
+    /// `LIMIT_EXCEEDED` (compensation and handlers still run).
+    pub max_history_events: Option<u64>,
+    /// Serialized size of an execution input, a task result or a signal
+    /// payload; larger ones get 413 `PAYLOAD_TOO_LARGE`.
+    pub max_payload_bytes: Option<usize>,
 }
 
 impl Default for EngineConfig {
@@ -40,6 +58,7 @@ impl Default for EngineConfig {
             session_timeout_ms: 30_000,
             heartbeat_interval_ms: 5_000,
             http_adapter: false,
+            limits: Limits::default(),
         }
     }
 }
@@ -388,6 +407,7 @@ impl Engine {
             input = json!({});
         }
         def.input.apply_defaults(&mut input);
+        self.check_payload("execution input", &input)?;
         def.input.validate(&input, parent.is_none()).map_err(|e| {
             EngineError::new(
                 400,
@@ -433,6 +453,17 @@ impl Engine {
             }
             None => uuid::Uuid::new_v4().to_string(),
         };
+        if parent.is_none() {
+            if let Some(max) = self.config.limits.max_active_executions {
+                if self.active.len() >= max {
+                    return Err(EngineError::new(
+                        429,
+                        "RESOURCE_EXHAUSTED",
+                        format!("{max} executions are already running (--max-active-executions)"),
+                    ));
+                }
+            }
+        }
         self.active.insert(id.clone(), ExecutionState::new(&id));
         let created = Event::WorkflowCreated {
             workflow: def.name.clone(),
@@ -509,6 +540,7 @@ impl Engine {
                 },
             ));
         };
+        self.check_payload("signal payload", &payload)?;
         ty.apply_defaults(&mut payload);
         if let Err(e) = ty.validate(&payload, false) {
             return Err(EngineError::new(
@@ -576,6 +608,21 @@ impl Engine {
                 format!("evaluating query `{name}`: {e}"),
             )
         })
+    }
+
+    /// Reject a payload larger than `--max-payload-bytes`.
+    fn check_payload(&self, what: &str, value: &Value) -> Result<()> {
+        if let Some(max) = self.config.limits.max_payload_bytes {
+            let size = serde_json::to_vec(value).map(|v| v.len()).unwrap_or(0);
+            if size > max {
+                return Err(EngineError::new(
+                    413,
+                    "PAYLOAD_TOO_LARGE",
+                    format!("{what} is {size} bytes; the limit is {max} (--max-payload-bytes)"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn execution(&self, id: &str) -> Result<ExecutionState> {
@@ -714,11 +761,13 @@ impl Engine {
         let now = self.now();
         let mut scratch = state.clone();
         let mut batch = vec![];
+        let limits = self.config.limits.clone();
         for _ in 0..10_000 {
-            let events = decide(&scratch, &def, now);
+            let mut events = decide(&scratch, &def, now);
             if events.is_empty() {
                 break;
             }
+            enforce_limits(&limits, &scratch, &mut events);
             for e in events {
                 let seq = scratch.last_seq + 1;
                 apply(
@@ -1295,6 +1344,7 @@ impl Engine {
         if output.is_null() {
             output = json!({});
         }
+        self.check_payload("task result", &output)?;
         let inv = invocation(&def, &key).cloned();
         let validation = inv
             .as_ref()
@@ -1465,5 +1515,42 @@ impl Engine {
 
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+}
+
+/// Apply fan-out and history limits to the decider's next events (the decider
+/// itself stays a pure function of the history and the definition).
+fn enforce_limits(limits: &Limits, state: &ExecutionState, events: &mut Vec<Event>) {
+    if let Some(max) = limits.max_fan_out {
+        for e in events.iter_mut() {
+            if let Event::StepFanOut { step, items } = e {
+                if items.len() > max {
+                    *e = Event::StepFailed {
+                        step: step.clone(),
+                        error: TaskError::new(
+                            "LIMIT_EXCEEDED",
+                            format!(
+                                "`for` over {} elements exceeds the fan-out limit of {max} (--max-fan-out)",
+                                items.len()
+                            ),
+                            false,
+                        ),
+                    };
+                }
+            }
+        }
+    }
+    if let Some(max) = limits.max_history_events {
+        let would_be = state.last_seq + events.len() as u64;
+        if state.abort.is_none() && would_be > max && !state.status.is_terminal() {
+            // Stop scheduling new work; compensation and handlers still run.
+            events.clear();
+            events.push(Event::LimitExceeded {
+                limit: "max_history_events".into(),
+                message: format!(
+                    "the execution reached {max} history events (--max-history-events)"
+                ),
+            });
+        }
     }
 }

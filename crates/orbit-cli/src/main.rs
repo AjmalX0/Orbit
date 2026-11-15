@@ -316,6 +316,18 @@ struct ServerArgs {
     /// Execute `orbit.http.request` steps inside the runtime.
     #[arg(long)]
     enable_http_adapter: bool,
+    /// Maximum running executions; further starts get 429 RESOURCE_EXHAUSTED.
+    #[arg(long, env = "ORBIT_MAX_ACTIVE_EXECUTIONS")]
+    max_active_executions: Option<usize>,
+    /// Maximum elements one `for` step may fan out to (larger lists fail the step with LIMIT_EXCEEDED).
+    #[arg(long, env = "ORBIT_MAX_FAN_OUT")]
+    max_fan_out: Option<usize>,
+    /// Maximum history events per execution (past it the execution fails with LIMIT_EXCEEDED).
+    #[arg(long, env = "ORBIT_MAX_HISTORY_EVENTS")]
+    max_history_events: Option<u64>,
+    /// Maximum size in bytes of an execution input, task result or signal payload (413 PAYLOAD_TOO_LARGE).
+    #[arg(long, env = "ORBIT_MAX_PAYLOAD_BYTES")]
+    max_payload_bytes: Option<usize>,
     /// Seconds without contact after which a worker is considered lost.
     #[arg(long, default_value_t = 30)]
     session_timeout: u64,
@@ -916,6 +928,12 @@ fn server(mut args: ServerArgs) -> Res {
         session_timeout_ms: args.session_timeout.max(1) * 1000,
         heartbeat_interval_ms: (args.session_timeout.max(1) * 1000 / 6).max(500),
         http_adapter: args.enable_http_adapter,
+        limits: orbit_runtime::engine::Limits {
+            max_active_executions: args.max_active_executions,
+            max_fan_out: args.max_fan_out,
+            max_history_events: args.max_history_events,
+            max_payload_bytes: args.max_payload_bytes,
+        },
     };
     let store_backend = store.backend();
     let engine = orbit_runtime::Engine::open(store, config, orbit_runtime::engine::system_clock())

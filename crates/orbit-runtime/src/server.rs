@@ -102,6 +102,9 @@ pub enum Caller {
     SharedWorker,
     /// A worker from the workers file, by token or client certificate.
     Worker(Arc<WorkerIdentity>),
+    /// An application from the workers file (`[[client]]`): the execution
+    /// API for the workflows and actions it was granted.
+    Client(Arc<crate::identity::ClientIdentity>),
 }
 
 impl Caller {
@@ -115,6 +118,28 @@ impl Caller {
 
 fn forbidden(msg: impl Into<String>) -> ApiError {
     ApiError(EngineError::new(403, "FORBIDDEN", msg))
+}
+
+/// A client identity may only act on the workflows and actions it was granted.
+fn allow(caller: &Caller, action: &str, workflow: &str) -> ApiResult<()> {
+    if let Caller::Client(c) = caller {
+        if !c.allows(action, workflow) {
+            return Err(forbidden(format!(
+                "client `{}` may not {action} executions of `{workflow}`",
+                c.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `allow` for an existing execution, looked up by id.
+fn allow_execution(state: &Shared, caller: &Caller, action: &str, id: &str) -> ApiResult<()> {
+    if matches!(caller, Caller::Client(_)) {
+        let workflow = engine(state).execution(id)?.workflow;
+        allow(caller, action, &workflow)?;
+    }
+    Ok(())
 }
 
 /// Authentication.
@@ -149,6 +174,9 @@ pub(crate) fn identify(
         if let Some(w) = state.identities.by_token(t) {
             return Ok(Some(Caller::Worker(Arc::new(w.clone()))));
         }
+        if let Some(c) = state.identities.client_by_token(t) {
+            return Ok(Some(Caller::Client(Arc::new(c.clone()))));
+        }
         if state
             .worker_token
             .as_ref()
@@ -158,10 +186,13 @@ pub(crate) fn identify(
         }
     }
     if let Some(der) = cert_der {
-        return match state.identities.by_certificate(der) {
-            Some(w) => Ok(Some(Caller::Worker(Arc::new(w.clone())))),
+        if let Some(w) = state.identities.by_certificate(der) {
+            return Ok(Some(Caller::Worker(Arc::new(w.clone()))));
+        }
+        return match state.identities.client_by_certificate(der) {
+            Some(c) => Ok(Some(Caller::Client(Arc::new(c.clone())))),
             None => Err(forbidden(
-                "the client certificate is valid but matches no worker in the workers file",
+                "the client certificate is valid but matches no worker or client in the workers file",
             )),
         };
     }
@@ -199,6 +230,18 @@ async fn auth(State(state): State<Shared>, mut req: Request, next: Next) -> Resp
     {
         return forbidden("worker credentials may only call /v1/workers/* and /v1/tasks/*")
             .into_response();
+    }
+    if let Caller::Client(c) = &caller {
+        let admin_only = (path == "/v1/workflows" && req.method() == axum::http::Method::POST)
+            || path.starts_with("/v1/workers")
+            || path == "/v1/metrics";
+        if is_worker_path(&path) || admin_only {
+            return forbidden(format!(
+                "client `{}` may only use the execution API (start, signal, query, read, cancel)",
+                c.id
+            ))
+            .into_response();
+        }
     }
     req.extensions_mut().insert(caller);
     let mut resp = next.run(req).await;
@@ -292,15 +335,26 @@ fn summary(d: &orbit_ir::WorkflowIr) -> Value {
     })
 }
 
-async fn list_workflows(State(state): State<Shared>) -> Json<Value> {
+async fn list_workflows(
+    State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
+) -> Json<Value> {
     let defs = engine(&state).definitions();
-    Json(json!({ "workflows": defs.iter().map(|d| summary(d)).collect::<Vec<_>>() }))
+    let visible = |name: &str| match &caller {
+        Caller::Client(c) => c.can_read(name),
+        _ => true,
+    };
+    Json(
+        json!({ "workflows": defs.iter().filter(|d| visible(&d.name)).map(|d| summary(d)).collect::<Vec<_>>() }),
+    )
 }
 
 async fn get_workflow(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path((name, version)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
+    allow(&caller, "read", &name)?;
     let d = engine(&state)
         .definition(&name, Some(&version))
         .ok_or_else(|| {
@@ -315,8 +369,10 @@ async fn get_workflow(
 
 async fn get_workflow_latest(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    allow(&caller, "read", &name)?;
     let d = engine(&state).definition(&name, None).ok_or_else(|| {
         ApiError(EngineError::new(
             404,
@@ -340,8 +396,10 @@ struct StartRequest {
 
 async fn start_execution(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<StartRequest>,
 ) -> ApiResult<Response> {
+    allow(&caller, "start", &req.workflow)?;
     let r = engine(&state).start(
         &req.workflow,
         req.version.as_deref(),
@@ -365,28 +423,36 @@ struct ListQuery {
 
 async fn list_executions(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let list = engine(&state).list_executions(
+    let mut list = engine(&state).list_executions(
         q.status.as_deref().map(str::to_uppercase).as_deref(),
         q.workflow.as_deref(),
         q.limit.unwrap_or(50),
     )?;
+    if let Caller::Client(c) = &caller {
+        list.retain(|e| c.can_read(&e.workflow));
+    }
     Ok(Json(json!({ "executions": list })))
 }
 
 async fn get_execution(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    allow_execution(&state, &caller, "read", &id)?;
     let s = engine(&state).execution(&id)?;
     Ok(Json(serde_json::to_value(s).unwrap_or_default()))
 }
 
 async fn get_history(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    allow_execution(&state, &caller, "read", &id)?;
     let h = engine(&state).history(&id)?;
     Ok(Json(json!({ "execution_id": id, "events": h })))
 }
@@ -399,9 +465,11 @@ struct CancelRequest {
 
 async fn cancel_execution(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
     body: Option<Json<CancelRequest>>,
 ) -> ApiResult<Json<Value>> {
+    allow_execution(&state, &caller, "cancel", &id)?;
     let reason = body
         .and_then(|b| b.0.reason)
         .unwrap_or_else(|| "requested via API".into());
@@ -413,9 +481,11 @@ async fn cancel_execution(
 /// (an empty body sends `{}`).
 async fn send_signal(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path((id, name)): Path<(String, String)>,
     body: Option<Json<Value>>,
 ) -> ApiResult<Json<Value>> {
+    allow_execution(&state, &caller, "signal", &id)?;
     let payload = body.map(|b| b.0).unwrap_or_else(|| json!({}));
     let seq = engine(&state).signal(&id, &name, payload)?;
     Ok(Json(json!({
@@ -429,8 +499,10 @@ async fn send_signal(
 /// `GET /v1/executions/{id}/queries/{name}`: evaluate a declared query.
 async fn run_query(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path((id, name)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
+    allow_execution(&state, &caller, "query", &id)?;
     let value = engine(&state).query(&id, &name)?;
     Ok(Json(
         json!({ "execution_id": id, "query": name, "value": value }),
@@ -445,9 +517,11 @@ struct WaitQuery {
 /// Long-poll until the execution reaches a terminal status (or the timeout).
 async fn wait_execution(
     State(state): State<Shared>,
+    Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
     Query(q): Query<WaitQuery>,
 ) -> ApiResult<Json<Value>> {
+    allow_execution(&state, &caller, "read", &id)?;
     let deadline = tokio::time::Instant::now()
         + Duration::from_millis(q.timeout_ms.unwrap_or(30_000).min(300_000));
     loop {

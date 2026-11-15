@@ -110,6 +110,12 @@ impl GrpcWorkers {
             .and_then(|c| c.first())
             .map(|c| c.as_ref().to_vec());
         match identify(&self.state, bearer, der.as_deref()).map_err(api)? {
+            // The gRPC binding is the worker protocol: applications use HTTP.
+            Some(Caller::Client(c)) => Err(status(EngineError::new(
+                403,
+                "FORBIDDEN",
+                format!("client `{}` may not use the worker protocol", c.id),
+            ))),
             Some(c) => Ok(c),
             None => Err(Status::unauthenticated(
                 "UNAUTHENTICATED: missing or invalid credentials",

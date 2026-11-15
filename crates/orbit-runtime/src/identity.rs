@@ -55,16 +55,65 @@ pub fn pattern_matches(pattern: &str, task: &str) -> bool {
     }
 }
 
+/// Actions a client identity can be granted.
+pub const CLIENT_ACTIONS: &[&str] = &["start", "signal", "query", "read", "cancel"];
+
+fn default_client_actions() -> Vec<String> {
+    ["start", "signal", "query", "read"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// An application allowed to use the execution API for some workflows only
+/// (`[[client]]` in the workers file).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientIdentity {
+    pub id: String,
+    #[serde(default)]
+    pub token_sha256: Option<String>,
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    /// Workflow name patterns: exact names, `Prefix*`, or `*`.
+    pub workflows: Vec<String>,
+    /// Granted actions; defaults to start, signal, query and read.
+    #[serde(default = "default_client_actions")]
+    pub actions: Vec<String>,
+}
+
+impl ClientIdentity {
+    pub fn allows(&self, action: &str, workflow: &str) -> bool {
+        self.actions.iter().any(|a| a == action) && self.workflows.iter().any(|p| glob(p, workflow))
+    }
+
+    /// May this client see anything about the workflow at all?
+    pub fn can_read(&self, workflow: &str) -> bool {
+        self.allows("read", workflow)
+    }
+}
+
+/// `*` matches anything; `Prefix*` a prefix; otherwise an exact name.
+fn glob(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkersFile {
     #[serde(default, rename = "worker")]
     pub workers: Vec<WorkerIdentity>,
+    #[serde(default, rename = "client")]
+    pub clients: Vec<ClientIdentity>,
 }
 
 #[derive(Debug, Default)]
 pub struct Identities {
     workers: Vec<WorkerIdentity>,
+    clients: Vec<ClientIdentity>,
 }
 
 pub fn sha256_hex(s: &str) -> String {
@@ -116,13 +165,73 @@ impl Identities {
                 ));
             }
         }
+        for c in &file.clients {
+            if c.id.trim().is_empty() {
+                return Err("a client has an empty `id`".into());
+            }
+            if !seen.insert(c.id.clone()) {
+                return Err(format!("identity `{}` is declared twice", c.id));
+            }
+            if c.token_sha256.is_none() && c.client_cert.is_none() {
+                return Err(format!(
+                    "client `{}` needs `token_sha256` or `client_cert`",
+                    c.id
+                ));
+            }
+            if let Some(h) = &c.token_sha256 {
+                if h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "client `{}`: `token_sha256` must be 64 hex characters (use `orbit token`)",
+                        c.id
+                    ));
+                }
+            }
+            if c.workflows.is_empty() {
+                return Err(format!(
+                    "client `{}` must list at least one workflow pattern",
+                    c.id
+                ));
+            }
+            if let Some(bad) = c
+                .actions
+                .iter()
+                .find(|a| !CLIENT_ACTIONS.contains(&a.as_str()))
+            {
+                return Err(format!(
+                    "client `{}`: unknown action `{bad}` (allowed: {})",
+                    c.id,
+                    CLIENT_ACTIONS.join(", ")
+                ));
+            }
+        }
         Ok(Identities {
             workers: file.workers,
+            clients: file.clients,
         })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.workers.is_empty()
+        self.workers.is_empty() && self.clients.is_empty()
+    }
+
+    /// The client whose token hashes to `token`'s hash.
+    pub fn client_by_token(&self, token: &str) -> Option<&ClientIdentity> {
+        let h = sha256_hex(token);
+        self.clients.iter().find(|c| {
+            c.token_sha256
+                .as_ref()
+                .is_some_and(|t| constant_time_eq(t.to_ascii_lowercase().as_bytes(), h.as_bytes()))
+        })
+    }
+
+    /// The client identified by a verified DER client certificate.
+    pub fn client_by_certificate(&self, der: &[u8]) -> Option<&ClientIdentity> {
+        let names = certificate_names(der);
+        self.clients.iter().find(|c| {
+            c.client_cert
+                .as_ref()
+                .is_some_and(|n| names.iter().any(|x| x.eq_ignore_ascii_case(n)))
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -208,5 +317,46 @@ mod tests {
             "[[worker]]\nid = \"x\"\nclient_cert = \"a\"\ntasks = [\"*\"]\nbogus = 1"
         )
         .is_err());
+    }
+
+    #[test]
+    fn client_identities_grant_workflows_and_actions() {
+        let h = sha256_hex("app-token");
+        let ids = Identities::parse(&format!(
+            r#"
+            [[client]]
+            id = "billing"
+            token_sha256 = "{h}"
+            workflows = ["Invoice*", "Refund"]
+            [[client]]
+            id = "ops"
+            client_cert = "ops.internal"
+            workflows = ["*"]
+            actions = ["read", "cancel"]
+            "#
+        ))
+        .unwrap();
+        assert!(!ids.is_empty());
+        let billing = ids.client_by_token("app-token").unwrap();
+        assert!(billing.allows("start", "InvoiceMonthly") && billing.allows("signal", "Refund"));
+        assert!(
+            !billing.allows("cancel", "Refund"),
+            "cancel is not a default action"
+        );
+        assert!(!billing.allows("start", "Payroll"));
+        assert!(
+            ids.by_token("app-token").is_none(),
+            "a client is not a worker"
+        );
+        let bad_action = "[[client]]\nid = \"x\"\nclient_cert = \"a\"\nworkflows = [\"*\"]\nactions = [\"deploy\"]";
+        assert!(Identities::parse(bad_action)
+            .unwrap_err()
+            .contains("unknown action"));
+        let dup = format!(
+            "[[worker]]\nid = \"x\"\nclient_cert = \"a\"\ntasks = [\"*\"]\n[[client]]\nid = \"x\"\nclient_cert = \"b\"\nworkflows = [\"*\"]"
+        );
+        assert!(Identities::parse(&dup)
+            .unwrap_err()
+            .contains("declared twice"));
     }
 }

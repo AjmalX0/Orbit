@@ -399,6 +399,73 @@ class Security(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, "an untrusted certificate must be rejected")
 
 
+class ClientsAndLimits(unittest.TestCase):
+    """Client identities limited to some workflows and actions, and server limits."""
+
+    @classmethod
+    def setUpClass(cls):
+        import hashlib
+        d = tempfile.mkdtemp(prefix="orbit-clients-")
+        h = hashlib.sha256(b"billing-token").hexdigest()
+        workers = os.path.join(d, "workers.toml")
+        with open(workers, "w") as f:
+            f.write(f'[[client]]\nid = "billing"\ntoken_sha256 = "{h}"\nworkflows = ["OrderApproval"]\nactions = ["start", "signal", "query", "read"]\n')
+        cls.c = Cluster(server_args=["--token", "admin-secret", "--workers-file", workers,
+                                     "--max-active-executions", "2", "--max-payload-bytes", "4096"],
+                        admin_token="admin-secret")
+        cls.c.start_server()
+        cls.c.cli("deploy", os.path.join(ROOT, "examples", "approval.orbit"))
+        cls.c.cli("deploy", WORKFLOW)
+        cls.client = {"authorization": "Bearer billing-token"}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.c.stop()
+
+    def as_client(self, method, path, body=None):
+        req = urllib.request.Request(self.c.url + path, method=method,
+                                     data=None if body is None else json.dumps(body).encode(),
+                                     headers={"content-type": "application/json", **self.client})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+
+    def expect_status(self, code, *args):
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.as_client(*args)
+        self.assertEqual(e.exception.code, code, e.exception.read().decode())
+
+    def test_clients_are_limited_to_their_workflows_and_actions(self):
+        input = {"order_id": "C-1", "customer_id": "c", "amount": 5000.0}
+        ex = self.as_client("POST", "/v1/executions", {"workflow": "OrderApproval", "input": input})["execution_id"]
+        self.assertEqual(self.as_client("GET", f"/v1/executions/{ex}/queries/status")["value"]["needs_approval"], True)
+        self.as_client("POST", f"/v1/executions/{ex}/signals/review", {"approved": False, "reviewer": "kim"})
+        # Another workflow, an action not granted, admin and worker endpoints: all refused.
+        self.expect_status(403, "POST", "/v1/executions", {"workflow": "OrderProcessing", "input": order("C-2")})
+        self.expect_status(403, "POST", f"/v1/executions/{ex}/cancel", {})
+        self.expect_status(403, "GET", "/v1/workers")
+        self.expect_status(403, "POST", "/v1/workers/register", {"worker_id": "x", "runtime": "python", "contracts": []})
+        listed = {e["workflow"] for e in self.as_client("GET", "/v1/executions")["executions"]}
+        self.assertEqual(listed, {"OrderApproval"})
+
+    def test_limits(self):
+        self.expect_status(413, "POST", "/v1/executions", {"workflow": "OrderApproval",
+                           "input": {"order_id": "x" * 5000, "customer_id": "c", "amount": 1.0}})
+        # Large orders wait for approval, so they stay active: the third is refused.
+        started = []
+        for i in range(3):
+            try:
+                started.append(self.c.post("/v1/executions", {"workflow": "OrderApproval",
+                               "input": {"order_id": f"L-{i}", "customer_id": "c", "amount": 2000.0}})["execution_id"])
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 429)
+                self.assertIn("RESOURCE_EXHAUSTED", e.read().decode())
+                break
+        else:
+            self.fail("the active-execution limit was not enforced")
+        for ex in started:
+            self.c.post(f"/v1/executions/{ex}/cancel", {})
+
+
 class Identities(unittest.TestCase):
     """Per-worker identities: mutual TLS for real workers, a token identity for
     a rogue worker whose every overreach must be refused."""

@@ -1239,3 +1239,132 @@ fn handlers_read_steps_that_never_ran_as_null() {
         Some(json!({ "second_ran": false, "n": -1 }))
     );
 }
+
+// ---------------------------------------------------------------- limits
+
+fn limited(limits: orbit_runtime::engine::Limits) -> Harness {
+    let clock = Arc::new(AtomicU64::new(1_000_000));
+    let c = clock.clone();
+    let engine = Engine::open(
+        Store::in_memory().unwrap(),
+        EngineConfig {
+            limits,
+            ..EngineConfig::default()
+        },
+        Box::new(move || c.load(Ordering::SeqCst)),
+    )
+    .unwrap();
+    Harness {
+        engine,
+        clock,
+        db: None,
+    }
+}
+
+#[test]
+fn max_active_executions_rejects_new_starts_but_not_idempotent_ones() {
+    let mut h = limited(orbit_runtime::engine::Limits {
+        max_active_executions: Some(1),
+        ..Default::default()
+    });
+    let ir = compile(r#"workflow W { version "1.0.0" step s { worker "a" with { n: 1 } } }"#);
+    h.engine.register_definition(ir.clone()).unwrap();
+    h.engine
+        .start("W", None, json!({}), Some("one".into()))
+        .unwrap();
+    let e = h.engine.start("W", None, json!({}), None).unwrap_err();
+    assert_eq!((e.status, e.code), (429, "RESOURCE_EXHAUSTED"));
+    // Starting the same id again is still idempotent.
+    assert!(
+        !h.engine
+            .start("W", None, json!({}), Some("one".into()))
+            .unwrap()
+            .created
+    );
+}
+
+#[test]
+fn max_fan_out_fails_the_step() {
+    let mut h = limited(orbit_runtime::engine::Limits {
+        max_fan_out: Some(2),
+        ..Default::default()
+    });
+    let ir = compile(
+        r#"workflow W { version "1.0.0" input { l: List<Int> } step each { for x in input.l compute x } }"#,
+    );
+    let id = h.start(&ir, json!({ "l": [1, 2, 3] }));
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    assert_eq!(
+        s.units["each"].error.as_ref().unwrap().code,
+        "LIMIT_EXCEEDED"
+    );
+    let ok = h.start(&ir, json!({ "l": [1, 2] }));
+    assert_eq!(h.state(&ok).status, WorkflowStatus::Completed);
+}
+
+#[test]
+fn max_history_events_fails_the_execution_and_still_compensates() {
+    let mut h = limited(orbit_runtime::engine::Limits {
+        max_history_events: Some(8),
+        ..Default::default()
+    });
+    let ir = compile(
+        r#"workflow W { version "1.0.0"
+        step one { worker "a" with { n: 1 } compensate { worker "undo" with { n: one.n } } }
+        step two { worker "a" after one with { n: 2 } }
+        step three { worker "a" after two with { n: 3 } }
+    }"#,
+    );
+    let id = h.start(&ir, json!({}));
+    let w = h.worker("w", "python", &["a", "undo"]);
+    echo(&mut h, &w);
+    echo(&mut h, &w);
+    let s = h.state(&id);
+    assert!(
+        h.events(&id).contains(&"LimitExceeded"),
+        "{:?}",
+        h.events(&id)
+    );
+    // The compensation still runs past the limit.
+    let t = h.poll(&w).expect("compensation");
+    assert_eq!(t.task_name, "undo");
+    h.engine.complete(&t.token, json!({ "ok": true })).unwrap();
+    let s2 = h.state(&id);
+    assert_eq!(s2.status, WorkflowStatus::Failed);
+    assert_eq!(s2.error.as_ref().unwrap().code, "LIMIT_EXCEEDED");
+    let _ = s;
+}
+
+#[test]
+fn max_payload_bytes_rejects_large_inputs_results_and_signals() {
+    let mut h = limited(orbit_runtime::engine::Limits {
+        max_payload_bytes: Some(64),
+        ..Default::default()
+    });
+    let ir = compile(
+        r#"workflow W { version "1.0.0" input { s: String } signal go { s: String }
+           step a { worker "a" with { n: 1 } } step w { await go after a timeout 1h } }"#,
+    );
+    h.engine.register_definition(ir.clone()).unwrap();
+    let big = "x".repeat(100);
+    let e = h
+        .engine
+        .start("W", None, json!({ "s": big }), None)
+        .unwrap_err();
+    assert_eq!((e.status, e.code), (413, "PAYLOAD_TOO_LARGE"));
+    let id = h
+        .engine
+        .start("W", None, json!({ "s": "ok" }), None)
+        .unwrap()
+        .execution_id;
+    let w = h.worker("w", "python", &["a"]);
+    let t = h.poll(&w).unwrap();
+    let e = h
+        .engine
+        .complete(&t.token, json!({ "n": 1, "pad": big }))
+        .unwrap_err();
+    assert_eq!(e.code, "PAYLOAD_TOO_LARGE");
+    let e = h.engine.signal(&id, "go", json!({ "s": big })).unwrap_err();
+    assert_eq!(e.code, "PAYLOAD_TOO_LARGE");
+}
