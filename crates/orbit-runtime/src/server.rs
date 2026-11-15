@@ -698,6 +698,10 @@ pub struct ServerConfig {
     pub tls: Option<TlsConfig>,
     /// Also serve the gRPC binding of the worker protocol on this address.
     pub grpc_addr: Option<SocketAddr>,
+    /// Pre-bound listeners (socket activation, tests): used instead of
+    /// binding `addr` / `grpc_addr`.
+    pub listener: Option<std::net::TcpListener>,
+    pub grpc_listener: Option<std::net::TcpListener>,
     pub body_limit: usize,
     pub tick_interval: Duration,
 }
@@ -707,6 +711,9 @@ pub async fn serve(
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    // Several rustls crypto backends are compiled in (via different
+    // dependencies); choose one before any TLS configuration is built.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let changed = engine.changed.clone();
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
@@ -726,8 +733,29 @@ pub async fn serve(
     let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
         let _ = rx.wait_for(|v| *v).await;
     };
-    let grpc = match config.grpc_addr {
-        Some(addr) => {
+    let bind = |addr: SocketAddr| {
+        std::net::TcpListener::bind(addr)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("cannot listen on {addr}: {e}")))
+    };
+    let grpc_listener = match (config.grpc_listener, config.grpc_addr) {
+        (Some(l), _) => Some(l),
+        (None, Some(addr)) => Some(bind(addr)?),
+        (None, None) => None,
+    };
+    let http_listener = match config.listener {
+        Some(l) => l,
+        None => bind(config.addr)?,
+    };
+    http_listener.set_nonblocking(true)?;
+    let http_addr = http_listener.local_addr()?;
+    let grpc = match grpc_listener {
+        Some(std_listener) => {
+            std_listener.set_nonblocking(true)?;
+            let addr = std_listener.local_addr()?;
+            let listener = tokio::net::TcpListener::from_std(std_listener)?;
+            let incoming =
+                tonic::transport::server::TcpIncoming::from_listener(listener, true, None)
+                    .map_err(|e| io_err(format!("gRPC listener: {e}")))?;
             let mut builder = tonic::transport::Server::builder();
             if let Some(tls) = &config.tls {
                 let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -753,7 +781,7 @@ pub async fn serve(
             Some(tokio::spawn(async move {
                 if let Err(e) = builder
                     .add_service(service)
-                    .serve_with_shutdown(addr, stopped(rx))
+                    .serve_with_incoming_shutdown(incoming, stopped(rx))
                     .await
                 {
                     tracing::error!(error = %e, "gRPC server failed");
@@ -765,8 +793,8 @@ pub async fn serve(
     let shutdown = stopped(stop_rx);
     let result = match config.tls {
         None => {
-            let listener = tokio::net::TcpListener::bind(config.addr).await?;
-            tracing::info!(addr = %listener.local_addr()?, tls = false, "ORBIT runtime listening");
+            let listener = tokio::net::TcpListener::from_std(http_listener)?;
+            tracing::info!(addr = %http_addr, tls = false, "ORBIT runtime listening");
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown)
                 .await
@@ -783,8 +811,8 @@ pub async fn serve(
                 shutdown.await;
                 h.graceful_shutdown(Some(Duration::from_secs(10)));
             });
-            tracing::info!(addr = %config.addr, tls = true, mtls = tls.client_ca.is_some(), "ORBIT runtime listening");
-            axum_server::bind_rustls(config.addr, rustls)
+            tracing::info!(addr = %http_addr, tls = true, mtls = tls.client_ca.is_some(), "ORBIT runtime listening");
+            axum_server::from_tcp_rustls(http_listener, rustls)?
                 .handle(handle)
                 .serve(app.into_make_service())
                 .await
