@@ -44,7 +44,26 @@ record ReserveOutput(string ReservationId);
   retried with backoff), and the worker re-registers when the runtime forgets
   its session.
 * Configuration comes from `WorkerOptions` or from `ORBIT_SERVER`,
-  `ORBIT_WORKER_TOKEN` / `ORBIT_TOKEN` and `ORBIT_CA_CERT`.
+  `ORBIT_WORKER_TOKEN` / `ORBIT_TOKEN`, `ORBIT_CA_CERT`, `ORBIT_CLIENT_CERT`
+  and `ORBIT_CLIENT_KEY`. Options win over the environment.
+* Mutual TLS: when the runtime runs with `--tls-client-ca`, give the worker a
+  client certificate signed by that CA. The runtime identifies the worker by
+  the certificate's DNS SAN or subject CN.
+
+  ```csharp
+  new WorkerOptions
+  {
+      Server = "https://orbit.internal:7233",
+      CaCertFile = "ca.pem",                 // or ORBIT_CA_CERT
+      ClientCertificatePath = "worker.pem",  // or ORBIT_CLIENT_CERT
+      ClientKeyPath = "worker.key",          // or ORBIT_CLIENT_KEY; omit if the key is in worker.pem
+  }
+  ```
+
+  Both files are PEM. The key may be PKCS#8, PKCS#1 or EC. The SDK loads them
+  with `X509Certificate2.CreateFromPemFile`, then re-imports the result through
+  PKCS#12 so that TLS stacks that reject ephemeral keys still accept it. A key
+  without a certificate, or a certificate without a key, fails at construction.
 * Example: [`examples/workers/csharp`](../../examples/workers/csharp).
 * Build, test and pack (from `sdks/csharp`): `dotnet build`, `dotnet test`,
   `dotnet pack OrbitLang.Sdk -c Release`
