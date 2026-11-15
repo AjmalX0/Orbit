@@ -1,6 +1,6 @@
 # Process diffs
 
-`orbit diff` compares two versions of a set of workflows and reports what the process does differently: steps added, removed or renamed, changed actions and contracts, dependencies, conditions, retries, timeouts, compensations, outcome and event handlers, signals, queries, input and output types, and limits. It ends with the verdict of [`orbit compat`](compat.md), so one report answers both "what changed?" and "is it safe to deploy, and which version bump does it need?". The Markdown format is meant to be pasted into a pull request.
+`orbit diff` compares two versions of a set of workflows and reports what the process does differently: steps added, removed or renamed, changed actions and contracts, dependencies, conditions, retries, timeouts, compensations, outcome and event handlers, signals, queries, input and output types, limits, and `continue_as_new`. It ends with the verdict of [`orbit compat`](compat.md), so one report answers both "what changed?" and "is it safe to deploy, and which version bump does it need?". The Markdown format is meant to be pasted into a pull request.
 
 A text diff of the source shows edits; `orbit diff` compares the compiled definitions, so it ignores formatting and comments, sees dependencies implied by data references, and reports a step that was only renamed as a rename.
 
@@ -118,6 +118,7 @@ Workflows are matched by name. A workflow only in the new version is reported as
 | `handler` | `on failure`, `on cancel`, `on timeout` blocks added or removed. Steps of a block present in both versions are compared like main steps; their subject is `on <kind>: <step>`. |
 | `event` | `on event <signal>` blocks, the same way |
 | `limits` | The `limits` block |
+| `continue_as_new` | [`continue_as_new`](../language/continue-as-new.md) added or removed (subject `continue_as_new`, value `when <condition> with <input>`, or `always with <input>`), or a change of its `condition` (`when ...` or `always`) or of its next `input` |
 | `contract` | For a child workflow, a different child definition. Declared task contracts (also when no workflow uses them, and only without `--workflow`): added or removed contracts, version changes, `compensated_by` changes, and input and output field changes (`mail.send input.cc`) |
 
 Expressions are compared as ORBIT source printed from the IR, so a change in formatting or comments is not a change.
@@ -127,6 +128,21 @@ Expressions are compared as ORBIT source printed from the IR, so a change in for
 Steps are matched by scope (main graph, `on <kind>`, `on event <signal>`) and name. A step that exists only in the old version and a step that exists only in the new version, in the same scope, are reported as one rename when they run the same thing and are the only unmatched pair that does: the same task (any contract version), the same child workflow, an `await` of the same signal, or both `sleep` or both `compute`. The renamed step is then compared field by field, and dependencies on it are compared under its new name, so other steps that depend on it show no change. Expressions that mention the old name (for example a handler that reads `!is_null(charge)`) do change, and are reported.
 
 If two removed steps call the same task, neither is treated as a rename; they are reported as removed and added.
+
+### Continue-as-new
+
+The second version of [`examples/subscription.orbit`](https://github.com/AjmalX0/Orbit/blob/main/examples/subscription.orbit) below continues only once the receipt was delivered, and raises the amount by 2% each period:
+
+```console
+$ orbit diff subscription.orbit v2/subscription.orbit
+workflow Subscription 1.0.0 → 1.1.0
+  ~ workflow: version: 1.0.0 → 1.1.0
+  ~ continue_as_new: condition: when input.period < input.periods → when input.period < input.periods && receipt.delivered
+  ~ continue_as_new: input: { customer_id: input.customer_id, amount: input.amount, periods: input.periods, period: input.period + 1, charged: input.charged + input.amount } → { customer_id: input.customer_id, amount: input.amount * 1.02, periods: input.periods, period: input.period + 1, charged: input.charged + input.amount }
+summary: workflows: 1 changed; 3 change(s): 3 changed; compatibility: compatible
+```
+
+The condition and the input are compared separately. Adding or removing `continue_as_new` is one change with the whole member as its value.
 
 ## JSON
 

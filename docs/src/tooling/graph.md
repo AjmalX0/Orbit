@@ -44,6 +44,7 @@ The same definition always renders to the same text: steps appear in the IR's ex
 | Signal feeding an `await` step | flag `signal__<name>>"signal <name>"]`, dotted edge to the step | `shape=cds`, dashed edge | not drawn (the step label names the signal) |
 | `on failure`, `on cancel`, `on timeout` | `subgraph on_<kind>["on <kind>"]` | dashed cluster `cluster_on_<kind>` | labelled panel below the main graph |
 | `on event <signal>` | `subgraph on_event_<signal>["on event <signal>"]` | dashed cluster | labelled panel |
+| [`continue_as_new`](../language/continue-as-new.md) | subroutine `continue_as_new[["continue as new..."]]` after the final steps, and `continue_as_new -. next run .-> <first step>` | `peripheries=2` box, dashed `next run` edge with `constraint=false` | box with a double accent border below the final steps, dashed `next run` edge up the right side into the first steps |
 
 Node ids of handler and event steps are prefixed with the subgraph id (`on_failure__tell_customer`), so a handler step may share a name with a main step.
 
@@ -62,6 +63,81 @@ Each step's label lists, one per line:
 Conditions are printed back as ORBIT expressions from the IR. Durations inside expressions appear as milliseconds, because the IR does not keep the unit. In Mermaid labels, `<`, `>`, `"` and `#` are written as the entities `#lt;`, `#gt;`, `#quot;` and `#35;`, which Mermaid renders as the characters.
 
 The header comment also shows a workflow `timeout` and a `limits` block when present (`%% workflow timeout 5m`, `%% limits max_history_events 5000`).
+
+## Continue-as-new
+
+A workflow with [`continue_as_new`](../language/continue-as-new.md) gets one more node. It follows the steps nothing depends on, because the condition is evaluated when every step has finished, and a dashed `next run` edge goes from it back to the steps without dependencies, where the next run starts. Its label has three lines: `continue as new`, the condition (`when ...`, or `always` without `when`), and the fields the next run's input sets (`next input { ... }`, or the expression when the input is not an object literal). The node id `continue_as_new` is a keyword, so it never clashes with a step.
+
+```console
+$ orbit graph examples/subscription.orbit
+```
+
+```text
+flowchart TD
+    %% Subscription@1.0.0
+    %% sha256:1d7a374edd1e400b4fb61a0d851ea74a99b4620006f6be5f06ce7a9421d6f8f1
+    classDef compensation stroke-dasharray: 4 3
+    classDef signal stroke-dasharray: 2 2
+    charge["charge<br/><small>payments.charge@1.0.0</small><br/><small>retry 5 attempts, exponential 1m..1h</small><br/><small>idempotency key</small>"]
+    receipt["receipt<br/><small>notifications.send@1.0.0</small>"]
+    charge --> receipt
+    next_period["next_period<br/><small>sleep 30d</small>"]
+    receipt --> next_period
+    continue_as_new[["continue as new<br/><small>when input.period #lt; input.periods</small><br/><small>next input { customer_id, amount, periods, period, charged }</small>"]]
+    next_period --> continue_as_new
+    continue_as_new -. next run .-> charge
+```
+
+```console
+$ orbit graph examples/subscription.orbit --format dot
+```
+
+```text
+digraph "Subscription" {
+  // Subscription@1.0.0
+  // sha256:1d7a374edd1e400b4fb61a0d851ea74a99b4620006f6be5f06ce7a9421d6f8f1
+  rankdir=TB;
+  node [shape=box, style=rounded, fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=10];
+  "charge" [label="charge\npayments.charge@1.0.0\nretry 5 attempts, exponential 1m..1h\nidempotency key"];
+  "receipt" [label="receipt\nnotifications.send@1.0.0"];
+  "charge" -> "receipt";
+  "next_period" [label="next_period\nsleep 30d"];
+  "receipt" -> "next_period";
+  "continue_as_new" [label="continue as new\nwhen input.period < input.periods\nnext input { customer_id, amount, periods, period, charged }", peripheries=2];
+  "next_period" -> "continue_as_new";
+  "continue_as_new" -> "charge" [style=dashed, constraint=false, label="next run"];
+}
+```
+
+`orbit graph examples/subscription.orbit --format svg`:
+
+![Step graph of examples/subscription.orbit: charge, receipt and next_period, then continue as new with a dashed next run edge back to charge](subscription-graph.svg)
+
+In a sequence diagram (`--sequence`), the workflow sends itself a `continue_as_new` message after the main steps, inside `opt when <condition>` when there is a condition:
+
+```console
+$ orbit graph examples/subscription.orbit --sequence
+```
+
+```text
+sequenceDiagram
+    %% Subscription@1.0.0
+    %% sha256:1d7a374edd1e400b4fb61a0d851ea74a99b4620006f6be5f06ce7a9421d6f8f1
+    participant W as Subscription
+    participant payments
+    participant notifications
+    W->>+payments: charge: payments.charge@1.0.0
+    payments-->>-W: PaymentResult
+    W->>+notifications: receipt: notifications.send@1.0.0
+    notifications-->>-W: { delivered }
+    Note over W: next_period: sleep 30d
+    opt when input.period < input.periods
+        W->>W: continue_as_new: next run with { customer_id, amount, periods, period, charged }
+    end
+```
+
+The [web UI](../runtime/web-ui.md#graph) draws the same node, coloured by whether a run continued.
 
 ## Mermaid
 
@@ -193,6 +269,7 @@ orbit graph workflows/order.orbit --format dot | dot -Tpng -o order.png
 - each step is placed one layer below its deepest dependency (longest path from the steps without dependencies), and steps in a layer keep the execution order;
 - a compensation is placed to the right of the step it undoes, on the same layer;
 - each outcome handler and event block is laid out the same way in its own labelled panel, below the main graph;
+- a `continue_as_new` node is placed one layer below the final steps; its dashed `next run` edges run up the right side of the graph and into the top of the first steps;
 - dependencies are curves from the bottom of a step to the top of its dependent. An edge that skips a layer can pass behind a node of the layer in between; use Graphviz for large graphs where that matters.
 
 The SVG uses a monospace font, embeds its own stylesheet (colours follow `prefers-color-scheme`) and has a transparent background. `orbit docs --format html` embeds the same rendering in each workflow page.
@@ -238,6 +315,7 @@ sequenceDiagram
 | `when` | an `opt when <condition>` block |
 | `for` | a `loop for each <variable>` block |
 | Compensations | one `opt compensation ...` block at the end, in reverse execution order |
+| `continue_as_new` | a message `W->>W: continue_as_new: next run with { ... }` after the main steps, in an `opt when <condition>` block when it has one |
 | Handlers and event blocks | one `opt on <kind>` or `opt on event <signal>` block each |
 
 Steps appear in execution order. Steps that can run concurrently are drawn one after the other; the flowchart shows which steps are independent.
