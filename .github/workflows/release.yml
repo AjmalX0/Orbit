@@ -82,6 +82,7 @@ jobs:
 
   container:
     runs-on: ubuntu-latest
+    env: { DOCKER_BUILD_RECORD_UPLOAD: "false" }
     permissions:
       contents: read
       packages: write
@@ -159,8 +160,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      # Only our artifacts (the Docker build action uploads a build record too).
       - uses: actions/download-artifact@v4
-        with: { path: artifacts }
+        with: { pattern: "binary-*", path: artifacts }
+      - uses: actions/download-artifact@v4
+        with: { name: packages, path: artifacts/packages }
       - name: Collect assets and checksums
         run: |
           mkdir -p assets
