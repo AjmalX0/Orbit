@@ -2,6 +2,10 @@
 
 Worker SDK for the [ORBIT](../../README.md) runtime. Standard library only, Go 1.21+.
 
+```bash
+go get github.com/AjmalX0/Orbit/sdks/go@latest
+```
+
 ```go
 import orbit "github.com/AjmalX0/Orbit/sdks/go"
 
@@ -30,3 +34,12 @@ log.Fatal(w.Run(ctx)) // returns after in-flight tasks finish and the worker unr
 * Configuration comes from `Options` or from `ORBIT_SERVER`,
   `ORBIT_WORKER_TOKEN` / `ORBIT_TOKEN` and `ORBIT_CA_CERT`.
 * Tests: `go test -race ./...`
+
+## Credentials and TLS
+
+| Variable | Purpose |
+|---|---|
+| `ORBIT_SERVER` | runtime URL (default `http://127.0.0.1:7233`) |
+| `ORBIT_WORKER_TOKEN` (or `ORBIT_TOKEN`) | bearer token: a per-worker token from `orbit token`, or the shared worker token |
+| `ORBIT_CA_CERT` | PEM CA to trust when the runtime uses a private certificate |
+| `ORBIT_CLIENT_CERT`, `ORBIT_CLIENT_KEY` | PEM client certificate and key for mutual TLS |

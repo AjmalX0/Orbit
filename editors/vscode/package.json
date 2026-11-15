@@ -27,6 +27,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
+    "onLanguage:orbit",
     "workspaceContains:**/*.orbit"
   ],
   "contributes": {

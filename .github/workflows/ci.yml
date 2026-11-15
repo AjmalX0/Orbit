@@ -24,7 +24,7 @@ jobs:
           POSTGRES_DB: postgres
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U orbit" --health-interval 2s --health-timeout 5s --health-retries 20
+          --health-cmd "pg_isready -U orbit -d postgres" --health-interval 2s --health-timeout 5s --health-retries 20
     env:
       ORBIT_TEST_POSTGRES_URL: postgres://orbit:orbit@127.0.0.1:5432/postgres
     steps:
@@ -96,4 +96,4 @@ jobs:
       - name: Build and package the extension
         run: cd editors/vscode && npm ci && npm run compile && npx vsce package --out orbit-lang.vsix
       - name: Integration test in a real VS Code
-        run: cd editors/vscode && ORBIT_BIN="$GITHUB_WORKSPACE/target/debug/orbit" xvfb-run -a npm test
+        run: cd editors/vscode && PATH="$GITHUB_WORKSPACE/target/debug:$PATH" ORBIT_BIN="$GITHUB_WORKSPACE/target/debug/orbit" xvfb-run -a npm test
