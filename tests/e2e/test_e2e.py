@@ -84,8 +84,16 @@ class Cluster:
         self.server.send_signal(signal.SIGKILL)
         self.server.wait()
 
-    def spawn(self, name, argv, **extra_env):
-        self.workers.append(subprocess.Popen(argv, stdout=self.log(name), stderr=subprocess.STDOUT, env={**self.env, **extra_env}))
+    def spawn(self, name, argv, cwd=None, **extra_env):
+        self.workers.append(subprocess.Popen(argv, cwd=cwd, stdout=self.log(name), stderr=subprocess.STDOUT, env={**self.env, **extra_env}))
+
+    def wait_named(self, worker_id, timeout=60):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if any(w["worker_id"] == worker_id and w["online"] for w in self.get("/v1/workers")["workers"]):
+                return
+            time.sleep(0.5)
+        raise RuntimeError(f"worker {worker_id} did not register; logs in {self.dir}")
 
     def wait_online(self, count):
         deadline = time.time() + 30
@@ -370,7 +378,7 @@ class Identities(unittest.TestCase):
     def setUpClass(cls):
         if not shutil.which("openssl"):
             raise unittest.SkipTest("openssl not installed")
-        d = make_pki(clients=["orders-python", "orders-typescript", "stranger", "text-go", "text-rust"])
+        d = make_pki(clients=["orders-python", "orders-typescript", "stranger", "text-go", "text-rust", "hello-java", "hello-csharp"])
         cls.pki = d
         rogue_hash = subprocess.run([sys.executable, "-c", "import hashlib;print(hashlib.sha256(b'rogue-token').hexdigest())"],
                                     capture_output=True, text=True).stdout.strip()
@@ -397,6 +405,18 @@ tasks = ["text.*"]
 id = "text-rust"
 client_cert = "text-rust"
 tasks = ["text.*"]
+
+[[worker]]
+id = "hello-java"
+client_cert = "hello-java"
+runtime = "java"
+tasks = ["greeting.java"]
+
+[[worker]]
+id = "hello-csharp"
+client_cert = "hello-csharp"
+runtime = "csharp"
+tasks = ["greeting.csharp"]
 
 [[worker]]
 id = "rogue"
@@ -459,6 +479,31 @@ tasks = ["risk.analyze"]
                 return
             time.sleep(0.2)
         self.fail(f"Go/Rust workers did not register over mTLS; logs in {self.c.dir}")
+
+    def certs(self, name):
+        return {"ORBIT_TOKEN": "", "ORBIT_CLIENT_CERT": os.path.join(self.pki, f"{name}.pem"),
+                "ORBIT_CLIENT_KEY": os.path.join(self.pki, f"{name}-key.pem")}
+
+    def test_java_sdk_over_mutual_tls(self):
+        mvn = shutil.which("mvn") or ("/opt/maven/bin/mvn" if os.path.exists("/opt/maven/bin/mvn") else None)
+        if not mvn:
+            self.skipTest("maven not installed")
+        subprocess.run([mvn, "-B", "-q", "install", "-DskipTests", "-Dgpg.skip=true"], cwd=os.path.join(ROOT, "sdks", "java"), check=True)
+        self.c.spawn("java", [mvn, "-B", "-q", "compile", "exec:java"], cwd=os.path.join(ROOT, "examples", "workers", "java"),
+                     **self.certs("hello-java"))
+        self.c.wait_named("hello-java", timeout=180)
+        r = self.c.cli("run", os.path.join(ROOT, "examples", "java_hello.orbit"), "--input", json.dumps({"name": "Ada", "excited": True}))
+        self.assertEqual(json.loads(r.stdout)["message"], "Hello, Ada, from Java!")
+
+    def test_csharp_sdk_over_mutual_tls(self):
+        if not shutil.which("dotnet"):
+            self.skipTest(".NET SDK not installed")
+        proj = os.path.join(ROOT, "examples", "workers", "csharp")
+        subprocess.run(["dotnet", "build", "-v", "q", "-nologo"], cwd=proj, check=True, capture_output=True)
+        self.c.spawn("csharp", ["dotnet", "run", "--no-build"], cwd=proj, **self.certs("hello-csharp"))
+        self.c.wait_named("hello-csharp", timeout=120)
+        r = self.c.cli("run", os.path.join(ROOT, "examples", "csharp_hello.orbit"), "--input", json.dumps({"name": "Ada", "excitement": 2}))
+        self.assertEqual(json.loads(r.stdout)["message"], "Hello, Ada!!")
 
     def test_identities_cannot_overreach(self):
         contract = lambda t: [{"task_name": t, "contract_version": "1.0.0"}]
