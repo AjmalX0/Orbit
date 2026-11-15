@@ -8,6 +8,8 @@ use crate::diagnostic::{suggest, Diagnostic};
 use crate::lexer::{tokenize, Token, TokenKind};
 use crate::source::{FileId, Span};
 
+mod testing;
+
 pub struct ParseResult {
     pub program: Program,
     pub diagnostics: Vec<Diagnostic>,
@@ -29,7 +31,7 @@ pub fn parse(file: FileId, src: &str) -> ParseResult {
     }
 }
 
-const TOP_LEVEL: &[&str] = &["workflow", "schema", "task", "import"];
+const TOP_LEVEL: &[&str] = &["workflow", "schema", "task", "import", "test"];
 const WORKFLOW_MEMBERS: &[&str] = &[
     "version",
     "description",
@@ -278,6 +280,7 @@ impl Parser {
                 }
                 TokenKind::Ident(w) if w == "schema" => self.schema().map(Declaration::Schema),
                 TokenKind::Ident(w) if w == "task" => self.task().map(Declaration::Task),
+                TokenKind::Ident(w) if w == "test" => self.test_decl().map(Declaration::Test),
                 TokenKind::Ident(w) if w == "import" => {
                     let start = self.bump().span;
                     self.string("an import path string").map(|(path, s)| {
@@ -295,7 +298,7 @@ impl Parser {
                         span,
                     )
                     .with_note(
-                        "top-level declarations are `workflow`, `schema`, `task` and `import`",
+                        "top-level declarations are `workflow`, `schema`, `task`, `import` and `test`",
                     );
                     if let TokenKind::Ident(w) = self.kind() {
                         if let Some(s) = suggest(w, TOP_LEVEL.iter().copied()) {

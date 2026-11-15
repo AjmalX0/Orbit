@@ -2,6 +2,9 @@
 
 use crate::source::Span;
 
+mod testing;
+pub use testing::*;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ident {
     pub name: String,
@@ -19,6 +22,7 @@ pub enum Declaration {
     Schema(Schema),
     Task(TaskDecl),
     Import(Import),
+    Test(TestDecl),
 }
 
 #[derive(Debug, Clone)]

@@ -16,9 +16,11 @@ pub mod http_adapter;
 pub mod identity;
 pub mod metrics;
 pub mod model;
+pub mod replay;
 pub mod server;
 pub mod store;
 pub mod telemetry;
+pub mod testing;
 
 pub use engine::{Engine, EngineConfig, EngineError};
 pub use store::Store;

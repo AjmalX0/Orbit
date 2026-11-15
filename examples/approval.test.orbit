@@ -1,0 +1,59 @@
+// Tests for the OrderApproval workflow (approval.orbit).
+//
+// Run them with `orbit test examples/approval.test.orbit`: each test runs the
+// workflow in-process, with the mocks below acting as the workers.
+
+import "approval.orbit"
+
+test "small orders are charged without review" {
+    workflow OrderApproval
+    input { order_id: "S1", customer_id: "c-1", amount: 120.0 }
+    mock "payments.charge" returns { transaction_id: "tx-" + input.order_id, status: "captured" }
+    mock "notifications.send" returns { delivered: true }
+    expect status COMPLETED
+    expect output { status: "charged", transaction_id: "tx-S1" }
+    expect step decision SKIPPED
+    expect step charge output { status: "captured" }
+}
+
+test "large orders wait for approval" {
+    workflow OrderApproval
+    version "1.0.0"
+    input { order_id: "T1", customer_id: "c-1", amount: 2500.0 }
+    mock "payments.charge" returns { transaction_id: "tx-" + input.order_id, status: "captured" }
+    mock "notifications.send" returns { delivered: true }
+    signal review { approved: true, reviewer: "dana" }
+    expect status COMPLETED
+    expect output { status: "charged", transaction_id: "tx-T1" }
+    expect step decision SUCCEEDED
+    expect step decision output { reviewer: "dana" }
+}
+
+test "rejected orders are not charged" {
+    workflow OrderApproval
+    input { order_id: "T2", customer_id: "c-2", amount: 5000.0 }
+    mock "notifications.send" returns { delivered: true }
+    signal review { approved: false, reviewer: "lee", comment: "too large" }
+    expect status COMPLETED
+    expect output { status: "rejected", transaction_id: null }
+    expect step charge SKIPPED
+}
+
+test "an order nobody reviews times out after two days" {
+    workflow OrderApproval
+    input { order_id: "T3", customer_id: "c-3", amount: 1000.0 }
+    expect status FAILED
+    expect error "SIGNAL_TIMEOUT"
+    expect step decision FAILED
+}
+
+test "a failed notification refunds the charge" {
+    workflow OrderApproval
+    input { order_id: "T4", customer_id: "c-4", amount: 80.0 }
+    mock "payments.charge" returns { transaction_id: "tx-T4", status: "captured" }
+    mock "payments.refund" returns { refunded: true }
+    mock "notifications.send" fails "MAILBOX_FULL" "the mailbox is full"
+    expect status FAILED
+    expect error "MAILBOX_FULL"
+    expect compensated charge
+}
