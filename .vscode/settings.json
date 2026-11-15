@@ -1,0 +1,11 @@
+{
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.features": "all",
+  "[rust]": { "editor.formatOnSave": true },
+  "[orbit]": { "editor.formatOnSave": true, "editor.tabSize": 4 },
+  "orbit.serverPath": "${workspaceFolder}/target/debug/orbit",
+  "files.associations": { "*.orbit": "orbit" },
+  "files.exclude": { "**/target": true, "**/node_modules": true, "**/bin": true, "**/obj": true },
+  "python.analysis.extraPaths": ["sdks/python"],
+  "search.exclude": { "target": true, "**/node_modules": true, "Cargo.lock": true }
+}

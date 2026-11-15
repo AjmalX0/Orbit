@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug orbit server",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": { "args": ["build", "--bin=orbit"], "filter": { "kind": "bin" } },
+      "args": ["server", "--db", ".orbit/dev.db"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug orbit check (current file)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": { "args": ["build", "--bin=orbit"], "filter": { "kind": "bin" } },
+      "args": ["check", "${file}"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Run VS Code extension (Extension Host)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/editors/vscode", "${workspaceFolder}/examples"],
+      "outFiles": ["${workspaceFolder}/editors/vscode/out/**/*.js"],
+      "preLaunchTask": "build VS Code extension"
+    }
+  ]
+}
