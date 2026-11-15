@@ -458,3 +458,55 @@ fn workflow_cycles_are_rejected() {
     );
     assert!(errors(r#"workflow A { version "1.0.0" step me { workflow "A" } }"#).contains("E0311"));
 }
+
+#[test]
+fn formatting_never_changes_meaning() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "orbit") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        // Make the source deliberately messy, then format it.
+        let messy: String = src
+            .lines()
+            .map(|l| format!("  {}   \n\n", l.trim()))
+            .collect();
+        let formatted = orbit_syntax::format::format_source(&messy).unwrap();
+        assert_eq!(
+            orbit_syntax::format::format_source(&formatted).unwrap(),
+            formatted,
+            "idempotent: {}",
+            path.display()
+        );
+        let hashes = |text: &str| {
+            let mut files = std::collections::HashMap::new();
+            files.insert(path.clone(), text.to_string());
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                files
+                    .entry(p.clone())
+                    .or_insert_with(|| std::fs::read_to_string(&p).unwrap_or_default());
+            }
+            let c =
+                orbit_compiler::compile_with(&[path.clone()], &orbit_compiler::MemLoader(files));
+            assert!(
+                !c.has_errors(),
+                "{}: {}",
+                path.display(),
+                c.render_diagnostics(false)
+            );
+            c.workflows
+                .iter()
+                .map(|w| w.definition_hash.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hashes(&src),
+            hashes(&formatted),
+            "formatting changed the meaning of {}",
+            path.display()
+        );
+    }
+}

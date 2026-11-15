@@ -8,8 +8,8 @@ schema WordCount {
     count: Int
 }
 
-task "text.normalize"   { version "1.0.0" input { text: String } output { text: String } }
-task "text.tokenize"    { version "1.0.0" input { text: String } output { tokens: List<String> } }
+task "text.normalize" { version "1.0.0" input { text: String } output { text: String } }
+task "text.tokenize" { version "1.0.0" input { text: String } output { tokens: List<String> } }
 task "text.frequencies" { version "1.0.0" input { tokens: List<String>, top: Int } output { top: List<WordCount>, unique: Int } }
 task "text.fingerprint" { version "1.0.0" input { text: String } output { hash: String, bytes: Int } }
 
@@ -27,10 +27,10 @@ workflow DocumentInsights {
         fingerprint: String
     }
 
-    step normalize   { worker "text.normalize"   using python     with { text: input.text } }
-    step tokenize    { worker "text.tokenize"    using typescript with { text: normalize.text } }
-    step frequencies { worker "text.frequencies" using go         with { tokens: tokenize.tokens, top: input.top } }
-    step fingerprint { worker "text.fingerprint" using rust       with { text: normalize.text } timeout 5s }
+    step normalize { worker "text.normalize" using python with { text: input.text } }
+    step tokenize { worker "text.tokenize" using typescript with { text: normalize.text } }
+    step frequencies { worker "text.frequencies" using go with { tokens: tokenize.tokens, top: input.top } }
+    step fingerprint { worker "text.fingerprint" using rust with { text: normalize.text } timeout 5s }
 
     return {
         words: len(tokenize.tokens)

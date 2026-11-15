@@ -27,7 +27,7 @@ workflow Shipping {
     output { carrier: String, tracking: String, cost: Float }
 
     step quote { worker "shipping.quote" with { order_id: input.order_id, items: input.items } }
-    step book  { worker "shipping.book" with { order_id: input.order_id, carrier: quote.carrier } timeout 30s }
+    step book { worker "shipping.book" with { order_id: input.order_id, carrier: quote.carrier } timeout 30s }
 
     return { carrier: quote.carrier, tracking: book.tracking, cost: quote.cost }
 }

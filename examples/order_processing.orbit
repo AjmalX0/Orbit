@@ -81,8 +81,8 @@ workflow OrderProcessing {
         with {
             customer_id: input.customer_id
             message: if process_payment.transaction_id == null
-                     then "Order " + input.order_id + " is held for review"
-                     else "Order " + input.order_id + " confirmed"
+                then "Order " + input.order_id + " is held for review"
+                else "Order " + input.order_id + " confirmed"
         }
     }
 
