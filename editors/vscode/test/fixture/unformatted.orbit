@@ -1,0 +1,5 @@
+workflow Messy {
+version "1.0.0"
+  input {n:Int}
+return {doubled:input.n*2}
+}

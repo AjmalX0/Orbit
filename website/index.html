@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORBIT: durable workflows across languages</title>
+<meta name="description" content="ORBIT is a declarative workflow language and durable runtime. Describe what should happen once; workers in Python, TypeScript, Go, Rust, Java and C# do the work, with retries, compensation and crash recovery.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="./" aria-label="ORBIT home">
+      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="5" r="2.6" fill="var(--accent)"/></svg>
+      <span>ORBIT</span>
+    </a>
+    <nav class="nav-links" aria-label="Main">
+      <a href="docs/">Docs</a>
+      <a href="docs/getting-started/quickstart.html">Quick start</a>
+      <a href="docs/language/workflows.html">Language</a>
+      <a href="docs/sdks/overview.html">SDKs</a>
+      <a href="docs/reference/cli.html">Reference</a>
+      <a class="nav-gh" href="https://github.com/AjmalX0/Orbit">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <p class="eyebrow">Version 0.1.0 &middot; Apache-2.0</p>
+      <h1>Write the workflow once. Run it reliably, in every language.</h1>
+      <p class="lede">ORBIT is a declarative language and durable runtime for work that spans services. You describe the steps, their order and what happens when they fail. The compiler checks every step against its worker's contract before anything runs, and the runtime carries it through retries, timeouts, crashes and compensation.</p>
+
+      <div class="install" data-tabs>
+        <div class="tabs" role="tablist" aria-label="Install method">
+          <button role="tab" aria-selected="true" data-tab="script">Linux / Windows</button>
+          <button role="tab" aria-selected="false" data-tab="cargo">Cargo</button>
+          <button role="tab" aria-selected="false" data-tab="docker">Docker</button>
+        </div>
+        <div class="panel" data-panel="script"><code>curl -fsSL https://github.com/AjmalX0/Orbit/releases/latest/download/install.sh | sh</code><button class="copy" type="button">Copy</button></div>
+        <div class="panel" data-panel="cargo" hidden><code>cargo install orbit-lang</code><button class="copy" type="button">Copy</button></div>
+        <div class="panel" data-panel="docker" hidden><code>docker run -p 7233:7233 -e ORBIT_TOKEN=change-me ghcr.io/ajmalx0/orbit:latest</code><button class="copy" type="button">Copy</button></div>
+      </div>
+
+      <div class="actions">
+        <a class="btn btn-primary" href="docs/getting-started/quickstart.html">Start the tutorial</a>
+        <a class="btn" href="docs/">Read the documentation</a>
+      </div>
+    </div>
+
+    <figure class="code-card" aria-label="An ORBIT workflow">
+      <figcaption><span>order.orbit</span></figcaption>
+<pre><code><span class="k">workflow</span> OrderProcessing {
+    <span class="k">version</span> <span class="s">"1.0.0"</span>
+    <span class="k">input</span>  { order_id: <span class="t">String</span>, amount: <span class="t">Float</span> }
+
+    <span class="k">step</span> analyze_risk {
+        <span class="k">worker</span> <span class="s">"risk.analyze"</span>
+        <span class="k">using</span> python
+        <span class="k">with</span> { amount: input.amount }
+        <span class="k">retry</span> { attempts: <span class="n">3</span>, backoff: exponential }
+    }
+
+    <span class="k">step</span> charge {
+        <span class="k">worker</span> <span class="s">"payments.charge"</span>
+        <span class="k">using</span> typescript
+        <span class="k">when</span> analyze_risk.score &lt; <span class="n">0.8</span>
+        <span class="k">with</span> { order_id: input.order_id, amount: input.amount }
+        <span class="k">idempotency_key</span>: <span class="s">"charge-"</span> + input.order_id
+        <span class="k">timeout</span> <span class="n">30s</span>
+        <span class="k">compensate</span> {
+            <span class="k">worker</span> <span class="s">"payments.refund"</span>
+            <span class="k">with</span> { transaction_id: charge.transaction_id }
+        }
+    }
+
+    <span class="k">return</span> { transaction_id: charge.transaction_id }
+}</code></pre>
+    </figure>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="section-title">How it works</h2>
+    <ol class="steps">
+      <li>
+        <span class="step-no">01</span>
+        <h3>Declare</h3>
+        <p>Task contracts describe what each worker accepts and returns. Workflows describe steps, dependencies, conditions, retries, timeouts and compensation. Dependencies follow from the data a step reads.</p>
+      </li>
+      <li>
+        <span class="step-no">02</span>
+        <h3>Check</h3>
+        <p>The compiler type-checks every step input, every reference and every optional value, rejects cycles, and lowers the workflow to a versioned, content-hashed intermediate form.</p>
+      </li>
+      <li>
+        <span class="step-no">03</span>
+        <h3>Run</h3>
+        <p>The runtime records every decision as an event before acting on it. Workers in any language poll for tasks over HTTP or gRPC. A crash at any point resumes from history.</p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <div>
+      <h2 class="section-title">Mistakes surface before deployment</h2>
+      <p>A step that can be skipped produces an optional value. Using it where a value is required is a compile error, with the exact location and a suggested fix, not a null pointer at three in the morning.</p>
+      <p>Every diagnostic has a stable code and is documented in the <a href="docs/reference/diagnostics.html">diagnostics reference</a>. The same checks run in your editor through the language server.</p>
+    </div>
+<pre class="terminal"><code><span class="dim">$</span> orbit check order.orbit
+<span class="err">error[E0405]</span>: value may be `null` but `String` is required
+  <span class="dim">--&gt;</span> order.orbit:19:25
+   <span class="dim">|</span>
+<span class="dim">19 |</span>         with { message: charge.transaction_id }
+   <span class="dim">|</span>                         <span class="err">^^^^^^^^^^^^^^^^^^^^^</span>
+   <span class="dim">=</span> help: provide a fallback with `coalesce(value, default)`,
+     or declare the target as optional with `?`</code></pre>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap split">
+    <div>
+      <h2 class="section-title">Failures are part of the program</h2>
+      <p>When a payment is declined, ORBIT runs the compensations of the steps that already succeeded, in reverse order, and records every decision. The history is the source of truth: inspect it with <code>orbit logs</code>, or export it as OpenTelemetry traces.</p>
+      <p><a href="docs/runtime/guarantees.html">Read the delivery guarantees</a></p>
+    </div>
+<pre class="terminal"><code><span class="dim">#13</span>  StepDispatched         step=process_payment attempt=1
+<span class="dim">#14</span>  StepAttemptFailed      error=<span class="err">CARD_DECLINED</span>
+<span class="dim">#15</span>  StepFailed             step=process_payment
+<span class="dim">#17</span>  CompensationStarted    reason=step `process_payment` failed
+<span class="dim">#18</span>  StepScheduled          step=compensate:reserve_inventory
+<span class="dim">#20</span>  StepSucceeded          step=compensate:reserve_inventory
+<span class="dim">#21</span>  CompensationCompleted
+<span class="dim">#22</span>  WorkflowFailed         error=CARD_DECLINED</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 class="section-title">What the language covers</h2>
+    <div class="features">
+      <div><h3>Typed contracts</h3><p>Schemas, optional types, records, lists and maps. Inputs and outputs are validated by the compiler and again by the runtime.</p></div>
+      <div><h3>Retries and timeouts</h3><p>Attempt limits, fixed or exponential backoff, non-retryable error codes, per-attempt, queue and workflow deadlines.</p></div>
+      <div><h3>Compensation</h3><p>Declare the action that undoes a step. On failure, cancellation or timeout, completed steps are compensated in reverse.</p></div>
+      <div><h3>Fan-out</h3><p><code>for item in list</code> runs a step per element with its own retries and idempotency key, limited by <code>max_parallel</code>.</p></div>
+      <div><h3>Child workflows</h3><p>Start another workflow as a durable child with a deterministic id, type-checked against its input and output.</p></div>
+      <div><h3>Durable timers</h3><p><code>sleep 24h</code> survives restarts and needs no worker. Conditions decide at run time whether a step runs.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="section-title">Workers in the language you already use</h2>
+    <p class="section-lede">Business logic stays in your services. Each SDK registers task handlers, receives work, and reports results; all six are tested against the real runtime, including over mutual TLS.</p>
+    <table class="sdks">
+      <thead><tr><th>Language</th><th>Package</th><th>Install</th></tr></thead>
+      <tbody>
+        <tr><td>Python</td><td><a href="https://pypi.org/project/orbit-lang-sdk/">orbit-lang-sdk</a></td><td><code>pip install orbit-lang-sdk</code></td></tr>
+        <tr><td>TypeScript</td><td><a href="https://www.npmjs.com/package/orbit-lang">orbit-lang</a></td><td><code>npm install orbit-lang</code></td></tr>
+        <tr><td>Go</td><td><a href="https://pkg.go.dev/github.com/AjmalX0/Orbit/sdks/go">sdks/go</a></td><td><code>go get github.com/AjmalX0/Orbit/sdks/go</code></td></tr>
+        <tr><td>Rust</td><td><a href="https://crates.io/crates/orbit-worker">orbit-worker</a></td><td><code>cargo add orbit-worker</code></td></tr>
+        <tr><td>Java</td><td><a href="https://central.sonatype.com/artifact/io.github.ajmalx0/orbit-sdk">orbit-sdk</a></td><td><code>io.github.ajmalx0:orbit-sdk:0.1.0</code></td></tr>
+        <tr><td>C#</td><td><a href="https://www.nuget.org/packages/OrbitLang.Sdk">OrbitLang.Sdk</a></td><td><code>dotnet add package OrbitLang.Sdk</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 class="section-title">Guarantees, stated precisely</h2>
+    <dl class="guarantees">
+      <div><dt>Durable</dt><dd>Every state change is committed to SQLite or PostgreSQL before it takes effect. State is rebuilt from history on restart.</dd></div>
+      <div><dt>At-least-once</dt><dd>ORBIT never claims exactly-once. Each task carries an idempotency key that is stable across retries and redeliveries, so workers can make side effects safe.</dd></div>
+      <div><dt>Immutable versions</dt><dd>A workflow name and version are bound to a content hash. Running executions keep the definition they started with.</dd></div>
+      <div><dt>Secure by configuration</dt><dd>Admin, shared-worker and per-worker credentials, TLS and mutual TLS, with tasks restricted per identity.</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="cta">
+  <div class="wrap cta-inner">
+    <div>
+      <h2>Build your first workflow in ten minutes.</h2>
+      <p>The tutorial takes you from installation to a running workflow with a Python or TypeScript worker, a failure and its compensation.</p>
+    </div>
+    <div class="actions">
+      <a class="btn btn-primary" href="docs/getting-started/quickstart.html">Start the tutorial</a>
+      <a class="btn" href="https://github.com/AjmalX0/Orbit">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-grid">
+    <div>
+      <a class="brand" href="./"><svg width="18" height="18" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="5" r="2.6" fill="var(--accent)"/></svg><span>ORBIT</span></a>
+      <p class="muted">Released under the Apache License 2.0.</p>
+    </div>
+    <div><h4>Learn</h4><a href="docs/getting-started/installation.html">Installation</a><a href="docs/getting-started/quickstart.html">Quick start</a><a href="docs/getting-started/concepts.html">Concepts</a><a href="docs/guides/saga.html">Guides</a></div>
+    <div><h4>Reference</h4><a href="docs/reference/cli.html">CLI</a><a href="docs/reference/http-api.html">HTTP API</a><a href="docs/reference/protocol.html">Worker protocol</a><a href="docs/reference/diagnostics.html">Diagnostics</a></div>
+    <div><h4>Project</h4><a href="https://github.com/AjmalX0/Orbit">Source code</a><a href="https://github.com/AjmalX0/Orbit/releases">Releases</a><a href="docs/changelog.html">Changelog</a><a href="docs/contributing.html">Contributing</a></div>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll("[data-tabs]").forEach(function (box) {
+  var tabs = box.querySelectorAll("[role=tab]");
+  tabs.forEach(function (tab) {
+    tab.addEventListener("click", function () {
+      tabs.forEach(function (t) { t.setAttribute("aria-selected", String(t === tab)); });
+      box.querySelectorAll("[data-panel]").forEach(function (p) { p.hidden = p.dataset.panel !== tab.dataset.tab; });
+    });
+  });
+});
+document.querySelectorAll(".copy").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var text = btn.parentElement.querySelector("code").textContent;
+    var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1600); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, function () {});
+  });
+});
+</script>
+</body>
+</html>

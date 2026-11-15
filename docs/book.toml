@@ -1,0 +1,29 @@
+[book]
+title = "ORBIT Documentation"
+authors = ["The ORBIT authors"]
+language = "en"
+src = "src"
+description = "Documentation for ORBIT, a declarative workflow language and durable runtime."
+
+[build]
+build-dir = "../target/site/docs"
+create-missing = false
+
+[output.html]
+site-url = "/Orbit/docs/"
+git-repository-url = "https://github.com/AjmalX0/Orbit"
+edit-url-template = "https://github.com/AjmalX0/Orbit/edit/main/docs/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-css = ["theme/orbit.css"]
+additional-js = ["theme/orbit-highlight.js"]
+no-section-label = true
+smart-punctuation = true
+
+[output.html.search]
+limit-results = 20
+use-boolean-and = true
+
+[output.html.fold]
+enable = true
+level = 1

@@ -58,8 +58,14 @@ exports.run = async function run() {
   assert.equal(defs[0].range.start.line, 5);
 
   // Formatting through the language server.
-  const edits = await vscode.commands.executeCommand("vscode.executeFormatDocumentProvider", uri, { tabSize: 4, insertSpaces: true });
-  assert.ok(Array.isArray(edits), "formatting provider answered");
+  const messyUri = vscode.Uri.file(path.resolve(__dirname, "..", "fixture", "unformatted.orbit"));
+  const messy = await vscode.workspace.openTextDocument(messyUri);
+  await vscode.window.showTextDocument(messy);
+  const edits = await eventually("formatting edits", async () => {
+    const e = await vscode.commands.executeCommand("vscode.executeFormatDocumentProvider", messyUri, { tabSize: 4, insertSpaces: true });
+    return e && e.length ? e : undefined;
+  });
+  assert.match(edits[0].newText, /^workflow Messy \{\n    version "1\.0\.0"\n    input \{ n: Int \}\n/);
 
   // Commands are registered.
   const commands = await vscode.commands.getCommands(true);

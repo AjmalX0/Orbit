@@ -1,0 +1,92 @@
+/* ORBIT documentation theme: restrained, typographic, one accent colour. */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+
+:root {
+  --orbit-accent: #c2410c;
+  --mono-font: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --content-max-width: 820px;
+}
+html { font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+code, pre { font-family: var(--mono-font); }
+
+.light, html:not(.js) {
+  --bg: #ffffff;
+  --fg: #1c1917;
+  --sidebar-bg: #fafaf9;
+  --sidebar-fg: #44403c;
+  --sidebar-non-existant: #a8a29e;
+  --sidebar-active: var(--orbit-accent);
+  --sidebar-spacer: #e7e5e4;
+  --links: #9a3412;
+  --inline-code-color: #1c1917;
+  --theme-popup-bg: #ffffff;
+  --theme-popup-border: #e7e5e4;
+  --theme-hover: #f5f5f4;
+  --quote-bg: #fafaf9;
+  --quote-border: #e7e5e4;
+  --table-border-color: #e7e5e4;
+  --table-header-bg: #f5f5f4;
+  --table-alternate-bg: #fcfcfb;
+  --searchbar-border-color: #d6d3d1;
+  --searchbar-bg: #ffffff;
+  --searchresults-header-fg: #78716c;
+  --searchresults-border-color: #e7e5e4;
+  --search-mark-bg: #fed7aa;
+}
+.navy, .coal, .ayu {
+  --orbit-accent: #fb923c;
+  --bg: #0c0a09;
+  --fg: #e7e5e4;
+  --sidebar-bg: #141210;
+  --sidebar-fg: #a8a29e;
+  --sidebar-active: var(--orbit-accent);
+  --sidebar-spacer: #292524;
+  --links: #fdba74;
+  --inline-code-color: #f5f5f4;
+  --theme-popup-bg: #1c1917;
+  --theme-popup-border: #292524;
+  --theme-hover: #1c1917;
+  --quote-bg: #141210;
+  --quote-border: #292524;
+  --table-border-color: #292524;
+  --table-header-bg: #1c1917;
+  --table-alternate-bg: #110f0e;
+  --searchbar-border-color: #44403c;
+  --searchbar-bg: #1c1917;
+  --search-mark-bg: #9a3412;
+}
+
+.content { line-height: 1.65; }
+.content main { font-size: 1.6rem; }
+.content h1, .content h2, .content h3 { font-weight: 600; letter-spacing: -0.01em; }
+.content h1 { font-size: 3.2rem; margin-top: 1.2em; }
+.content h2 { font-size: 2.3rem; margin-top: 2em; padding-bottom: 0.3em; border-bottom: 1px solid var(--table-border-color); }
+.content h3 { font-size: 1.85rem; margin-top: 1.6em; }
+.content a { text-decoration: none; }
+.content a:hover { text-decoration: underline; }
+.content :not(pre) > code { padding: 0.1em 0.35em; border-radius: 4px; background: var(--theme-hover); font-size: 0.88em; }
+.content pre { border: 1px solid var(--table-border-color); border-radius: 6px; }
+.content pre > code { font-size: 1.35rem; line-height: 1.55; }
+.content table { font-size: 1.45rem; }
+.content table td, .content table th { padding: 0.45em 0.8em; }
+blockquote { border-inline-start: 3px solid var(--orbit-accent); border-block: none; padding: 0.2em 1.2em; }
+.sidebar .sidebar-scrollbox { padding-top: 12px; }
+.chapter li.part-title { color: var(--fg); font-weight: 600; font-size: 1.25rem; text-transform: uppercase; letter-spacing: 0.06em; margin: 1.6em 0 0.4em; }
+.chapter li a.active { font-weight: 500; }
+.menu-title { font-weight: 600; letter-spacing: 0.02em; }
+#menu-bar { border-bottom: 1px solid var(--table-border-color); }
+.orbit-home { font-size: 1.4rem; margin-inline-end: 8px; color: var(--sidebar-fg); }
+
+/* ORBIT syntax colours (see orbit-highlight.js) */
+.hljs-keyword { color: #9a3412; font-weight: 500; }
+.hljs-type { color: #0f766e; }
+.hljs-string { color: #3f6212; }
+.hljs-number, .hljs-literal { color: #7c2d12; }
+.hljs-comment { color: #78716c; font-style: italic; }
+.hljs-built_in { color: #1d4ed8; }
+.navy .hljs-keyword, .coal .hljs-keyword, .ayu .hljs-keyword { color: #fdba74; }
+.navy .hljs-type, .coal .hljs-type, .ayu .hljs-type { color: #5eead4; }
+.navy .hljs-string, .coal .hljs-string, .ayu .hljs-string { color: #bef264; }
+.navy .hljs-number, .coal .hljs-number, .ayu .hljs-number,
+.navy .hljs-literal, .coal .hljs-literal, .ayu .hljs-literal { color: #fca5a5; }
+.navy .hljs-built_in, .coal .hljs-built_in, .ayu .hljs-built_in { color: #93c5fd; }
