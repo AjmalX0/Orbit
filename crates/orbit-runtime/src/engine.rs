@@ -63,7 +63,7 @@ impl EngineError {
     fn not_found(what: &str) -> Self {
         Self::new(404, "NOT_FOUND", format!("{what} not found"))
     }
-    fn storage(e: rusqlite::Error) -> Self {
+    fn storage(e: crate::store::StoreError) -> Self {
         Self::new(500, "STORAGE_ERROR", e.to_string())
     }
 }

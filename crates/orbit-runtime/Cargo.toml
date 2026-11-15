@@ -9,6 +9,7 @@ orbit-ir.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+postgres.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 tokio.workspace = true
