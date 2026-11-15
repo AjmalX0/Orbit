@@ -31,6 +31,7 @@ Read by `orbit server`.
 | `ORBIT_NODE_TIMEOUT` | `--node-timeout` | `5` | Shared mode: seconds without a heartbeat after which a server is considered dead. |
 | `ORBIT_NODE_ID` | `--node-id` | host name | This server's name in the cluster. |
 | `ORBIT_ADVERTISE_ADDR` | `--advertise-addr` | derived from `--addr` | URL handed out for this server while it leads. |
+| `ORBIT_NO_UI` | `--no-ui` | unset (UI served) | `true`, `1`, `yes` or `on` to stop serving the [web UI](../runtime/web-ui.md) at `/ui/`; `false`, `0`, `no` or `off` keep it. |
 
 The flags `--insecure`, `--enable-http-adapter`, `--session-timeout`, `--max-body` and `--log-format` have no environment variable.
 

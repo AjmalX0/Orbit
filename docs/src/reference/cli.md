@@ -475,8 +475,9 @@ orbit server [OPTIONS]
 | `--node-timeout <NODE_TIMEOUT>` | integer, seconds | `5` | `ORBIT_NODE_TIMEOUT` | Shared mode: seconds without a heartbeat after which a server is considered dead and the others take over its executions (minimum 2). |
 | `--node-id <NODE_ID>` | string | the host name | `ORBIT_NODE_ID` | This server's name in the cluster. Must be unique among running servers. Requires `--cluster`. |
 | `--advertise-addr <ADVERTISE_ADDR>` | URL | derived from `--addr` unless it is a wildcard address | `ORBIT_ADVERTISE_ADDR` | URL other servers give out to reach this one while it leads, and that shared mode lists in `/v1/health`. Requires `--cluster`. |
+| `--no-ui` | flag | off (the UI is served) | `ORBIT_NO_UI` | Do not serve the web UI at `/ui/`. The HTTP API is unaffected. The environment variable accepts `true`/`false`, `1`/`0`, `yes`/`no` and `on`/`off`. See [Web UI](../runtime/web-ui.md). |
 
-The cluster options as `orbit server --help` prints them:
+The cluster and UI options as `orbit server --help` prints them:
 
 ```console
 $ orbit server --help
@@ -491,6 +492,8 @@ $ orbit server --help
           This server's name in the cluster (default: the host name) [env: ORBIT_NODE_ID=]
       --advertise-addr <ADVERTISE_ADDR>
           URL other servers give out to reach this one while it leads, and that shared mode lists in /v1/health, e.g. http://orbit-0.orbit:7233 (default: derived from --addr when it is not a wildcard address) [env: ORBIT_ADVERTISE_ADDR=]
+      --no-ui
+          Do not serve the web UI at /ui/ (the HTTP API is unaffected) [env: ORBIT_NO_UI=]
   -h, --help
           Print help
 ```

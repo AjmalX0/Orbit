@@ -66,7 +66,7 @@ A server starts as a standby, binds its listener immediately and joins the elect
 
 ```console
 INFO orbit_runtime::cluster: cluster mode: standby until elected node_id=node-1 advertise_addr="http://127.0.0.1:47975"
-INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:47975 tls=false
+INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:47975 tls=false ui=true
 INFO orbit_runtime::cluster: cluster: elected leader; recovering executions from history node_id=node-1 term=1
 INFO orbit_runtime::cluster: cluster: leader is serving node_id=node-1 term=1 active_executions=0 recovery_ms=80
 ```
@@ -348,7 +348,7 @@ Give all servers the same credentials, workers file, TLS settings, `--session-ti
 
 ```console
 INFO orbit_runtime::shared: cluster mode: shared (every server active) node_id=node-1 advertise_addr="http://127.0.0.1:36263" node_timeout_ms=3000
-INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:36263 tls=false
+INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:36263 tls=false ui=true
 INFO orbit_runtime::shared: shared: node is serving node_id=node-1 resumed=0
 ```
 

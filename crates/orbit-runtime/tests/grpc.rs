@@ -74,6 +74,7 @@ fn start() -> (String, String, Vec<String>) {
                     grpc_listener: Some(grpc_l),
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(20),
+                    ui: false,
                 };
                 serve(engine, cfg, std::future::pending()).await.unwrap();
             });
@@ -462,6 +463,7 @@ async fn grpc_over_mutual_tls() {
                     grpc_listener: Some(grpc_l),
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(20),
+                    ui: false,
                 };
                 serve(engine, cfg, std::future::pending()).await.unwrap();
             });

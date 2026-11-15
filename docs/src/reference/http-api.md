@@ -8,6 +8,7 @@ The runtime serves one HTTP API on `--addr` (default `127.0.0.1:7233`). It conta
 - Timestamps are milliseconds since the Unix epoch (`*_ms` fields).
 - Every response that passes authentication carries the header `x-orbit-api-version: orbit-api/1`.
 - The API is versioned by path (`/v1`). Fields may be added to responses within `orbit-api/1`; clients should ignore fields they do not know.
+- Outside `/v1/`, the same address serves the [web UI](../runtime/web-ui.md) at `/ui/` (no credential needed for its static files). `GET /` redirects to `/ui/` (`302`) when the `Accept` header contains `text/html`, and otherwise answers `404` with error code `NOT_FOUND`. With `--no-ui` neither route exists.
 
 ## Authentication
 

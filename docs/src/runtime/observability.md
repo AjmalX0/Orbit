@@ -10,8 +10,8 @@ The server logs to stderr. Choose the format with `--log-format`:
 
 ```text
 2026-11-15T09:38:33.954506Z  INFO orbit_runtime::engine: recovered active executions from history executions=1 in_flight=0
-2026-11-15T09:38:33.954823Z  INFO orbit: starting ORBIT runtime db=/var/lib/orbit/orbit.db backend="sqlite" http_adapter=false auth=false
-2026-11-15T09:38:33.955798Z  INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:7233 tls=false
+2026-11-15T09:38:33.954823Z  INFO orbit: starting ORBIT runtime db=/var/lib/orbit/orbit.db backend="sqlite" http_adapter=false auth=false ui=true
+2026-11-15T09:38:33.955798Z  INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:7233 tls=false ui=true
 2026-11-15T09:38:34.957450Z  INFO orbit_runtime::engine: worker registered worker_id=py-1 runtime=python tasks=1
 2026-11-15T09:38:34.990494Z  INFO orbit_runtime::engine: execution started execution_id=trace-1 workflow=Plain version=1.0.0
 2026-11-15T09:38:35.075550Z  INFO orbit_runtime::engine: execution completed execution_id=trace-1
@@ -20,8 +20,8 @@ The server logs to stderr. Choose the format with `--log-format`:
 `json`, one object per line, for log pipelines:
 
 ```json
-{"timestamp":"2026-11-15T09:38:18.766858Z","level":"INFO","fields":{"message":"starting ORBIT runtime","db":"orbit.db","backend":"sqlite","http_adapter":false,"auth":false},"target":"orbit"}
-{"timestamp":"2026-11-15T09:38:18.768141Z","level":"INFO","fields":{"message":"ORBIT runtime listening","addr":"127.0.0.1:7233","tls":false},"target":"orbit_runtime::server"}
+{"timestamp":"2026-11-15T18:33:17.685910Z","level":"INFO","fields":{"message":"starting ORBIT runtime","db":"orbit.db","backend":"sqlite","http_adapter":false,"auth":false,"ui":true},"target":"orbit"}
+{"timestamp":"2026-11-15T18:33:17.687448Z","level":"INFO","fields":{"message":"ORBIT runtime listening","addr":"127.0.0.1:7233","tls":false,"ui":true},"target":"orbit_runtime::server"}
 {"timestamp":"2026-11-15T09:38:19.759674Z","level":"INFO","fields":{"message":"shutting down"},"target":"orbit"}
 ```
 
@@ -44,8 +44,8 @@ DEBUG orbit_runtime::engine: event execution_id=dbg-1 seq=3 event="StepScheduled
 
 | Level | Message | Fields |
 |---|---|---|
-| INFO | `starting ORBIT runtime` | `db` (password redacted), `backend`, `http_adapter`, `auth` |
-| INFO | `ORBIT runtime listening` | `addr`, `tls`, `mtls` (with TLS) |
+| INFO | `starting ORBIT runtime` | `db` (password redacted), `backend`, `http_adapter`, `auth`, `ui` |
+| INFO | `ORBIT runtime listening` | `addr`, `tls`, `mtls` (with TLS), `ui` |
 | INFO | `gRPC worker protocol listening` | `addr`, `tls` |
 | INFO | `exporting OpenTelemetry traces` | `endpoint`, `service` |
 | INFO | `recovered active executions from history` | `executions`, `in_flight` |
