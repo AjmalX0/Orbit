@@ -1,0 +1,117 @@
+// ORBIT worker protocol, version 1.
+//
+// This file is the canonical, language-neutral definition of the messages
+// exchanged between the ORBIT runtime and workers (RFC-0001 §8).
+//
+// Two bindings share these messages and semantics (see ../../../README.md):
+//
+//  * HTTP/JSON: every RPC maps to `POST /v1/<path>` with the proto3 JSON
+//    mapping of its messages. The official SDKs use this binding.
+//  * gRPC: `orbit server --grpc-addr 127.0.0.1:7234` serves `WorkerService`
+//    over HTTP/2, with the same credentials (`authorization: Bearer <token>`
+//    metadata), per-worker identities, TLS and mutual TLS as the HTTP API.
+//
+// `google.protobuf.Value` carries numbers as doubles; the runtime converts
+// whole numbers within ±2^53 back to integers, so `Int` fields round-trip.
+//
+// Workers *pull* work (long-polling `PollTask`) instead of hosting a server:
+// they need no inbound ports, work behind NAT, and apply natural backpressure.
+
+syntax = "proto3";
+
+package orbit.worker.v1;
+
+import "google/protobuf/struct.proto";
+
+service WorkerService {
+  // POST /v1/workers/register
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  // POST /v1/workers/heartbeat — also delivers cooperative cancellations.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // POST /v1/workers/poll — long poll. When no task arrived within wait_ms,
+  // HTTP answers 204 and gRPC returns an ExecuteTaskRequest with an empty token.
+  rpc PollTask(PollTaskRequest) returns (ExecuteTaskRequest);
+  // POST /v1/tasks/complete
+  rpc CompleteTask(CompleteTaskRequest) returns (TaskResultAck);
+  // POST /v1/tasks/fail
+  rpc FailTask(FailTaskRequest) returns (TaskResultAck);
+  // POST /v1/workers/unregister — in-flight tasks are redelivered elsewhere.
+  rpc UnregisterWorker(UnregisterWorkerRequest) returns (UnregisterWorkerResponse);
+}
+
+message TaskContract {
+  string task_name = 1;          // e.g. "payments.charge"
+  string contract_version = 2;   // must equal the `task` version in the workflow
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;          // stable identity, e.g. "payments-7f9c"
+  string runtime = 2;            // matched against `using <language>`
+  repeated TaskContract contracts = 3;
+  string sdk = 4;                // informational, e.g. "orbit-python/0.1.0"
+}
+
+message RegisterWorkerResponse {
+  bool accepted = 1;
+  string worker_session_id = 2;
+  uint64 heartbeat_interval_ms = 3;
+  uint64 session_timeout_ms = 4;  // silence longer than this = worker lost
+  repeated string warnings = 5;   // e.g. contract versions no workflow uses
+}
+
+message HeartbeatRequest {
+  string worker_session_id = 1;
+}
+
+message HeartbeatResponse {
+  bool accepted = 1;
+  repeated string cancel = 2;     // task tokens the worker should stop
+}
+
+message PollTaskRequest {
+  string worker_session_id = 1;
+  uint64 wait_ms = 2;             // max 60000
+}
+
+// A task assignment (RFC-0001 §8.3).
+message ExecuteTaskRequest {
+  string token = 1;               // identifies this delivery; echo it in the result
+  string execution_id = 2;
+  string workflow = 3;
+  string workflow_version = 4;
+  string step_id = 5;             // "<step>" or "compensate:<step>"
+  string task_name = 6;
+  string contract_version = 7;
+  google.protobuf.Value input = 8;
+  string idempotency_key = 9;     // stable across retries and redeliveries
+  uint32 attempt = 10;            // 1-based; redeliveries keep the number
+  bool redelivery = 11;           // previous delivery's outcome is unknown
+  optional uint64 deadline_ms = 12;  // absolute epoch ms for this attempt
+  optional uint64 timeout_ms = 13;
+}
+
+message CompleteTaskRequest {
+  string token = 1;
+  google.protobuf.Value output = 2;  // validated against the task's output schema
+}
+
+message FailTaskRequest {
+  string token = 1;
+  string error_code = 2;          // e.g. "CARD_DECLINED"
+  string error_message = 3;
+  bool retryable = 4;             // false fails the step regardless of policy
+  google.protobuf.Value details = 5;
+}
+
+message TaskResultAck {
+  bool accepted = 1;
+  string reason = 2;              // why a result was ignored (duplicate, stale, contract)
+}
+
+message UnregisterWorkerRequest {
+  string worker_session_id = 1;
+}
+
+message UnregisterWorkerResponse {
+  bool accepted = 1;
+}

@@ -44,6 +44,7 @@ fn start_runtime() -> String {
                     auth_token: Some("admin".into()),
                     worker_token: Some("worker".into()),
                     identities: Default::default(),
+                    grpc_addr: None,
                     tls: None,
                     body_limit: 1 << 20,
                     tick_interval: Duration::from_millis(20),
