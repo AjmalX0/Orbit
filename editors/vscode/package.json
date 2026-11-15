@@ -1,13 +1,153 @@
 {
-  "name": "orbit-language",
+  "name": "orbit-lang",
   "displayName": "ORBIT",
-  "description": "Syntax highlighting for the ORBIT orchestration language",
+  "description": "ORBIT orchestration language: syntax highlighting, live diagnostics, hover, go to definition, completion, outline and formatting",
   "version": "0.1.0",
-  "publisher": "orbit",
-  "engines": { "vscode": "^1.80.0" },
-  "categories": ["Programming Languages"],
+  "publisher": "orbit-lang",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AjmalX0/Orbit",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters"
+  ],
+  "keywords": [
+    "orbit",
+    "workflow",
+    "orchestration",
+    "saga",
+    "durable execution"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*.orbit"
+  ],
   "contributes": {
-    "languages": [{ "id": "orbit", "aliases": ["ORBIT", "orbit"], "extensions": [".orbit"], "configuration": "./language-configuration.json" }],
-    "grammars": [{ "language": "orbit", "scopeName": "source.orbit", "path": "./syntaxes/orbit.tmLanguage.json" }]
+    "languages": [
+      {
+        "id": "orbit",
+        "aliases": [
+          "ORBIT",
+          "orbit"
+        ],
+        "extensions": [
+          ".orbit"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "orbit",
+        "scopeName": "source.orbit",
+        "path": "./syntaxes/orbit.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "ORBIT",
+      "properties": {
+        "orbit.serverPath": {
+          "type": "string",
+          "default": "orbit",
+          "description": "Path to the `orbit` binary, used for `orbit lsp`, `orbit run` and `orbit check`."
+        },
+        "orbit.runtimeUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:7233",
+          "description": "ORBIT runtime used by the Run and Deploy commands (ORBIT_SERVER)."
+        },
+        "orbit.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the communication with the ORBIT language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "orbit.run",
+        "title": "ORBIT: Run Workflow",
+        "icon": "$(play)"
+      },
+      {
+        "command": "orbit.deploy",
+        "title": "ORBIT: Deploy Workflows in This File"
+      },
+      {
+        "command": "orbit.check",
+        "title": "ORBIT: Check File"
+      },
+      {
+        "command": "orbit.graph",
+        "title": "ORBIT: Show Step Graph (Mermaid)"
+      },
+      {
+        "command": "orbit.restartServer",
+        "title": "ORBIT: Restart Language Server"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "orbit.run",
+          "when": "resourceLangId == orbit",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "orbit.run",
+          "when": "editorLangId == orbit"
+        },
+        {
+          "command": "orbit.deploy",
+          "when": "editorLangId == orbit"
+        },
+        {
+          "command": "orbit.check",
+          "when": "editorLangId == orbit"
+        },
+        {
+          "command": "orbit.graph",
+          "when": "editorLangId == orbit"
+        }
+      ]
+    },
+    "configurationDefaults": {
+      "[orbit]": {
+        "editor.defaultFormatter": "orbit-lang.orbit-lang",
+        "editor.formatOnSave": true,
+        "editor.tabSize": 4
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "vsce package --out orbit-lang.vsix",
+    "vscode:prepublish": "npm run compile",
+    "test": "node test/runTest.js"
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "@types/vscode": "1.82.0",
+    "@vscode/vsce": "3.2.1",
+    "typescript": "5.6.3",
+    "@vscode/test-electron": "2.4.1"
   }
 }

@@ -1,0 +1,18 @@
+{
+  "name": "ORBIT",
+  "build": { "dockerfile": "Dockerfile" },
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.12" },
+    "ghcr.io/devcontainers/features/go:1": { "version": "1.24" },
+    "ghcr.io/devcontainers/features/java:1": { "version": "21", "installMaven": true },
+    "ghcr.io/devcontainers/features/dotnet:2": { "version": "8.0" }
+  },
+  "postCreateCommand": "cargo build && (cd editors/vscode && npm ci && npm run compile)",
+  "forwardPorts": [7233, 7234],
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "vadimcn.vscode-lldb", "tamasfe.even-better-toml", "ms-python.python", "golang.go"]
+    }
+  }
+}

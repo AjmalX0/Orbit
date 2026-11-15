@@ -1,0 +1,8 @@
+task "risk.analyze" { version "1.0.0" input { amount: Float } output { score: Float } }
+
+workflow Demo {
+    version "1.0.0"
+    input { amount: Float }
+    step risk { worker "risk.analyze" with { amount: input.amount } }
+    step again { worker "risk.analyze" with { amount: risk.scor } }
+}

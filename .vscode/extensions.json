@@ -1,0 +1,13 @@
+{
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "vadimcn.vscode-lldb",
+    "tamasfe.even-better-toml",
+    "ms-python.python",
+    "golang.go",
+    "redhat.java",
+    "ms-dotnettools.csharp",
+    "bierner.markdown-mermaid",
+    "ms-vscode-remote.remote-containers"
+  ]
+}
