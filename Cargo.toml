@@ -40,7 +40,7 @@ axum = "0.8"
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 prost-types = "0.13"
-tonic-build = "0.12"
+tonic-build = "0.14"
 protox = "0.7"
 axum-server = { version = "0.9", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
