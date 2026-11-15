@@ -12,6 +12,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 pub const IR_VERSION: &str = "orbit-ir/1";
+/// IR version for workflows that use signals, queries, `await` or `compute`
+/// steps, or lambdas. Workflows that use none of these keep `orbit-ir/1` (and
+/// their definition hashes), so existing deployments are unaffected.
+pub const IR_VERSION_2: &str = "orbit-ir/2";
+/// Every IR version this crate reads and validates.
+pub const SUPPORTED_IR_VERSIONS: &[&str] = &[IR_VERSION, IR_VERSION_2];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowIr {
@@ -33,9 +39,23 @@ pub struct WorkflowIr {
     pub result: Option<Expr>,
     /// Every worker contract referenced by this workflow.
     pub contracts: BTreeMap<String, TaskContract>,
+    /// Typed signals this workflow accepts (`signal <name> { ... }`), by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signals: BTreeMap<String, Type>,
+    /// Read-only queries over the execution state (`query <name> = <expr>`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub queries: BTreeMap<String, QueryIr>,
     /// Source locations for diagnostics and tooling (not hashed).
     #[serde(default)]
     pub source_map: BTreeMap<String, SourceLocation>,
+}
+
+/// `query <name> = <expr>`: evaluated on demand against the current state.
+/// Step outputs read by a query are optional (the step may not have run yet).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueryIr {
+    pub expr: Expr,
+    pub output_type: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,6 +79,10 @@ pub struct TaskContract {
     /// then `workflow:<Name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_hash: Option<String>,
+    /// `compensated_by "<task>"`: steps calling this task must declare a
+    /// compensation that calls the named task (checked by the compiler).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensated_by: Option<String>,
 }
 
 /// Prefix of contract names that refer to child workflows.
@@ -100,6 +124,17 @@ pub enum Action {
     /// Start a child workflow. `task` is `workflow:<Name>`; its contract carries
     /// the child's definition hash.
     Workflow(Invocation),
+    /// Wait for the next signal of this name; its payload is the step output.
+    /// `timeout_ms` fails the step with `SIGNAL_TIMEOUT` if no signal arrives.
+    Await {
+        signal: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+    /// Evaluate a pure expression in the runtime; the value is the step output.
+    Compute {
+        expr: Expr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,7 +208,7 @@ impl StepIr {
     pub fn invocation(&self) -> Option<&Invocation> {
         match &self.action {
             Action::Task(i) | Action::Workflow(i) => Some(i),
-            Action::Sleep { .. } => None,
+            Action::Sleep { .. } | Action::Await { .. } | Action::Compute { .. } => None,
         }
     }
 }
@@ -216,10 +251,15 @@ impl WorkflowIr {
         let raw: serde_json::Value =
             serde_json::from_str(text).map_err(|e| IrError(format!("invalid IR JSON: {e}")))?;
         match raw.get("ir_version").and_then(|v| v.as_str()) {
-            Some(IR_VERSION) => {}
+            Some(v) if SUPPORTED_IR_VERSIONS.contains(&v) => {}
             Some(other) => {
                 return Err(IrError(format!(
-                    "unsupported IR version `{other}`; this runtime supports `{IR_VERSION}`"
+                    "unsupported IR version `{other}`; this runtime supports {}",
+                    SUPPORTED_IR_VERSIONS
+                        .iter()
+                        .map(|v| format!("`{v}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )))
             }
             None => return Err(IrError("missing `ir_version`".into())),
@@ -234,8 +274,13 @@ impl WorkflowIr {
     /// every definition it accepts, so a hand-edited IR cannot bypass them.
     pub fn validate(&self) -> Result<(), IrError> {
         let e = |m: String| Err(IrError(m));
-        if self.ir_version != IR_VERSION {
+        if !SUPPORTED_IR_VERSIONS.contains(&self.ir_version.as_str()) {
             return e(format!("unsupported IR version `{}`", self.ir_version));
+        }
+        if self.ir_version == IR_VERSION && self.uses_v2_features() {
+            return e(format!(
+                "`{IR_VERSION}` cannot use signals, queries, `await`, `compute` or lambdas; use `{IR_VERSION_2}`"
+            ));
         }
         if self.name.is_empty() || self.version.is_empty() {
             return e("workflow name and version are required".into());
@@ -272,6 +317,16 @@ impl WorkflowIr {
                 if f.max_parallel == Some(0) {
                     return e(format!("step `{}`: max_parallel must be at least 1", s.id));
                 }
+            }
+            match &s.action {
+                Action::Compute { expr } => expr.step_refs(&mut refs),
+                Action::Await { signal, .. } if !self.signals.contains_key(signal) => {
+                    return e(format!(
+                        "step `{}` awaits undeclared signal `{signal}`",
+                        s.id
+                    ))
+                }
+                _ => {}
             }
             if let Some(inv) = s.invocation() {
                 inv.input.step_refs(&mut refs);
@@ -319,6 +374,32 @@ impl WorkflowIr {
             );
         }
         Ok(())
+    }
+
+    /// The IR version this workflow needs: `orbit-ir/2` when it uses any
+    /// feature introduced with it, `orbit-ir/1` otherwise.
+    pub fn required_ir_version(&self) -> &'static str {
+        if self.uses_v2_features() {
+            IR_VERSION_2
+        } else {
+            IR_VERSION
+        }
+    }
+
+    fn uses_v2_features(&self) -> bool {
+        let lambda = |e: &Expr| e.contains_lambda();
+        !self.signals.is_empty()
+            || !self.queries.is_empty()
+            || self.result.as_ref().is_some_and(lambda)
+            || self.steps.iter().any(|s| {
+                matches!(s.action, Action::Await { .. } | Action::Compute { .. })
+                    || s.condition.as_ref().is_some_and(lambda)
+                    || s.for_each.as_ref().is_some_and(|f| lambda(&f.items))
+                    || s.invocation()
+                        .into_iter()
+                        .chain(s.compensation.as_ref())
+                        .any(|i| lambda(&i.input) || i.idempotency_key.as_ref().is_some_and(lambda))
+            })
     }
 
     /// Transitive dependencies of a step.

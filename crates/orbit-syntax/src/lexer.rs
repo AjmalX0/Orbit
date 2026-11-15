@@ -33,6 +33,8 @@ pub enum TokenKind {
     EqEq,
     NotEq,
     Eq,
+    /// `=>` in a lambda (`x => x * 2`).
+    FatArrow,
     Comma,
     Colon,
     Semi,
@@ -80,6 +82,7 @@ impl TokenKind {
             TokenKind::EqEq => "==",
             TokenKind::NotEq => "!=",
             TokenKind::Eq => "=",
+            TokenKind::FatArrow => "=>",
             TokenKind::Comma => ",",
             TokenKind::Colon => ":",
             TokenKind::Semi => ";",
@@ -266,6 +269,7 @@ impl<'a> Lexer<'a> {
         };
         match (c, self.peek2()) {
             (b'=', Some(b'=')) => two(self, TokenKind::EqEq),
+            (b'=', Some(b'>')) => two(self, TokenKind::FatArrow),
             (b'!', Some(b'=')) => two(self, TokenKind::NotEq),
             (b'<', Some(b'=')) => two(self, TokenKind::Le),
             (b'>', Some(b'=')) => two(self, TokenKind::Ge),

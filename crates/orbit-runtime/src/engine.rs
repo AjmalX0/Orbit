@@ -474,6 +474,110 @@ impl Engine {
         self.execution(id)
     }
 
+    /// Send a typed signal to a running execution. The payload is validated
+    /// against the workflow's `signal` declaration (defaults applied) and
+    /// buffered until an `await` step takes it. Returns the history sequence
+    /// number of the recorded signal.
+    pub fn signal(&mut self, id: &str, name: &str, mut payload: Value) -> Result<u64> {
+        let state = self.execution(id)?;
+        if state.status.is_terminal() {
+            return Err(EngineError::new(
+                409,
+                "EXECUTION_FINISHED",
+                format!("execution is already {}", state.status.as_str()),
+            ));
+        }
+        let def = self
+            .by_hash
+            .get(&state.definition_hash)
+            .cloned()
+            .ok_or_else(|| EngineError::not_found("workflow definition"))?;
+        let Some(ty) = def.signals.get(name) else {
+            let declared: Vec<&str> = def.signals.keys().map(String::as_str).collect();
+            return Err(EngineError::new(
+                404,
+                "UNKNOWN_SIGNAL",
+                if declared.is_empty() {
+                    format!("{}@{} declares no signals", def.name, def.version)
+                } else {
+                    format!(
+                        "{}@{} has no signal `{name}`; declared: {}",
+                        def.name,
+                        def.version,
+                        declared.join(", ")
+                    )
+                },
+            ));
+        };
+        ty.apply_defaults(&mut payload);
+        if let Err(e) = ty.validate(&payload, false) {
+            return Err(EngineError::new(
+                422,
+                "SIGNAL_PAYLOAD_INVALID",
+                format!("payload for signal `{name}` is invalid at {e}"),
+            ));
+        }
+        let seq = state.last_seq + 1;
+        self.commit(
+            id,
+            vec![Event::SignalReceived {
+                name: name.to_string(),
+                payload,
+            }],
+        )?;
+        tracing::info!(execution_id = %id, signal = %name, "signal received");
+        self.advance(id)?;
+        Ok(seq)
+    }
+
+    /// Evaluate a declared query against the current state of an execution.
+    /// Steps that have not completed read as `null`.
+    pub fn query(&self, id: &str, name: &str) -> Result<Value> {
+        let state = self.execution(id)?;
+        let def = self
+            .by_hash
+            .get(&state.definition_hash)
+            .cloned()
+            .ok_or_else(|| EngineError::not_found("workflow definition"))?;
+        let Some(q) = def.queries.get(name) else {
+            let declared: Vec<&str> = def.queries.keys().map(String::as_str).collect();
+            return Err(EngineError::new(
+                404,
+                "UNKNOWN_QUERY",
+                if declared.is_empty() {
+                    format!("{}@{} declares no queries", def.name, def.version)
+                } else {
+                    format!(
+                        "{}@{} has no query `{name}`; declared: {}",
+                        def.name,
+                        def.version,
+                        declared.join(", ")
+                    )
+                },
+            ));
+        };
+        struct QueryScope<'a>(crate::decide::StateScope<'a>, Value);
+        impl orbit_ir::Scope for QueryScope<'_> {
+            fn input(&self) -> &Value {
+                self.0.input()
+            }
+            fn step_output(&self, step: &str) -> Option<&Value> {
+                self.0.step_output(step).or(Some(&self.1))
+            }
+            fn execution_field(&self, field: &str) -> Option<Value> {
+                self.0.execution_field(field)
+            }
+        }
+        let scope = QueryScope(crate::decide::StateScope::new(&state), Value::Null);
+        orbit_ir::eval(&q.expr, &scope).map_err(|e| {
+            EngineError::new(
+                422,
+                "QUERY_FAILED",
+                format!("evaluating query `{name}`: {e}"),
+            )
+        })
+    }
+
     pub fn execution(&self, id: &str) -> Result<ExecutionState> {
         if let Some(s) = self.active.get(id) {
             return Ok(s.clone());

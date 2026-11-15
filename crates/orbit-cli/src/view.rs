@@ -102,6 +102,10 @@ pub fn mermaid(wf: &WorkflowIr) -> String {
                 i.task
                     .trim_start_matches(orbit_ir::WORKFLOW_CONTRACT_PREFIX)
             ),
+            Action::Await { signal, .. } => {
+                format!("{}<br/><small>await signal {signal}</small>", s.id)
+            }
+            Action::Compute { .. } => format!("{}<br/><small>compute</small>", s.id),
         };
         let label = match &s.for_each {
             Some(f) => format!("{label}<br/><small>for each {}</small>", f.variable),
@@ -140,6 +144,8 @@ pub fn dot(wf: &WorkflowIr) -> String {
                 format!("{}\\nsleep {}", s.id, duration(*duration_ms as i64))
             }
             Action::Workflow(i) => format!("{}\\nchild {}", s.id, i.task),
+            Action::Await { signal, .. } => format!("{}\\nawait {signal}", s.id),
+            Action::Compute { .. } => format!("{}\\ncompute", s.id),
         };
         let label = match &s.for_each {
             Some(f) => format!("{label}\\nfor each {}", f.variable),
@@ -212,6 +218,11 @@ pub fn ir_summary(wf: &WorkflowIr, tty: bool) -> String {
                 )
             }
             Action::Sleep { duration_ms } => format!("sleep {}", duration(*duration_ms as i64)),
+            Action::Await { signal, timeout_ms } => match timeout_ms {
+                Some(t) => format!("await signal {signal} (timeout {})", duration(*t as i64)),
+                None => format!("await signal {signal}"),
+            },
+            Action::Compute { .. } => "compute".to_string(),
         };
         let deps = if s.dependencies.is_empty() {
             String::new()
@@ -382,6 +393,9 @@ pub fn timeline(h: &Value, tty: bool) -> String {
         let mut detail = vec![];
         for key in [
             "step",
+            "name",
+            "signal",
+            "signal_seq",
             "attempt",
             "worker_id",
             "reason",

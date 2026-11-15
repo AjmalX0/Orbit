@@ -873,3 +873,201 @@ fn child_results_survive_a_parent_crash() {
         Some(json!({ "results": [{ "doubled": 10 }], "total": 1 }))
     );
 }
+
+// ---------------------------------------------------------------- signals
+
+const APPROVAL: &str = r#"workflow W { version "1.0.0"
+    input { n: Int }
+    signal approve { approved: Bool, by: String = "nobody" }
+    step wait { await approve timeout 1h }
+    step work { worker "a" when wait.approved with { n: input.n } compensate { worker "undo" with { n: work.n } } }
+    step after_work { worker "b" after work with { n: 0 } }
+    query progress = { approved: wait.approved, by: wait.by, n: work.n }
+    return { approved: wait.approved, by: wait.by }
+}"#;
+
+#[test]
+fn await_step_receives_a_signal_and_queries_read_partial_state() {
+    let mut h = Harness::new();
+    let ir = compile(APPROVAL);
+    assert_eq!(ir.ir_version, "orbit-ir/2");
+    let id = h.start(&ir, json!({ "n": 1 }));
+    assert_eq!(h.state(&id).units["wait"].status(), UnitStatus::Waiting);
+    // Before anything ran, every step reads as null.
+    assert_eq!(
+        h.engine.query(&id, "progress").unwrap(),
+        json!({ "approved": null, "by": null, "n": null })
+    );
+    h.engine
+        .signal(&id, "approve", json!({ "approved": true }))
+        .unwrap();
+    // Defaults from the signal declaration are applied.
+    assert_eq!(
+        h.state(&id).units["wait"].output,
+        Some(json!({ "approved": true, "by": "nobody" }))
+    );
+    let w = h.worker("w", "python", &["a", "b"]);
+    echo(&mut h, &w);
+    echo(&mut h, &w);
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Completed);
+    assert_eq!(s.output, Some(json!({ "approved": true, "by": "nobody" })));
+    assert_eq!(
+        h.engine.query(&id, "progress").unwrap(),
+        json!({ "approved": true, "by": "nobody", "n": 2 })
+    );
+    let ev = h.events(&id);
+    let pos = |n: &str| ev.iter().position(|e| *e == n).unwrap();
+    assert!(pos("SignalAwaitStarted") < pos("SignalReceived"));
+    assert!(pos("SignalReceived") < pos("SignalDelivered"));
+}
+
+#[test]
+fn signals_sent_early_are_buffered_and_delivered_in_order() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0"
+        signal note { text: String }
+        step first { worker "a" with { n: 1 } }
+        step one { await note after first timeout 1h }
+        step two { await note after one timeout 1h }
+        return { a: one.text, b: two.text }
+    }"#,
+    );
+    let id = h.start(&ir, json!({}));
+    h.engine
+        .signal(&id, "note", json!({ "text": "x" }))
+        .unwrap();
+    h.engine
+        .signal(&id, "note", json!({ "text": "y" }))
+        .unwrap();
+    assert_eq!(h.state(&id).signals.len(), 2);
+    let w = h.worker("w", "python", &["a"]);
+    echo(&mut h, &w);
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Completed);
+    assert_eq!(s.output, Some(json!({ "a": "x", "b": "y" })));
+    assert!(s.signals.iter().all(|r| r.delivered_to.is_some()));
+}
+
+#[test]
+fn signal_timeout_fails_the_step_and_compensates() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0"
+        signal approve { ok: Bool }
+        step work { worker "a" with { n: 1 } compensate { worker "undo" with { n: work.n } } }
+        step wait { await approve after work timeout 10m }
+    }"#,
+    );
+    let id = h.start(&ir, json!({}));
+    let w = h.worker("w", "python", &["a", "undo"]);
+    echo(&mut h, &w);
+    h.advance(10 * 60_000);
+    let s = h.state(&id);
+    assert_eq!(s.units["wait"].status(), UnitStatus::Failed);
+    assert_eq!(
+        s.units["wait"].error.as_ref().unwrap().code,
+        "SIGNAL_TIMEOUT"
+    );
+    assert_eq!(s.status, WorkflowStatus::Compensating);
+    // The worker's session expired during the silent ten minutes; register again.
+    let w = h.worker("w", "python", &["a", "undo"]);
+    let t = h.poll(&w).expect("compensation");
+    assert_eq!(t.task_name, "undo");
+}
+
+#[test]
+fn invalid_or_unknown_signals_and_queries_are_rejected() {
+    let mut h = Harness::new();
+    let ir = compile(APPROVAL);
+    let id = h.start(&ir, json!({ "n": 1 }));
+    let e = h
+        .engine
+        .signal(&id, "approve", json!({ "approved": "yes" }))
+        .unwrap_err();
+    assert_eq!((e.status, e.code), (422, "SIGNAL_PAYLOAD_INVALID"));
+    let e = h.engine.signal(&id, "nope", json!({})).unwrap_err();
+    assert_eq!((e.status, e.code), (404, "UNKNOWN_SIGNAL"));
+    let e = h.engine.query(&id, "nope").unwrap_err();
+    assert_eq!((e.status, e.code), (404, "UNKNOWN_QUERY"));
+    h.engine.cancel(&id, "test").unwrap();
+    let e = h
+        .engine
+        .signal(&id, "approve", json!({ "approved": true }))
+        .unwrap_err();
+    assert_eq!(e.status, 409);
+    // A cancelled execution stops waiting: the await unit is withdrawn.
+    assert_eq!(h.state(&id).units["wait"].status(), UnitStatus::Cancelled);
+}
+
+#[test]
+fn signals_survive_restart() {
+    let mut h = Harness::on_disk("signals");
+    let ir = compile(APPROVAL);
+    let id = h.start(&ir, json!({ "n": 5 }));
+    h.engine
+        .signal(&id, "approve", json!({ "approved": false, "by": "kim" }))
+        .unwrap();
+    let h = h.restart();
+    let s = h.state(&id);
+    assert_eq!(
+        s.units["wait"].output,
+        Some(json!({ "approved": false, "by": "kim" }))
+    );
+    assert_eq!(s.units["work"].status(), UnitStatus::Skipped);
+}
+
+// ---------------------------------------------------------------- compute
+
+#[test]
+fn compute_steps_run_in_the_runtime_including_fan_out() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"schema Item { price: Float, qty: Int }
+        workflow W { version "1.0.0"
+        input { items: List<Item> }
+        step totals { compute { total: sum(map(input.items, i => i.price * float(i.qty))), big: any(input.items, i => i.price > 50.0) } }
+        step each { for item in input.items compute item.qty * 2 }
+        step charge { worker "a" with { n: int(totals.total) } }
+        return { total: totals.total, big: totals.big, doubled: each, first: find(input.items, i => i.qty > 1) }
+    }"#,
+    );
+    let id = h.start(
+        &ir,
+        json!({ "items": [{ "price": 10.0, "qty": 1 }, { "price": 60.0, "qty": 2 }] }),
+    );
+    let w = h.worker("w", "python", &["a"]);
+    let t = echo(&mut h, &w);
+    assert_eq!(t.input, json!({ "n": 130 }));
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Completed);
+    assert_eq!(
+        s.output,
+        Some(
+            json!({ "total": 130.0, "big": true, "doubled": [2, 4], "first": { "price": 60.0, "qty": 2 } })
+        )
+    );
+}
+
+#[test]
+fn compute_errors_fail_the_step() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0" input { s: String } step parse { compute int(input.s) } }"#,
+    );
+    let id = h.start(&ir, json!({ "s": "not a number" }));
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    assert_eq!(
+        s.units["parse"].error.as_ref().unwrap().code,
+        "EXPRESSION_ERROR"
+    );
+}
+
+#[test]
+fn v1_workflows_keep_their_ir_version() {
+    let ir = compile(r#"workflow W { version "1.0.0" step s { worker "a" with { n: 1 } } }"#);
+    assert_eq!(ir.ir_version, "orbit-ir/1");
+    assert!(ir.signals.is_empty() && ir.queries.is_empty());
+}

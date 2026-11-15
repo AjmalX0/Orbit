@@ -529,3 +529,176 @@ fn loop_variable_is_not_in_scope_in_when() {
         step s { for x in input.xs when input.go worker "risk.analyze" with { amount: x } } }"#,
     );
 }
+
+// ------------------------------------------------- signals, queries, compute
+
+fn warnings(src: &str) -> Vec<&'static str> {
+    compile_str("test.orbit", src)
+        .diagnostics
+        .iter()
+        .filter(|d| !d.is_error())
+        .map(|d| d.code)
+        .collect()
+}
+
+#[test]
+fn await_steps_take_the_signal_type_and_queries_see_optional_steps() {
+    let ir = ok(r#"workflow W { version "1.0.0"
+        signal approve { approved: Bool, note: String? }
+        step wait { await approve timeout 1d }
+        step charge { worker "payments.charge" when wait.approved
+            with { order_id: "o", amount: 1.0 } }
+        query q = { approved: wait.approved, tx: charge.transaction_id }
+    }"#);
+    assert_eq!(ir.ir_version, "orbit-ir/2");
+    assert!(
+        matches!(&ir.step("wait").unwrap().action, Action::Await { signal, timeout_ms: Some(86_400_000) } if signal == "approve")
+    );
+    let q = &ir.queries["q"];
+    // Steps may not have run yet when a query is evaluated, so every field is optional.
+    assert_eq!(
+        q.output_type.to_string(),
+        "{ approved: Bool?, tx: String? }"
+    );
+}
+
+#[test]
+fn signal_errors() {
+    let c = codes(
+        r#"workflow W { version "1.0.0" signal approve { ok: Bool } step w { await aprove timeout 1d } }"#,
+    );
+    assert_eq!(c, vec!["E0315"]);
+    assert!(errors(r#"workflow W { version "1.0.0" signal approve { ok: Bool } step w { await aprove timeout 1d } }"#)
+        .contains("did you mean `approve`?"));
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" signal a { x: Int } signal a { y: Int } step w { await a timeout 1d } }"#
+        ),
+        vec!["E0317"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" signal a { x: Int } step w { await a retry { attempts: 2 } timeout 1d } }"#
+        ),
+        vec!["E0307"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" input { l: List<Int> } signal a { x: Int } step w { for i in input.l await a timeout 1d } }"#
+        ),
+        vec!["E0307"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" signal a { x: Int } step w { await a timeout 1d compensate { worker "payments.refund" with { transaction_id: "t" } } } }"#
+        ),
+        vec!["E0308"]
+    );
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" step w { compute 1 } query q = 1 query q = 2 }"#),
+        vec!["E0318"]
+    );
+}
+
+#[test]
+fn compute_types_flow_to_later_steps() {
+    let ir = ok(r#"workflow W { version "1.0.0"
+        input { amounts: List<Float> }
+        step total { compute { sum: sum(input.amounts), n: len(input.amounts) } }
+        step charge { worker "payments.charge" with { order_id: "o", amount: total.sum } }
+        return { n: total.n }
+    }"#);
+    assert_eq!(
+        ir.step("total").unwrap().output_type.to_string(),
+        "{ sum: Float, n: Int }"
+    );
+    assert_eq!(ir.step("charge").unwrap().dependencies, vec!["total"]);
+    // A wrongly typed use of a computed value is caught.
+    let e = errors(
+        r#"workflow W { version "1.0.0" input { a: List<Float> }
+        step total { compute sum(input.a) }
+        step charge { worker "payments.charge" with { order_id: total, amount: 1.0 } } }"#,
+    );
+    assert!(e.contains("E0400"), "{e}");
+}
+
+#[test]
+fn lambdas() {
+    let ir = ok(r#"schema I { p: Float, q: Int }
+        workflow W { version "1.0.0" input { items: List<I> }
+        step c { compute {
+            prices: map(input.items, i => i.p),
+            cheap: filter(input.items, i => i.p < 5.0),
+            first: find(input.items, i => i.q > 1),
+            any_big: any(input.items, i => i.p > 100.0),
+            all_one: all(input.items, i => i.q == 1)
+        } } }"#);
+    assert_eq!(
+        ir.step("c").unwrap().output_type.to_string(),
+        "{ prices: List<Float>, cheap: List<I>, first: I?, any_big: Bool, all_one: Bool }"
+    );
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" input { x: Int } step c { compute x => x } }"#),
+        vec!["E0415"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" input { l: List<Int> } step c { compute map(input.l, input => input) } }"#
+        ),
+        vec!["E0413"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" input { l: List<Int> } step c { compute filter(input.l, i => i + 1) } }"#
+        ),
+        vec!["E0400"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" input { l: Int } step c { compute map(input.l, i => i) } }"#
+        ),
+        vec!["E0400"]
+    );
+}
+
+#[test]
+fn static_safety_warnings() {
+    let src = r#"
+task "charge" { version "1.0.0" input { n: Int } output { id: String } compensated_by "refund" }
+task "refund" { version "1.0.0" input { id: String } output { ok: Bool } }
+task "log" { version "1.0.0" input { m: String } output { ok: Bool } }
+workflow W { version "1.0.0"
+    signal approve { ok: Bool }
+    signal unused { ok: Bool }
+    step w { await approve }
+    step a { worker "charge" with { n: 1 } }
+    step b { worker "charge" with { n: 1 } compensate { worker "log" with { m: b.id } } }
+    step c { worker "charge" with { n: 1 } compensate { worker "refund" with { id: c.id } } }
+    step never { worker "log" when 1 > 2 with { m: "x" } }
+    step always { worker "log" when true with { m: "x" } }
+}"#;
+    let mut w = warnings(src);
+    w.sort();
+    assert_eq!(
+        w,
+        vec!["W0601", "W0602", "W0603", "W0604", "W0605", "W0606"]
+    );
+    assert_eq!(
+        compile_str("t.orbit", r#"task "x" { version "1.0.0" input { n: Int } output { n: Int } compensated_by "nope" }"#)
+            .diagnostics
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>(),
+        vec!["E0316"]
+    );
+}
+
+#[test]
+fn ir_version_stays_1_without_new_features() {
+    let ir = ok(
+        r#"workflow W { version "1.0.0" step s { worker "risk.analyze" with { amount: 1.0 } } }"#,
+    );
+    assert_eq!(ir.ir_version, "orbit-ir/1");
+    let json = serde_json::to_string(&ir).unwrap();
+    assert!(!json.contains("signals") && !json.contains("queries"));
+}

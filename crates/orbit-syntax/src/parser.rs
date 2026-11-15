@@ -37,6 +37,8 @@ const WORKFLOW_MEMBERS: &[&str] = &[
     "input",
     "output",
     "step",
+    "signal",
+    "query",
     "return",
     "on",
 ];
@@ -44,6 +46,8 @@ const STEP_MEMBERS: &[&str] = &[
     "worker",
     "sleep",
     "workflow",
+    "await",
+    "compute",
     "for",
     "max_parallel",
     "using",
@@ -56,7 +60,13 @@ const STEP_MEMBERS: &[&str] = &[
     "when",
     "compensate",
 ];
-const TASK_MEMBERS: &[&str] = &["version", "input", "output", "description"];
+const TASK_MEMBERS: &[&str] = &[
+    "version",
+    "input",
+    "output",
+    "description",
+    "compensated_by",
+];
 
 struct Parser {
     tokens: Vec<Token>,
@@ -334,6 +344,7 @@ impl Parser {
             input: None,
             output: None,
             description: None,
+            compensated_by: None,
             span: start,
         };
         let span = self.block("task contract", TASK_MEMBERS, |p| {
@@ -361,6 +372,12 @@ impl Parser {
                     p.bump();
                     p.eat_colon();
                     t.output = Some(p.type_expr()?);
+                }
+                "compensated_by" => {
+                    p.bump();
+                    p.eat_colon();
+                    t.compensated_by =
+                        Some(p.string("a task name string, e.g. \"payments.refund\"")?);
                 }
                 _ => return Ok(false),
             }
@@ -449,6 +466,8 @@ impl Parser {
             input: vec![],
             output: None,
             steps: vec![],
+            signals: vec![],
+            queries: vec![],
             ret: None,
             span: start,
         };
@@ -483,6 +502,26 @@ impl Parser {
                     wf.output = Some((fields, s.to(span)));
                 }
                 "step" => wf.steps.push(p.step()?),
+                "signal" => {
+                    let s = p.bump().span;
+                    let name = p.ident("a signal name")?;
+                    let (fields, span) = p.record_fields("signal payload")?;
+                    wf.signals.push(SignalDecl {
+                        name,
+                        fields,
+                        span: s.to(span),
+                    });
+                }
+                "query" => {
+                    let s = p.bump().span;
+                    let name = p.ident("a query name")?;
+                    if !p.eat(&TokenKind::Eq) {
+                        p.eat_colon();
+                    }
+                    let expr = p.expr();
+                    let span = s.to(expr.span());
+                    wf.queries.push(QueryDecl { name, expr, span });
+                }
                 "return" => {
                     p.bump();
                     wf.ret = Some(p.expr());
@@ -583,7 +622,7 @@ impl Parser {
             }
         };
         match word.as_str() {
-            "worker" | "sleep" | "workflow" => {
+            "worker" | "sleep" | "workflow" | "await" | "compute" => {
                 self.bump();
                 self.eat_colon();
                 let new = match word.as_str() {
@@ -595,6 +634,12 @@ impl Parser {
                         let (w, s) = self.string("a workflow name string, e.g. \"Shipping\"")?;
                         StepAction::Workflow(w, s)
                     }
+                    "await" => StepAction::Await(self.ident("a signal name")?),
+                    "compute" => {
+                        let e = self.expr();
+                        let s = e.span();
+                        StepAction::Compute(e, s)
+                    }
                     _ => {
                         let (d, s) = self.duration()?;
                         StepAction::Sleep(d, s)
@@ -604,7 +649,7 @@ impl Parser {
                     self.diagnostics.push(
                         Diagnostic::error(
                             "E0106",
-                            "a step can only have one `worker`, `workflow` or `sleep`",
+                            "a step can only have one `worker`, `workflow`, `sleep`, `await` or `compute`",
                             kw_span,
                         )
                         .with_help("split the work into separate steps"),
@@ -930,6 +975,14 @@ impl Parser {
             TokenKind::Ident(name) => {
                 self.bump();
                 let id = Ident { name, span };
+                // `x => body` (a lambda, accepted by the compiler only as an
+                // argument of `map`, `filter`, `any`, `all` and `find`).
+                if self.at(&TokenKind::FatArrow) && !self.tok().newline_before {
+                    self.bump();
+                    let body = self.expr();
+                    let s = span.to(body.span());
+                    return Ok(Expr::Lambda(id, Box::new(body), s));
+                }
                 if self.at(&TokenKind::LParen) && !self.tok().newline_before {
                     self.bump();
                     let mut args = vec![];

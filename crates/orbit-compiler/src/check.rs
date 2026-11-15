@@ -422,7 +422,124 @@ impl Checker<'_, '_> {
                 )
             }
             Expr::Call(name, args, span) => self.call(name, args, *span),
+            Expr::Lambda(_, _, span) => {
+                self.error(
+                    Diagnostic::error(
+                        "E0415",
+                        "a lambda can only be passed to `map`, `filter`, `any`, `all` or `find`",
+                        *span,
+                    )
+                    .with_help("for example `map(input.items, item => item.price)`"),
+                );
+                (Type::Json, lit(Value::Null))
+            }
         }
+    }
+
+    /// `map`, `filter`, `any`, `all`, `find`: a list and a lambda over its items.
+    fn higher_order(&mut self, name: &ast::Ident, args: &[Expr], span: Span) -> (Type, ir::Expr) {
+        let sig = match name.name.as_str() {
+            "map" => "map(List<T>, T => U) -> List<U>",
+            "filter" => "filter(List<T>, T => Bool) -> List<T>",
+            "find" => "find(List<T>, T => Bool) -> T?",
+            _ => "any|all(List<T>, T => Bool) -> Bool",
+        };
+        if args.len() != 2 {
+            self.error(
+                Diagnostic::error(
+                    "E0407",
+                    format!("`{}` takes 2 argument(s), found {}", name.name, args.len()),
+                    span,
+                )
+                .with_note(format!("signature: {sig}")),
+            );
+            return (Type::Json, lit(Value::Null));
+        }
+        let (list_ty, list_ir) = self.infer(&args[0]);
+        let item = match list_ty.unwrap_optional() {
+            Type::List { item } => (**item).clone(),
+            Type::Json => Type::Json,
+            other => {
+                self.error(Diagnostic::error(
+                    "E0400",
+                    format!(
+                        "argument 1 of `{}` must be a List, found `{other}`",
+                        name.name
+                    ),
+                    args[0].span(),
+                ));
+                Type::Json
+            }
+        };
+        let Expr::Lambda(param, body, _) = &args[1] else {
+            self.error(
+                Diagnostic::error(
+                    "E0400",
+                    format!("argument 2 of `{}` must be a lambda", name.name),
+                    args[1].span(),
+                )
+                .with_help("for example `item => item.price`")
+                .with_note(format!("signature: {sig}")),
+            );
+            return (Type::Json, lit(Value::Null));
+        };
+        let reserved = ["input", "execution"];
+        if reserved.contains(&param.name.as_str())
+            || self.env.steps.contains_key(&param.name)
+            || self.env.locals.iter().any(|(n, _)| *n == param.name)
+        {
+            self.error(Diagnostic::error(
+                "E0413",
+                format!(
+                    "lambda parameter `{}` shadows a name already in scope",
+                    param.name
+                ),
+                param.span,
+            ));
+        }
+        let mut locals = self.env.locals.to_vec();
+        locals.push((param.name.clone(), item.clone()));
+        let env = Env {
+            input: self.env.input,
+            steps: self.env.steps,
+            allowed: self.env.allowed,
+            context: self.env.context,
+            locals: &locals,
+        };
+        let (body_ty, body_ir) = {
+            let mut inner = Checker {
+                env: &env,
+                diags: self.diags,
+            };
+            if name.name == "map" {
+                inner.infer(body)
+            } else {
+                inner.check(body, Some(&Type::Bool))
+            }
+        };
+        let ty = match name.name.as_str() {
+            "map" => Type::List {
+                item: Box::new(body_ty),
+            },
+            "filter" => Type::List {
+                item: Box::new(item),
+            },
+            "find" => item.optional(),
+            _ => Type::Bool,
+        };
+        (
+            ty,
+            ir::Expr::Call {
+                function: name.name.clone(),
+                args: vec![
+                    list_ir,
+                    ir::Expr::Lambda {
+                        param: param.name.clone(),
+                        body: Box::new(body_ir),
+                    },
+                ],
+            },
+        )
     }
 
     fn unknown_field(&mut self, name: &str, span: Span, on: &Type) {
@@ -674,6 +791,9 @@ impl Checker<'_, '_> {
     }
 
     fn call(&mut self, name: &ast::Ident, args: &[Expr], span: Span) -> (Type, ir::Expr) {
+        if ir::expr::HIGHER_ORDER.contains(&name.name.as_str()) {
+            return self.higher_order(name, args, span);
+        }
         let typed: Vec<(Type, ir::Expr)> = args.iter().map(|a| self.infer(a)).collect();
         let lowered = ir::Expr::Call {
             function: name.name.clone(),
@@ -834,6 +954,24 @@ impl Checker<'_, '_> {
                     }
                 }
                 if tys.iter().all(|t| **t == Type::Int) {
+                    Type::Int
+                } else {
+                    Type::Float
+                }
+            }
+            "sum" => {
+                let item = match tys.first().map(|t| t.unwrap_optional()) {
+                    Some(Type::List { item }) => Some((**item).clone()),
+                    _ => None,
+                };
+                if arity(self, 1..=1, "sum(List<Int | Float>) -> Int | Float") {
+                    match &item {
+                        Some(t) if t.is_numeric() || *t == Type::Json => {}
+                        _ if *tys[0] == Type::Json => {}
+                        _ => arg_err(self, 0, "a List of Int or Float"),
+                    }
+                }
+                if item == Some(Type::Int) {
                     Type::Int
                 } else {
                     Type::Float

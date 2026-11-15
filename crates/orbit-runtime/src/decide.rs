@@ -227,6 +227,8 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
     }
 
     // 2. Per-unit transitions: deadlines, timers, retries, redelivery.
+    // Signals delivered in this pass (so two waiting units never take the same one).
+    let mut taken: Vec<u64> = vec![];
     for (key, u) in &state.units {
         let inv = invocation(def, key);
         match u.status() {
@@ -260,7 +262,28 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
                 }
             }
             UnitStatus::Waiting => {
-                if u.wake_at_ms.is_some_and(|w| now >= w) {
+                if let Some(signal) = awaited_signal(def, key) {
+                    // `await`: take the oldest undelivered signal of this name.
+                    let next = state.signals.iter().find(|r| {
+                        r.name == signal && r.delivered_to.is_none() && !taken.contains(&r.seq)
+                    });
+                    if let Some(r) = next {
+                        taken.push(r.seq);
+                        out.push(Event::SignalDelivered {
+                            step: key.clone(),
+                            signal_seq: r.seq,
+                        });
+                    } else if u.wake_at_ms.is_some_and(|w| now >= w) {
+                        out.push(Event::StepFailed {
+                            step: key.clone(),
+                            error: TaskError::new(
+                                codes::SIGNAL_TIMEOUT,
+                                format!("no `{signal}` signal arrived before the step's timeout"),
+                                false,
+                            ),
+                        });
+                    }
+                } else if u.wake_at_ms.is_some_and(|w| now >= w) {
                     out.push(Event::TimerFired { step: key.clone() });
                 }
             }
@@ -303,6 +326,39 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
         WorkflowStatus::Running => decide_running(state, def, now),
         WorkflowStatus::Compensating => decide_compensating(state, def),
         _ => vec![],
+    }
+}
+
+/// The signal an `await` unit waits for.
+fn awaited_signal<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a str> {
+    let k = parse_key(key);
+    if k.compensation {
+        return None;
+    }
+    match &def.step(k.step)?.action {
+        Action::Await { signal, .. } => Some(signal),
+        _ => None,
+    }
+}
+
+/// Evaluate a `compute` step (or one element of it) in the runtime.
+fn compute(state: &ExecutionState, def: &WorkflowIr, key: &str, expr: &orbit_ir::Expr) -> Event {
+    let mut scope = StateScope::new(state);
+    scope.local = element(state, def, key);
+    match eval(expr, &scope) {
+        Ok(output) => Event::StepSucceeded {
+            step: key.into(),
+            attempt: 1,
+            output,
+        },
+        Err(e) => Event::StepFailed {
+            step: key.into(),
+            error: TaskError::new(
+                codes::EXPRESSION_ERROR,
+                format!("evaluating `compute`: {e}"),
+                false,
+            ),
+        },
     }
 }
 
@@ -365,6 +421,14 @@ fn advance_fan_out(state: &ExecutionState, def: &WorkflowIr, step: &StepIr, out:
             attempt: 1,
             output,
         });
+        return;
+    }
+    if let Action::Compute { expr } = &step.action {
+        for (key, u) in keys.iter().zip(&units) {
+            if u.status() == UnitStatus::Pending {
+                out.push(compute(state, def, key, expr));
+            }
+        }
         return;
     }
     let Some(inv) = step.invocation() else { return };
@@ -469,6 +533,12 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
                 Action::Task(inv) | Action::Workflow(inv) => {
                     out.push(schedule(state, def, &step.id, inv))
                 }
+                Action::Await { signal, timeout_ms } => out.push(Event::SignalAwaitStarted {
+                    step: step.id.clone(),
+                    signal: signal.clone(),
+                    deadline_ms: timeout_ms.map(|t| now + t),
+                }),
+                Action::Compute { expr } => out.push(compute(state, def, &step.id, expr)),
             }
         }
         if !out.is_empty() {

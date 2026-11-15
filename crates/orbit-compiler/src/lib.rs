@@ -10,8 +10,8 @@ pub mod types;
 
 use check::{Checker, Env};
 use orbit_ir::{
-    self as ir, Action, Backoff, FieldType, ForEach, Invocation, RetryPolicy, SourceLocation,
-    StepIr, TaskContract, Type, WorkflowIr, WORKFLOW_CONTRACT_PREFIX,
+    self as ir, Action, Backoff, FieldType, ForEach, Invocation, QueryIr, RetryPolicy,
+    SourceLocation, StepIr, TaskContract, Type, WorkflowIr, WORKFLOW_CONTRACT_PREFIX,
 };
 use orbit_syntax::ast::{self, Declaration, StepAction};
 use orbit_syntax::diagnostic::{suggest, Diagnostic};
@@ -293,8 +293,29 @@ fn analyze(comp: &mut Compilation, prelude_id: FileId, programs: &[(FileId, ast:
                 output,
                 builtin: t.span.file == prelude_id,
                 workflow_hash: None,
+                compensated_by: t.compensated_by.as_ref().map(|(n, _)| n.clone()),
             },
         );
+    }
+    // `compensated_by` must name a declared task.
+    for (_, program) in programs {
+        for d in &program.declarations {
+            if let ast::Declaration::Task(t) = d {
+                if let Some((by, span)) = &t.compensated_by {
+                    if !contracts.contains_key(by) {
+                        let mut diag = Diagnostic::error(
+                            "E0316",
+                            format!("`compensated_by` names unknown task `{by}`"),
+                            *span,
+                        );
+                        if let Some(s) = suggest(by, contracts.keys().map(String::as_str)) {
+                            diag = diag.with_help(format!("did you mean `{s}`?"));
+                        }
+                        diags.push(diag);
+                    }
+                }
+            }
+        }
     }
 
     // Child workflows: lower callees before callers so a caller can pin the
@@ -371,6 +392,7 @@ fn analyze(comp: &mut Compilation, prelude_id: FileId, programs: &[(FileId, ast:
                 output: ir.output.clone(),
                 builtin: false,
                 workflow_hash: Some(ir.definition_hash.clone()),
+                compensated_by: None,
             },
             None => TaskContract {
                 name: format!("{WORKFLOW_CONTRACT_PREFIX}{}", wf.name.name),
@@ -379,6 +401,7 @@ fn analyze(comp: &mut Compilation, prelude_id: FileId, programs: &[(FileId, ast:
                 output: Type::Json,
                 builtin: false,
                 workflow_hash: Some(String::new()),
+                compensated_by: None,
             },
         };
         all_contracts.insert(contract.name.clone(), contract);
@@ -443,6 +466,26 @@ fn lower_workflow(
         .output
         .as_ref()
         .map(|(fields, _)| Type::record(None, schemas.fields(fields, diags, &mut vec![])));
+
+    // --- Signals: typed messages the workflow accepts.
+    let mut signal_types: BTreeMap<String, Type> = BTreeMap::new();
+    let mut signal_spans: BTreeMap<&str, Span> = BTreeMap::new();
+    for sig in &wf.signals {
+        if let Some(prev) = signal_spans.get(sig.name.name.as_str()) {
+            diags.push(
+                Diagnostic::error(
+                    "E0317",
+                    format!("signal `{}` is declared more than once", sig.name.name),
+                    sig.name.span,
+                )
+                .with_label(*prev, "first declared here"),
+            );
+            continue;
+        }
+        signal_spans.insert(&sig.name.name, sig.name.span);
+        let ty = Type::record(None, schemas.fields(&sig.fields, diags, &mut vec![]));
+        signal_types.insert(sig.name.name.clone(), ty);
+    }
 
     // --- Steps: names, actions and output types.
     let mut by_name: BTreeMap<&str, &ast::Step> = BTreeMap::new();
@@ -514,11 +557,33 @@ fn lower_workflow(
                 c.map(|c| c.output.clone()).unwrap_or(Type::Json)
             }
             Some(StepAction::Sleep(..)) => Type::record(None, vec![]),
+            Some(StepAction::Await(sig)) => match signal_types.get(&sig.name) {
+                Some(t) => t.clone(),
+                None => {
+                    let mut d = Diagnostic::error(
+                        "E0315",
+                        format!("unknown signal `{}`", sig.name),
+                        sig.span,
+                    );
+                    if let Some(sug) = suggest(&sig.name, signal_types.keys().map(String::as_str)) {
+                        d = d.with_help(format!("did you mean `{sug}`?"));
+                    } else {
+                        d = d.with_help(format!(
+                            "declare it in the workflow: `signal {} {{ ... }}`",
+                            sig.name
+                        ));
+                    }
+                    diags.push(d);
+                    Type::Json
+                }
+            },
+            // Typed in dependency order below, once the steps it reads are typed.
+            Some(StepAction::Compute(..)) => Type::Json,
             None => {
                 diags.push(
                     Diagnostic::error("E0301", format!("step `{name}` does nothing"), s.name.span)
                         .with_help(
-                            "add `worker \"task.name\"`, `workflow \"Name\"` or `sleep 10s`",
+                            "add `worker \"task.name\"`, `workflow \"Name\"`, `sleep 10s`, `await <signal>` or `compute <expression>`",
                         ),
                 );
                 Type::Json
@@ -568,11 +633,16 @@ fn lower_workflow(
         }
         let mut refs = vec![];
         let items = s.body.for_each.as_ref().map(|f| &f.items);
+        let computed = match &s.action {
+            Some(StepAction::Compute(e, _)) => Some(e),
+            _ => None,
+        };
         for e in [
             s.body.with.as_ref(),
             s.body.condition.as_ref(),
             s.body.idempotency_key.as_ref(),
             items,
+            computed,
         ]
         .into_iter()
         .flatten()
@@ -659,6 +729,7 @@ fn lower_workflow(
     let mut used_contracts: BTreeMap<String, TaskContract> = BTreeMap::new();
     for name in &order {
         let s = by_name[name];
+        let mut computed_type: Option<Type> = None;
         source_map.insert(name.to_string(), loc(s.name.span));
         // `for item in <list>`: type the list and bind the loop variable.
         let mut locals: Vec<(String, Type)> = vec![];
@@ -711,6 +782,12 @@ fn lower_workflow(
                     "`for` is not allowed in a `sleep` step",
                     f.span,
                 ));
+            }
+            if matches!(s.action, Some(StepAction::Await(..))) {
+                ck.diags.push(
+                    Diagnostic::error("E0307", "`for` is not allowed in an `await` step", f.span)
+                        .with_note("an `await` step receives one signal"),
+                );
             }
             locals.push((var.clone(), element));
             let max_parallel = s.body.max_parallel.and_then(|(n, span)| {
@@ -821,15 +898,53 @@ fn lower_workflow(
                 reject_members(&s.body, "a `sleep` step", false, ck.diags);
                 Some(Action::Sleep { duration_ms: *ms })
             }
+            Some(StepAction::Await(sig)) => {
+                // `timeout` bounds the wait; nothing else applies.
+                let mut body = s.body.clone();
+                let timeout_ms = body.timeout.take().map(|t| t.0);
+                reject_members(&body, "an `await` step", false, ck.diags);
+                if timeout_ms.is_none()
+                    && wf.timeout.is_none()
+                    && signal_types.contains_key(&sig.name)
+                {
+                    ck.diags.push(
+                        Diagnostic::warning(
+                            "W0606",
+                            format!(
+                                "step `{name}` waits for signal `{}` with no timeout",
+                                sig.name
+                            ),
+                            sig.span,
+                        )
+                        .with_help("add `timeout 7d` to the step (or a workflow `timeout`) so the execution cannot wait forever"),
+                    );
+                }
+                Some(Action::Await {
+                    signal: sig.name.clone(),
+                    timeout_ms,
+                })
+            }
+            Some(StepAction::Compute(e, _)) => {
+                reject_members(&s.body, "a `compute` step", false, ck.diags);
+                let (t, l) = ck.check(e, None);
+                computed_type = Some(t);
+                Some(Action::Compute { expr: l })
+            }
             None => None,
         };
 
         // Compensation: may read this step (non-optional, it succeeded) and its ancestors.
         let compensation = s.compensation.as_ref().and_then(|c| {
-            if matches!(s.action, Some(StepAction::Sleep(..))) {
+            let nothing = match s.action {
+                Some(StepAction::Sleep(..)) => Some("a `sleep` step"),
+                Some(StepAction::Await(..)) => Some("an `await` step"),
+                Some(StepAction::Compute(..)) => Some("a `compute` step"),
+                _ => None,
+            };
+            if let Some(what) = nothing {
                 diags.push(Diagnostic::error(
                     "E0308",
-                    "a `sleep` step has nothing to compensate",
+                    format!("{what} has nothing to compensate"),
                     c.span,
                 ));
                 return None;
@@ -860,11 +975,21 @@ fn lower_workflow(
                     }
                     Some(lower_invocation(task, contract, &c.body, &mut ck, c.span))
                 }
-                Some(StepAction::Sleep(_, span)) | Some(StepAction::Workflow(_, span)) => {
+                Some(StepAction::Sleep(_, span))
+                | Some(StepAction::Workflow(_, span))
+                | Some(StepAction::Compute(_, span)) => {
                     ck.diags.push(Diagnostic::error(
                         "E0308",
                         "compensation must call a worker task",
                         *span,
+                    ));
+                    None
+                }
+                Some(StepAction::Await(sig)) => {
+                    ck.diags.push(Diagnostic::error(
+                        "E0308",
+                        "compensation must call a worker task",
+                        sig.span,
                     ));
                     None
                 }
@@ -878,6 +1003,78 @@ fn lower_workflow(
                 }
             }
         });
+
+        if let Some(t) = computed_type {
+            let t = if s.body.for_each.is_some() {
+                Type::List { item: Box::new(t) }
+            } else {
+                t
+            };
+            let t = if s.body.condition.is_some() {
+                t.optional()
+            } else {
+                t
+            };
+            step_types.insert(name.to_string(), t);
+        }
+
+        // Static safety: tasks that declare `compensated_by` must be compensated.
+        if let (Some(StepAction::Worker(task, task_span)), Some(Some(contract))) =
+            (&s.action, step_contracts.get(name))
+        {
+            if let Some(by) = &contract.compensated_by {
+                let used = s.compensation.as_ref().and_then(|c| match &c.action {
+                    Some(StepAction::Worker(t, sp)) => Some((t, *sp)),
+                    _ => None,
+                });
+                match used {
+                    None if s.compensation.is_none() => diags.push(
+                        Diagnostic::warning(
+                            "W0601",
+                            format!("step `{name}` calls `{task}` but has no compensation"),
+                            *task_span,
+                        )
+                        .with_note(format!("`{task}` declares `compensated_by \"{by}\"`: if a later step fails, its effect would be left in place"))
+                        .with_help(format!("add `compensate {{ worker \"{by}\" with {{ ... }} }}`")),
+                    ),
+                    Some((t, sp)) if t != by => diags.push(
+                        Diagnostic::warning(
+                            "W0602",
+                            format!("step `{name}` compensates `{task}` with `{t}`, but the contract names `{by}`"),
+                            sp,
+                        )
+                        .with_help(format!("use `worker \"{by}\"` in the compensation, or change the contract's `compensated_by`")),
+                    ),
+                    _ => {}
+                }
+            }
+        }
+        // Static safety: a condition that is constant can be decided now.
+        if let (Some(c), Some(cond_ir)) = (&s.body.condition, &condition) {
+            if let Some(v) = constant_value(cond_ir) {
+                if v == serde_json::Value::Bool(false) || v.is_null() {
+                    diags.push(
+                        Diagnostic::warning(
+                            "W0603",
+                            format!("step `{name}` never runs: its `when` condition is always false"),
+                            c.span(),
+                        )
+                        .with_help("remove the step, or make the condition depend on input or step results"),
+                    );
+                } else if v == serde_json::Value::Bool(true) {
+                    diags.push(
+                        Diagnostic::warning(
+                            "W0604",
+                            format!("the `when` condition of step `{name}` is always true"),
+                            c.span(),
+                        )
+                        .with_help(
+                            "remove `when`; it also makes the step's output optional for no reason",
+                        ),
+                    );
+                }
+            }
+        }
 
         if let Some(action) = action {
             let mut dependencies: Vec<String> = deps[name].keys().map(|d| d.to_string()).collect();
@@ -930,11 +1127,75 @@ fn lower_workflow(
         (None, None) => (Type::record(None, vec![]), None),
     };
 
+    // --- Queries: any step may not have run yet, so every step output is optional.
+    let query_steps: BTreeMap<String, Type> = step_types
+        .iter()
+        .map(|(k, t)| (k.clone(), t.clone().optional()))
+        .collect();
+    let mut queries: BTreeMap<String, QueryIr> = BTreeMap::new();
+    let mut query_spans: BTreeMap<&str, Span> = BTreeMap::new();
+    for q in &wf.queries {
+        if let Some(prev) = query_spans.get(q.name.name.as_str()) {
+            diags.push(
+                Diagnostic::error(
+                    "E0318",
+                    format!("query `{}` is declared more than once", q.name.name),
+                    q.name.span,
+                )
+                .with_label(*prev, "first declared here"),
+            );
+            continue;
+        }
+        query_spans.insert(&q.name.name, q.name.span);
+        let env = Env {
+            input: Some(&input_ty),
+            steps: &query_steps,
+            allowed: None,
+            context: "a query",
+            locals: &[],
+        };
+        let (t, l) = Checker {
+            env: &env,
+            diags: &mut *diags,
+        }
+        .check(&q.expr, None);
+        queries.insert(
+            q.name.name.clone(),
+            QueryIr {
+                expr: l,
+                output_type: t,
+            },
+        );
+    }
+    // Static safety: a signal nobody awaits is either dead or a missing step.
+    for sig in &wf.signals {
+        let awaited = wf
+            .steps
+            .iter()
+            .any(|s| matches!(&s.action, Some(StepAction::Await(a)) if a.name == sig.name.name));
+        if !awaited {
+            diags.push(
+                Diagnostic::warning(
+                    "W0605",
+                    format!(
+                        "signal `{}` is declared but no step awaits it",
+                        sig.name.name
+                    ),
+                    sig.name.span,
+                )
+                .with_help(format!(
+                    "add a step with `await {}`, or remove the declaration",
+                    sig.name.name
+                )),
+            );
+        }
+    }
+
     let errors = diags.iter().filter(|d| d.is_error()).count();
     if errors > start_errors || missing_child {
         return None;
     }
-    let ir = WorkflowIr {
+    let mut ir = WorkflowIr {
         ir_version: ir::IR_VERSION.into(),
         name: wf.name.name.clone(),
         version,
@@ -946,11 +1207,53 @@ fn lower_workflow(
         steps: steps_ir,
         result,
         contracts: used_contracts,
+        signals: signal_types,
+        queries,
         source_map,
-    }
-    .seal();
+    };
+    ir.ir_version = ir.required_ir_version().into();
+    let ir = ir.seal();
     debug_assert!(ir.validate().is_ok(), "{:?}", ir.validate());
     Some(ir)
+}
+
+/// The value of an IR expression that reads nothing (no input, steps,
+/// execution metadata or variables), if it evaluates without error.
+fn constant_value(e: &orbit_ir::Expr) -> Option<serde_json::Value> {
+    fn reads_state(e: &orbit_ir::Expr) -> bool {
+        use orbit_ir::Expr as E;
+        match e {
+            E::Input { .. } | E::Step { .. } | E::Execution { .. } | E::Local { .. } => true,
+            E::Literal { .. } => false,
+            E::Index { target, index } => reads_state(target) || reads_state(index),
+            E::Object { fields } => fields.iter().any(|f| reads_state(&f.value)),
+            E::List { items } | E::Call { args: items, .. } => items.iter().any(reads_state),
+            E::Binary { left, right, .. } => reads_state(left) || reads_state(right),
+            E::Unary { operand, .. } => reads_state(operand),
+            E::If {
+                condition,
+                then,
+                otherwise,
+            } => reads_state(condition) || reads_state(then) || reads_state(otherwise),
+            E::Lambda { .. } => true,
+        }
+    }
+    if reads_state(e) {
+        return None;
+    }
+    struct Empty(serde_json::Value);
+    impl orbit_ir::Scope for Empty {
+        fn input(&self) -> &serde_json::Value {
+            &self.0
+        }
+        fn step_output(&self, _: &str) -> Option<&serde_json::Value> {
+            None
+        }
+        fn execution_field(&self, _: &str) -> Option<serde_json::Value> {
+            None
+        }
+    }
+    orbit_ir::eval(e, &Empty(serde_json::Value::Null)).ok()
 }
 
 fn reject_members(

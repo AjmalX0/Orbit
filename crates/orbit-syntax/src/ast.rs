@@ -44,6 +44,8 @@ pub struct TaskDecl {
     pub input: Option<TypeExpr>,
     pub output: Option<TypeExpr>,
     pub description: Option<String>,
+    /// `compensated_by "<task>"`: steps calling this task must compensate with it.
+    pub compensated_by: Option<(String, Span)>,
     pub span: Span,
 }
 
@@ -85,7 +87,25 @@ pub struct Workflow {
     pub input: Vec<Field>,
     pub output: Option<(Vec<Field>, Span)>,
     pub steps: Vec<Step>,
+    pub signals: Vec<SignalDecl>,
+    pub queries: Vec<QueryDecl>,
     pub ret: Option<Expr>,
+    pub span: Span,
+}
+
+/// `signal <name> { <fields> }`: a typed message the workflow can receive.
+#[derive(Debug, Clone)]
+pub struct SignalDecl {
+    pub name: Ident,
+    pub fields: Vec<Field>,
+    pub span: Span,
+}
+
+/// `query <name> = <expr>`: a read-only view of the execution state.
+#[derive(Debug, Clone)]
+pub struct QueryDecl {
+    pub name: Ident,
+    pub expr: Expr,
     pub span: Span,
 }
 
@@ -97,6 +117,10 @@ pub enum StepAction {
     Sleep(u64, Span),
     /// `workflow "Name"` — run another workflow as a child execution.
     Workflow(String, Span),
+    /// `await <signal>` — wait for the next signal of this name.
+    Await(Ident),
+    /// `compute <expr>` — evaluate a pure expression in the runtime.
+    Compute(Expr, Span),
 }
 
 /// `for item in <list expression>` — fan a step out over a list.
@@ -206,6 +230,9 @@ pub enum Expr {
     Unary(UnOp, Box<Expr>, Span),
     /// `if c then a else b`
     If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
+    /// `x => body`, only valid as an argument of `map`, `filter`, `any`,
+    /// `all` and `find`.
+    Lambda(Ident, Box<Expr>, Span),
     /// Placeholder produced after a parse error.
     Error(Span),
 }
@@ -227,6 +254,7 @@ impl Expr {
             | Expr::Binary(_, _, _, s)
             | Expr::Unary(_, _, s)
             | Expr::If(_, _, _, s)
+            | Expr::Lambda(_, _, s)
             | Expr::Error(s) => *s,
         }
     }
@@ -243,7 +271,7 @@ impl Expr {
                 args.iter().for_each(|a| a.walk_paths(f))
             }
             Expr::Object(fields, _) => fields.iter().for_each(|(_, e)| e.walk_paths(f)),
-            Expr::Unary(_, e, _) => e.walk_paths(f),
+            Expr::Unary(_, e, _) | Expr::Lambda(_, e, _) => e.walk_paths(f),
             Expr::If(c, a, b, _) => {
                 c.walk_paths(f);
                 a.walk_paths(f);

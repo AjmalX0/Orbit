@@ -45,6 +45,7 @@ pub mod codes {
     pub const WORKFLOW_TIMEOUT: &str = "WORKFLOW_TIMEOUT";
     pub const ADAPTER_DISABLED: &str = "ADAPTER_DISABLED";
     pub const HTTP_ERROR: &str = "HTTP_ERROR";
+    pub const SIGNAL_TIMEOUT: &str = "SIGNAL_TIMEOUT";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,6 +156,25 @@ pub enum Event {
     WorkflowTimedOut {
         compensation: CompensationOutcome,
     },
+    /// A typed signal sent to the execution (`POST .../signals/<name>`).
+    /// Buffered until an `await` step takes it.
+    SignalReceived {
+        name: String,
+        payload: Value,
+    },
+    /// An `await` step started waiting. `deadline_ms` comes from its `timeout`.
+    SignalAwaitStarted {
+        step: String,
+        signal: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<u64>,
+    },
+    /// An `await` step took the signal received at history sequence `signal_seq`;
+    /// its payload is the step output.
+    SignalDelivered {
+        step: String,
+        signal_seq: u64,
+    },
 }
 
 impl Event {
@@ -184,6 +204,9 @@ impl Event {
             Event::WorkflowFailed { .. } => "WorkflowFailed",
             Event::WorkflowCancelled { .. } => "WorkflowCancelled",
             Event::WorkflowTimedOut { .. } => "WorkflowTimedOut",
+            Event::SignalReceived { .. } => "SignalReceived",
+            Event::SignalAwaitStarted { .. } => "SignalAwaitStarted",
+            Event::SignalDelivered { .. } => "SignalDelivered",
         }
     }
 
@@ -202,6 +225,8 @@ impl Event {
             | Event::TimerStarted { step, .. }
             | Event::TimerFired { step }
             | Event::StaleResultIgnored { step, .. }
+            | Event::SignalAwaitStarted { step, .. }
+            | Event::SignalDelivered { step, .. }
             | Event::CompensationFailed { step, .. } => Some(step),
             _ => None,
         }
@@ -378,7 +403,23 @@ pub struct ExecutionState {
     pub output: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<TaskError>,
+    /// Signals received so far, in arrival order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<ReceivedSignal>,
     pub last_seq: u64,
+}
+
+/// A signal in an execution's buffer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReceivedSignal {
+    /// History sequence number of the `SignalReceived` event.
+    pub seq: u64,
+    pub name: String,
+    pub payload: Value,
+    pub received_at_ms: u64,
+    /// The `await` unit that took it, once delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_to: Option<String>,
 }
 
 /// Link from a child execution to the parent unit that started it.
@@ -448,6 +489,7 @@ impl ExecutionState {
             compensation: None,
             output: None,
             error: None,
+            signals: vec![],
             last_seq: 0,
         }
     }
@@ -659,6 +701,37 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             s.status = WorkflowStatus::TimedOut;
             s.compensation = Some(*compensation);
             s.finished_at_ms = Some(ts);
+        }
+        Event::SignalReceived { name, payload } => s.signals.push(ReceivedSignal {
+            seq: h.seq,
+            name: name.clone(),
+            payload: payload.clone(),
+            received_at_ms: ts,
+            delivered_to: None,
+        }),
+        Event::SignalAwaitStarted {
+            step, deadline_ms, ..
+        } => {
+            let u = s.units.entry(step.clone()).or_default();
+            u.status = Some(UnitStatus::Waiting);
+            u.wake_at_ms = *deadline_ms;
+            u.scheduled_at_ms = Some(ts);
+            u.attempt = 1;
+        }
+        Event::SignalDelivered { step, signal_seq } => {
+            let payload = match s.signals.iter_mut().find(|r| r.seq == *signal_seq) {
+                Some(r) => {
+                    r.delivered_to = Some(step.clone());
+                    r.payload.clone()
+                }
+                None => Value::Null,
+            };
+            let u = s.units.entry(step.clone()).or_default();
+            u.status = Some(UnitStatus::Succeeded);
+            u.output = Some(payload);
+            u.finished_at_ms = Some(ts);
+            u.succeeded_seq = Some(h.seq);
+            u.wake_at_ms = None;
         }
     }
 }

@@ -104,12 +104,19 @@ enum Command {
         files: Vec<PathBuf>,
         #[arg(long, value_enum, default_value = "human")]
         format: DiagFormat,
+        /// Treat warnings (missing compensations, unreachable steps, unused
+        /// signals, waits without a timeout, ...) as errors.
+        #[arg(long)]
+        strict: bool,
     },
     /// Check workflow files, and validate compiled IR (.json) files.
     Validate { files: Vec<PathBuf> },
-    /// Compile workflow files to orbit-ir/1 JSON.
+    /// Compile workflow files to orbit-ir JSON.
     Compile {
         files: Vec<PathBuf>,
+        /// Treat warnings as errors.
+        #[arg(long)]
+        strict: bool,
         /// Output directory.
         #[arg(short, long, default_value = "build")]
         out_dir: PathBuf,
@@ -192,6 +199,25 @@ enum Command {
         execution_id: String,
         #[arg(long)]
         reason: Option<String>,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Send a typed signal to a running execution.
+    Signal {
+        execution_id: String,
+        /// The signal name declared in the workflow (`signal <name> { ... }`).
+        name: String,
+        /// Payload as JSON (default `{}`); `@file.json` reads a file.
+        #[arg(long, default_value = "{}")]
+        data: String,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Evaluate a query declared in the workflow against an execution.
+    Query {
+        execution_id: String,
+        /// The query name declared in the workflow (`query <name> = ...`).
+        name: String,
         #[command(flatten)]
         remote: Remote,
     },
@@ -370,8 +396,21 @@ fn run(cmd: Command) -> Res {
     let tty = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     match cmd {
         Command::Init { name } => scaffold::init(&name).map(|_| ExitCode::SUCCESS),
-        Command::Check { files, format } => {
+        Command::Check {
+            files,
+            format,
+            strict,
+        } => {
             let c = compile(&files, format)?;
+            if strict && !c.diagnostics.is_empty() && !c.has_errors() {
+                if format == DiagFormat::Human {
+                    return Err(format!(
+                        "{} warning(s) treated as errors (--strict)",
+                        c.diagnostics.len()
+                    ));
+                }
+                return Ok(ExitCode::from(1));
+            }
             if c.has_errors() {
                 if format == DiagFormat::Human {
                     return Err(summarize_errors(&c));
@@ -417,18 +456,26 @@ fn run(cmd: Command) -> Res {
                 return run(Command::Check {
                     files: sources,
                     format: DiagFormat::Human,
+                    strict: false,
                 });
             }
             Ok(ExitCode::SUCCESS)
         }
         Command::Compile {
             files,
+            strict,
             out_dir,
             stdout,
         } => {
             let c = compile(&files, DiagFormat::Human)?;
             if c.has_errors() {
                 return Err(summarize_errors(&c));
+            }
+            if strict && !c.diagnostics.is_empty() {
+                return Err(format!(
+                    "{} warning(s) treated as errors (--strict)",
+                    c.diagnostics.len()
+                ));
             }
             if c.workflows.is_empty() {
                 return Err("nothing to compile: no workflow declarations found".into());
@@ -594,6 +641,45 @@ fn run(cmd: Command) -> Res {
             } else {
                 print!("{}", view::timeline(&h, tty));
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Signal {
+            execution_id,
+            name,
+            data,
+            remote,
+        } => {
+            let text = match data.strip_prefix('@') {
+                Some(path) => {
+                    std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?
+                }
+                None => data,
+            };
+            let payload: Value = serde_json::from_str(&text)
+                .map_err(|e| format!("--data is not valid JSON: {e}"))?;
+            let (_, r) = remote
+                .client()
+                .post(
+                    &format!("/v1/executions/{execution_id}/signals/{name}"),
+                    &payload,
+                )
+                .map_err(|e| e.to_string())?;
+            println!(
+                "signal `{name}` delivered to {execution_id} (history #{})",
+                r["seq"]
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Query {
+            execution_id,
+            name,
+            remote,
+        } => {
+            let r = remote
+                .client()
+                .get(&format!("/v1/executions/{execution_id}/queries/{name}"))
+                .map_err(|e| e.to_string())?;
+            println!("{}", serde_json::to_string_pretty(&r["value"]).unwrap());
             Ok(ExitCode::SUCCESS)
         }
         Command::Cancel {

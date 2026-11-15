@@ -95,6 +95,12 @@ pub enum Expr {
         function: String,
         args: Vec<Expr>,
     },
+    /// `x => body`, only as an argument of `map`, `filter`, `any`, `all` and
+    /// `find`. The parameter is read in `body` as a `Local`.
+    Lambda {
+        param: String,
+        body: Box<Expr>,
+    },
 }
 
 impl Expr {
@@ -132,11 +138,141 @@ impl Expr {
                 then.step_refs(out);
                 otherwise.step_refs(out);
             }
+            Expr::Lambda { body, .. } => body.step_refs(out),
             Expr::Literal { .. }
             | Expr::Input { .. }
             | Expr::Execution { .. }
             | Expr::Local { .. } => {}
         }
+    }
+
+    /// True if this expression contains a lambda anywhere.
+    pub fn contains_lambda(&self) -> bool {
+        match self {
+            Expr::Lambda { .. } => true,
+            Expr::Index { target, index } => target.contains_lambda() || index.contains_lambda(),
+            Expr::Object { fields } => fields.iter().any(|f| f.value.contains_lambda()),
+            Expr::List { items } | Expr::Call { args: items, .. } => {
+                items.iter().any(Expr::contains_lambda)
+            }
+            Expr::Binary { left, right, .. } => left.contains_lambda() || right.contains_lambda(),
+            Expr::Unary { operand, .. } => operand.contains_lambda(),
+            Expr::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                condition.contains_lambda() || then.contains_lambda() || otherwise.contains_lambda()
+            }
+            Expr::Literal { .. }
+            | Expr::Input { .. }
+            | Expr::Step { .. }
+            | Expr::Execution { .. }
+            | Expr::Local { .. } => false,
+        }
+    }
+}
+
+/// A scope with one extra local binding (a lambda parameter) on top of another.
+struct Bound<'a> {
+    parent: &'a dyn Scope,
+    name: &'a str,
+    value: Value,
+}
+
+impl Scope for Bound<'_> {
+    fn input(&self) -> &Value {
+        self.parent.input()
+    }
+    fn step_output(&self, step: &str) -> Option<&Value> {
+        self.parent.step_output(step)
+    }
+    fn execution_field(&self, field: &str) -> Option<Value> {
+        self.parent.execution_field(field)
+    }
+    fn local(&self, name: &str) -> Option<&Value> {
+        if name == self.name {
+            Some(&self.value)
+        } else {
+            self.parent.local(name)
+        }
+    }
+}
+
+/// Functions that take a lambda as their second argument.
+pub const HIGHER_ORDER: &[&str] = &["map", "filter", "any", "all", "find"];
+
+fn higher_order(function: &str, args: &[Expr], scope: &dyn Scope) -> Result<Value, EvalError> {
+    let list = match args.first().map(|a| eval(a, scope)).transpose()? {
+        Some(Value::Array(items)) => items,
+        Some(Value::Null) | None => vec![],
+        Some(v) => {
+            return err(format!(
+                "{function}() expects a list, found {}",
+                crate::types::describe(&v)
+            ))
+        }
+    };
+    let Some(Expr::Lambda { param, body }) = args.get(1) else {
+        return err(format!("{function}() expects a lambda such as `x => x`"));
+    };
+    let apply = |item: &Value| -> Result<Value, EvalError> {
+        let bound = Bound {
+            parent: scope,
+            name: param,
+            value: item.clone(),
+        };
+        eval(body, &bound)
+    };
+    let truthy = |v: Value, item: &Value| -> Result<bool, EvalError> {
+        match v {
+            Value::Bool(b) => Ok(b),
+            Value::Null => Ok(false),
+            other => err(format!(
+                "{function}() condition must be Bool, found {} for element {}",
+                crate::types::describe(&other),
+                item
+            )),
+        }
+    };
+    match function {
+        "map" => Ok(Value::Array(
+            list.iter().map(apply).collect::<Result<_, _>>()?,
+        )),
+        "filter" => {
+            let mut out = vec![];
+            for item in list {
+                if truthy(apply(&item)?, &item)? {
+                    out.push(item);
+                }
+            }
+            Ok(Value::Array(out))
+        }
+        "any" => {
+            for item in &list {
+                if truthy(apply(item)?, item)? {
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        }
+        "all" => {
+            for item in &list {
+                if !truthy(apply(item)?, item)? {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            Ok(Value::Bool(true))
+        }
+        "find" => {
+            for item in list {
+                if truthy(apply(&item)?, &item)? {
+                    return Ok(item);
+                }
+            }
+            Ok(Value::Null)
+        }
+        _ => err(format!("unknown function `{function}`")),
     }
 }
 
@@ -287,6 +423,10 @@ pub fn eval(expr: &Expr, scope: &dyn Scope) -> Result<Value, EvalError> {
                 crate::types::describe(&v)
             )),
         },
+        Expr::Call { function, args } if HIGHER_ORDER.contains(&function.as_str()) => {
+            higher_order(function, args, scope)
+        }
+        Expr::Lambda { .. } => err("a lambda can only be passed to map, filter, any, all or find"),
         Expr::Call { function, args } => {
             let vals = args
                 .iter()
@@ -405,7 +545,7 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value, EvalError> {
 /// Built-in pure functions. Signatures are checked by the compiler.
 pub const BUILTINS: &[&str] = &[
     "len", "coalesce", "string", "int", "float", "contains", "lower", "upper", "trim", "join",
-    "keys", "min", "max", "abs", "is_null",
+    "keys", "min", "max", "abs", "is_null", "sum", "map", "filter", "any", "all", "find",
 ];
 
 pub fn call(function: &str, args: Vec<Value>) -> Result<Value, EvalError> {
@@ -454,6 +594,7 @@ pub fn call(function: &str, args: Vec<Value>) -> Result<Value, EvalError> {
                 .parse::<f64>()
                 .map(float)
                 .map_err(|_| EvalError(format!("cannot convert {s:?} to Float"))),
+            Value::Bool(b) => Ok(float(if b { 1.0 } else { 0.0 })),
             v => err(format!(
                 "float() not defined for {}",
                 crate::types::describe(&v)
@@ -489,6 +630,40 @@ pub fn call(function: &str, args: Vec<Value>) -> Result<Value, EvalError> {
                     .join(&sep),
             )),
             _ => err("join() expects (List<String>, String)"),
+        },
+        "sum" => match arg(0) {
+            Value::Array(items) => {
+                let mut int_total: i64 = 0;
+                let mut float_total = 0.0;
+                let mut all_int = true;
+                for v in &items {
+                    let Value::Number(n) = v else {
+                        return err(format!(
+                            "sum() expects numbers, found {}",
+                            crate::types::describe(v)
+                        ));
+                    };
+                    match (all_int, n.as_i64()) {
+                        (true, Some(i)) => {
+                            int_total = int_total
+                                .checked_add(i)
+                                .ok_or_else(|| EvalError("integer overflow".into()))?
+                        }
+                        _ => all_int = false,
+                    }
+                    float_total += n.as_f64().unwrap_or(0.0);
+                }
+                Ok(if all_int {
+                    Value::from(int_total)
+                } else {
+                    float(float_total)
+                })
+            }
+            Value::Null => Ok(Value::from(0)),
+            v => err(format!(
+                "sum() expects a list, found {}",
+                crate::types::describe(&v)
+            )),
         },
         "keys" => match arg(0) {
             Value::Object(o) => Ok(Value::Array(

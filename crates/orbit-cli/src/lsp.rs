@@ -402,6 +402,8 @@ fn hover(a: &Analysis, path: &Path, text: &str, at: usize) -> Option<Value> {
                     i.task.trim_start_matches("workflow:")
                 ),
                 Action::Sleep { duration_ms } => format!("sleep {duration_ms} ms"),
+                Action::Await { signal, .. } => format!("waits for signal `{signal}`"),
+                Action::Compute { .. } => "computed in the runtime".to_string(),
             };
             let mut s = format!(
                 "**step** `{}` — {what}\n\noutput: `{}`",

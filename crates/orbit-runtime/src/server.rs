@@ -72,6 +72,8 @@ pub fn router(state: Shared, body_limit: usize) -> Router {
         .route("/v1/executions/{id}", get(get_execution))
         .route("/v1/executions/{id}/history", get(get_history))
         .route("/v1/executions/{id}/cancel", post(cancel_execution))
+        .route("/v1/executions/{id}/signals/{name}", post(send_signal))
+        .route("/v1/executions/{id}/queries/{name}", get(run_query))
         .route("/v1/executions/{id}/wait", get(wait_execution))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/register", post(register_worker))
@@ -245,7 +247,7 @@ async fn health(State(state): State<Shared>) -> Json<Value> {
         "status": "ok",
         "api_version": API_VERSION,
         "runtime_version": env!("CARGO_PKG_VERSION"),
-        "ir_versions": [orbit_ir::IR_VERSION],
+        "ir_versions": orbit_ir::SUPPORTED_IR_VERSIONS,
         "active_executions": e.active_count(),
         "worker_sessions": e.session_count(),
     }))
@@ -405,6 +407,34 @@ async fn cancel_execution(
         .unwrap_or_else(|| "requested via API".into());
     let s = engine(&state).cancel(&id, &reason)?;
     Ok(Json(serde_json::to_value(s).unwrap_or_default()))
+}
+
+/// `POST /v1/executions/{id}/signals/{name}` with the payload as the body
+/// (an empty body sends `{}`).
+async fn send_signal(
+    State(state): State<Shared>,
+    Path((id, name)): Path<(String, String)>,
+    body: Option<Json<Value>>,
+) -> ApiResult<Json<Value>> {
+    let payload = body.map(|b| b.0).unwrap_or_else(|| json!({}));
+    let seq = engine(&state).signal(&id, &name, payload)?;
+    Ok(Json(json!({
+        "execution_id": id,
+        "signal": name,
+        "accepted": true,
+        "seq": seq,
+    })))
+}
+
+/// `GET /v1/executions/{id}/queries/{name}`: evaluate a declared query.
+async fn run_query(
+    State(state): State<Shared>,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let value = engine(&state).query(&id, &name)?;
+    Ok(Json(
+        json!({ "execution_id": id, "query": name, "value": value }),
+    ))
 }
 
 #[derive(Deserialize)]
