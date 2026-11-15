@@ -20,7 +20,7 @@ The tag produces:
 | Container image `ghcr.io/<owner>/orbit:X.Y.Z` and `:latest` | GitHub Packages | nothing |
 | Go module tag `sdks/go/vX.Y.Z` | the repository | nothing |
 | Crates `orbit-syntax`, `orbit-ir`, `orbit-compiler`, `orbit-runtime`, `orbit-worker`, `orbit-lang` | crates.io | secret `CARGO_REGISTRY_TOKEN` |
-| `orbit-lang-sdk` | PyPI | trusted publisher for this workflow (environment `pypi`), or secret `PYPI_API_TOKEN` |
+| `orbit-lang-sdk` | PyPI | secret `PYPI_API_TOKEN`, or trusted publishing (environment `pypi`) with repository variable `PYPI_TRUSTED_PUBLISHING=true` |
 | `orbit-lang` | npm | secret `NPM_TOKEN` (unscoped package) |
 | `OrbitLang.Sdk` | NuGet | secret `NUGET_API_KEY` |
 | `io.github.ajmalx0:orbit-sdk` | Maven Central | secrets `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, `MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE` (namespace `io.github.ajmalx0` verified on central.sonatype.com) |
