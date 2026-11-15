@@ -43,6 +43,9 @@ const WORKFLOW_MEMBERS: &[&str] = &[
 const STEP_MEMBERS: &[&str] = &[
     "worker",
     "sleep",
+    "workflow",
+    "for",
+    "max_parallel",
     "using",
     "after",
     "with",
@@ -580,27 +583,63 @@ impl Parser {
             }
         };
         match word.as_str() {
-            "worker" | "sleep" => {
+            "worker" | "sleep" | "workflow" => {
                 self.bump();
                 self.eat_colon();
-                let new = if word == "worker" {
-                    let (w, s) = self.string("a worker task name string")?;
-                    StepAction::Worker(w, s)
-                } else {
-                    let (d, s) = self.duration()?;
-                    StepAction::Sleep(d, s)
+                let new = match word.as_str() {
+                    "worker" => {
+                        let (w, s) = self.string("a worker task name string")?;
+                        StepAction::Worker(w, s)
+                    }
+                    "workflow" => {
+                        let (w, s) = self.string("a workflow name string, e.g. \"Shipping\"")?;
+                        StepAction::Workflow(w, s)
+                    }
+                    _ => {
+                        let (d, s) = self.duration()?;
+                        StepAction::Sleep(d, s)
+                    }
                 };
                 if action.is_some() {
                     self.diagnostics.push(
                         Diagnostic::error(
                             "E0106",
-                            "a step can only have one `worker` or `sleep`",
+                            "a step can only have one `worker`, `workflow` or `sleep`",
                             kw_span,
                         )
                         .with_help("split the work into separate steps"),
                     );
                 }
                 *action = Some(new);
+            }
+            "for" => {
+                let start = self.bump().span;
+                dup(self, body.for_each.is_some());
+                let variable = self.ident("a loop variable name")?;
+                if !self.at_word("in") {
+                    self.error_here("`in`");
+                    return Err(());
+                }
+                self.bump();
+                let items = self.expr();
+                let span = start.to(items.span());
+                body.for_each = Some(ForEach {
+                    variable,
+                    items,
+                    span,
+                });
+            }
+            "max_parallel" => {
+                self.bump();
+                self.eat_colon();
+                dup(self, body.max_parallel.is_some());
+                match self.kind().clone() {
+                    TokenKind::Int(n) => body.max_parallel = Some((n, self.bump().span)),
+                    _ => {
+                        self.error_here("an integer");
+                        return Err(());
+                    }
+                }
             }
             "using" => {
                 self.bump();

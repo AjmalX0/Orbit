@@ -428,7 +428,11 @@ fn run(cmd: Command) -> Res {
             let (name, version) = if target.ends_with(".orbit") || target.ends_with(".json") {
                 let wfs = workflows_from(Path::new(&target))?;
                 let wf = pick(&wfs, workflow.as_deref())?;
-                deploy(&client, wf, tty)?;
+                // Register every workflow in the file (children come first) so
+                // that `workflow "Name"` steps can start their children.
+                for w in &wfs {
+                    deploy(&client, w, tty)?;
+                }
                 (wf.name.clone(), Some(wf.version.clone()))
             } else {
                 (target, version)
@@ -565,6 +569,16 @@ fn run(cmd: Command) -> Res {
     }
 }
 
+/// Workflows that no other workflow in the set starts as a child.
+fn roots(wfs: &[WorkflowIr]) -> Vec<&WorkflowIr> {
+    wfs.iter()
+        .filter(|w| {
+            let key = format!("{}{}", orbit_ir::WORKFLOW_CONTRACT_PREFIX, w.name);
+            !wfs.iter().any(|o| o.contracts.contains_key(&key))
+        })
+        .collect()
+}
+
 fn pick<'a>(wfs: &'a [WorkflowIr], name: Option<&str>) -> Result<&'a WorkflowIr, String> {
     match name {
         Some(n) => wfs.iter().find(|w| w.name == n).ok_or_else(|| {
@@ -578,6 +592,8 @@ fn pick<'a>(wfs: &'a [WorkflowIr], name: Option<&str>) -> Result<&'a WorkflowIr,
         }),
         None => match wfs {
             [one] => Ok(one),
+            // A parent and its children: pick the one workflow nobody calls.
+            many if roots(many).len() == 1 => Ok(roots(many)[0]),
             [] => Err("the file defines no workflows".into()),
             many => Err(format!(
                 "the file defines several workflows; choose one with --workflow ({})",

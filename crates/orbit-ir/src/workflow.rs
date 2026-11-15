@@ -54,6 +54,23 @@ pub struct TaskContract {
     /// True for tasks executed inside the runtime (e.g. `orbit.http.request`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub builtin: bool,
+    /// Set when this contract is a child workflow (`workflow "Name"` steps): the
+    /// definition hash of the exact child version to start. The contract name is
+    /// then `workflow:<Name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_hash: Option<String>,
+}
+
+/// Prefix of contract names that refer to child workflows.
+pub const WORKFLOW_CONTRACT_PREFIX: &str = "workflow:";
+
+/// `for <variable> in <items>`: the step runs once per list element.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForEach {
+    pub variable: String,
+    pub items: Expr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +81,8 @@ pub struct StepIr {
     pub dependencies: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<Expr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_each: Option<ForEach>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compensation: Option<Invocation>,
     /// The type other expressions see when they reference this step.
@@ -78,6 +97,9 @@ pub enum Action {
     Sleep {
         duration_ms: u64,
     },
+    /// Start a child workflow. `task` is `workflow:<Name>`; its contract carries
+    /// the child's definition hash.
+    Workflow(Invocation),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,7 +172,7 @@ impl RetryPolicy {
 impl StepIr {
     pub fn invocation(&self) -> Option<&Invocation> {
         match &self.action {
-            Action::Task(i) => Some(i),
+            Action::Task(i) | Action::Workflow(i) => Some(i),
             Action::Sleep { .. } => None,
         }
     }
@@ -244,6 +266,12 @@ impl WorkflowIr {
             let mut refs = vec![];
             if let Some(c) = &s.condition {
                 c.step_refs(&mut refs);
+            }
+            if let Some(f) = &s.for_each {
+                f.items.step_refs(&mut refs);
+                if f.max_parallel == Some(0) {
+                    return e(format!("step `{}`: max_parallel must be at least 1", s.id));
+                }
             }
             if let Some(inv) = s.invocation() {
                 inv.input.step_refs(&mut refs);

@@ -55,6 +55,14 @@ pub enum Event {
         version: String,
         definition_hash: String,
         input: Value,
+        /// Set for child workflows started by a `workflow "Name"` step.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<ParentRef>,
+    },
+    /// A `for` step expanded into one unit per element (`step[0]`, `step[1]`, ...).
+    StepFanOut {
+        step: String,
+        items: Vec<Value>,
     },
     WorkflowStarted {},
     /// The unit is ready and queued for a worker. `input` is the fully evaluated payload.
@@ -154,6 +162,7 @@ impl Event {
         match self {
             Event::WorkflowCreated { .. } => "WorkflowCreated",
             Event::WorkflowStarted { .. } => "WorkflowStarted",
+            Event::StepFanOut { .. } => "StepFanOut",
             Event::StepScheduled { .. } => "StepScheduled",
             Event::StepSkipped { .. } => "StepSkipped",
             Event::StepDispatched { .. } => "StepDispatched",
@@ -181,6 +190,7 @@ impl Event {
     pub fn step(&self) -> Option<&str> {
         match self {
             Event::StepScheduled { step, .. }
+            | Event::StepFanOut { step, .. }
             | Event::StepSkipped { step, .. }
             | Event::StepDispatched { step, .. }
             | Event::StepSucceeded { step, .. }
@@ -254,6 +264,8 @@ impl WorkflowStatus {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum UnitStatus {
     Pending,
+    /// A `for` step whose elements are running.
+    Running,
     /// Queued, waiting for a worker.
     Scheduled,
     Dispatched,
@@ -344,6 +356,8 @@ impl UnitState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionState {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentRef>,
     pub workflow: String,
     pub version: String,
     pub definition_hash: String,
@@ -367,6 +381,50 @@ pub struct ExecutionState {
     pub last_seq: u64,
 }
 
+/// Link from a child execution to the parent unit that started it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRef {
+    pub execution_id: String,
+    pub step: String,
+}
+
+/// Unit key of element `i` of a `for` step.
+pub fn element_key(step: &str, i: usize) -> String {
+    format!("{step}[{i}]")
+}
+
+/// A unit key decomposed: `[compensate:]step[[index]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitKey<'a> {
+    pub compensation: bool,
+    pub step: &'a str,
+    pub index: Option<usize>,
+}
+
+pub fn parse_key(key: &str) -> UnitKey<'_> {
+    let (compensation, rest) = match key.strip_prefix("compensate:") {
+        Some(r) => (true, r),
+        None => (false, key),
+    };
+    if let Some(open) = rest.find('[') {
+        if let Some(index) = rest[open + 1..]
+            .strip_suffix(']')
+            .and_then(|n| n.parse().ok())
+        {
+            return UnitKey {
+                compensation,
+                step: &rest[..open],
+                index: Some(index),
+            };
+        }
+    }
+    UnitKey {
+        compensation,
+        step: rest,
+        index: None,
+    }
+}
+
 pub fn compensation_key(step: &str) -> String {
     format!("compensate:{step}")
 }
@@ -375,6 +433,7 @@ impl ExecutionState {
     pub fn new(id: &str) -> Self {
         ExecutionState {
             id: id.into(),
+            parent: None,
             workflow: String::new(),
             version: String::new(),
             definition_hash: String::new(),
@@ -419,7 +478,9 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             version,
             definition_hash,
             input,
+            parent,
         } => {
+            s.parent = parent.clone();
             s.workflow = workflow.clone();
             s.version = version.clone();
             s.definition_hash = definition_hash.clone();
@@ -445,6 +506,16 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             u.token = None;
             u.deadline_ms = None;
             u.wake_at_ms = None;
+        }
+        Event::StepFanOut { step, items } => {
+            let u = s.units.entry(step.clone()).or_default();
+            u.status = Some(UnitStatus::Running);
+            u.input = Some(Value::Array(items.clone()));
+            u.scheduled_at_ms = Some(ts);
+            u.attempt = 1;
+            for i in 0..items.len() {
+                s.units.entry(element_key(step, i)).or_default();
+            }
         }
         Event::StepSkipped { step, .. } => {
             let u = s.units.entry(step.clone()).or_default();

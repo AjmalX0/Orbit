@@ -357,3 +357,104 @@ fn many_errors_in_one_run() {
     assert_eq!(codes, vec!["E0300", "E0400", "E0303"]);
     assert!(c.workflows.is_empty());
 }
+
+#[test]
+fn for_each_steps_type_check() {
+    let wf = ok(
+        r#"workflow W { version "1.0.0" input { amounts: List<Float> }
+        step scores { for a in input.amounts  max_parallel 3  worker "risk.analyze" with { amount: a } }
+        return { first: scores[0].score, all: scores } }"#,
+    );
+    let s = wf.step("scores").unwrap();
+    let fe = s.for_each.as_ref().unwrap();
+    assert_eq!((fe.variable.as_str(), fe.max_parallel), ("a", Some(3)));
+    assert!(matches!(&s.output_type, Type::List { .. }));
+    // Element type flows into the loop variable.
+    let msg = errors(
+        r#"workflow W { version "1.0.0" input { names: List<String> }
+        step s { for n in input.names worker "risk.analyze" with { amount: n } } }"#,
+    );
+    assert!(
+        msg.contains("E0400") && msg.contains("expected `Float`, found `String`"),
+        "{msg}"
+    );
+    // Only lists can be iterated.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" input { x: Int } step s { for v in input.x worker "risk.analyze" with { amount: 1.0 } } }"#
+        ),
+        vec!["E0414"]
+    );
+    // Loop variables may not shadow steps or built-ins.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" input { xs: List<Float> } step input2 { sleep 1s } step s { for input in input.xs worker "risk.analyze" with { amount: 1.0 } } }"#
+        ),
+        vec!["E0413"]
+    );
+    // max_parallel needs a for.
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" step s { worker "risk.analyze" with { amount: 1.0 } max_parallel 2 } }"#
+        ),
+        vec!["E0307"]
+    );
+    // A list comes from a previous step: implicit dependency.
+    let wf = ok(r#"workflow W { version "1.0.0"
+        step a { worker "orders.validate" with { order_id: "x" } }
+        step b { for r in [a.valid, true] worker "risk.analyze" with { amount: 1.0 } } }"#);
+    assert_eq!(wf.step("b").unwrap().dependencies, vec!["a"]);
+}
+
+#[test]
+fn child_workflows_are_typed_and_ordered() {
+    let src = r#"
+        workflow Parent { version "1.0.0" input { id: String }
+            step c { workflow "Child" with { amount: 2.5 } timeout 1h }
+            return { score: c.score } }
+        workflow Child { version "2.0.0" input { amount: Float } output { score: Float }
+            step r { worker "risk.analyze" with { amount: input.amount } }
+            return { score: r.score } }"#;
+    let c = compile(src);
+    assert!(!c.has_errors(), "{}", c.render_diagnostics(false));
+    let names: Vec<_> = c.workflows.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["Child", "Parent"],
+        "children are emitted before their callers"
+    );
+    let parent = &c.workflows[1];
+    let contract = &parent.contracts["workflow:Child"];
+    assert_eq!(contract.version, "2.0.0");
+    assert_eq!(
+        contract.workflow_hash.as_deref(),
+        Some(c.workflows[0].definition_hash.as_str())
+    );
+    assert!(matches!(
+        parent.step("c").unwrap().action,
+        Action::Workflow(_)
+    ));
+    // Input is checked against the child's input type.
+    let msg = errors(&src.replace("amount: 2.5", "amount: \"x\""));
+    assert!(msg.contains("E0400"), "{msg}");
+    // Unknown child with suggestion; retries are not allowed on child steps.
+    let msg = errors(&src.replace("workflow \"Child\"", "workflow \"Chlid\""));
+    assert!(
+        msg.contains("E0312") && msg.contains("did you mean `Child`?"),
+        "{msg}"
+    );
+    assert!(codes(&src.replace("timeout 1h", "retry { attempts: 2 }")).contains(&"E0307"));
+}
+
+#[test]
+fn workflow_cycles_are_rejected() {
+    let msg = errors(
+        r#"workflow A { version "1.0.0" step b { workflow "B" } }
+           workflow B { version "1.0.0" step a { workflow "A" } }"#,
+    );
+    assert!(
+        msg.contains("E0311") && msg.contains("cycle: A -> B -> A"),
+        "{msg}"
+    );
+    assert!(errors(r#"workflow A { version "1.0.0" step me { workflow "A" } }"#).contains("E0311"));
+}

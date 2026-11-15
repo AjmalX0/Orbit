@@ -10,8 +10,8 @@ pub mod types;
 
 use check::{Checker, Env};
 use orbit_ir::{
-    self as ir, Action, Backoff, FieldType, Invocation, RetryPolicy, SourceLocation, StepIr,
-    TaskContract, Type, WorkflowIr,
+    self as ir, Action, Backoff, FieldType, ForEach, Invocation, RetryPolicy, SourceLocation,
+    StepIr, TaskContract, Type, WorkflowIr, WORKFLOW_CONTRACT_PREFIX,
 };
 use orbit_syntax::ast::{self, Declaration, StepAction};
 use orbit_syntax::diagnostic::{suggest, Diagnostic};
@@ -292,12 +292,97 @@ fn analyze(comp: &mut Compilation, prelude_id: FileId, programs: &[(FileId, ast:
                 input,
                 output,
                 builtin: t.span.file == prelude_id,
+                workflow_hash: None,
             },
         );
     }
 
-    for (file, wf) in workflows {
-        if let Some(ir) = lower_workflow(wf, &schemas, &contracts, &comp.sources, diags) {
+    // Child workflows: lower callees before callers so a caller can pin the
+    // callee's definition hash. Cycles between workflows are rejected.
+    let names: HashSet<&str> = workflows
+        .iter()
+        .map(|(_, w)| w.name.name.as_str())
+        .collect();
+    let mut calls: BTreeMap<&str, BTreeMap<&str, Span>> = BTreeMap::new();
+    for (_, wf) in &workflows {
+        let entry = calls.entry(wf.name.name.as_str()).or_default();
+        for s in &wf.steps {
+            if let Some(StepAction::Workflow(child, span)) = &s.action {
+                if let Some(n) = names.get(child.as_str()) {
+                    entry.entry(*n).or_insert(*span);
+                } else {
+                    let mut d =
+                        Diagnostic::error("E0312", format!("unknown workflow `{child}`"), *span);
+                    if let Some(sug) = suggest(child, names.iter().copied()) {
+                        d = d.with_help(format!("did you mean `{sug}`?"));
+                    } else {
+                        d = d.with_help("child workflows must be defined in, or imported into, this compilation");
+                    }
+                    diags.push(d);
+                }
+            }
+        }
+    }
+    if let Some(cycle) = find_cycle(&calls) {
+        let mut d = Diagnostic::error(
+            "E0311",
+            "workflows call each other in a cycle",
+            calls
+                .get(cycle[0])
+                .and_then(|m| m.get(cycle[1]))
+                .copied()
+                .unwrap_or_default(),
+        )
+        .with_note(format!("cycle: {}", cycle.join(" -> ")))
+        .with_help("a workflow cannot (directly or indirectly) start itself as a child");
+        for w in cycle.windows(2).skip(1) {
+            if let Some(span) = calls.get(w[0]).and_then(|m| m.get(w[1])) {
+                d = d.with_label(*span, format!("`{}` starts `{}`", w[0], w[1]));
+            }
+        }
+        diags.push(d);
+        comp.contracts = contracts;
+        return;
+    }
+    let mut ordered: Vec<(FileId, &ast::Workflow)> = vec![];
+    while ordered.len() < workflows.len() {
+        let next = workflows
+            .iter()
+            .find(|(_, w)| {
+                !ordered.iter().any(|(_, o)| o.name.name == w.name.name)
+                    && calls[w.name.name.as_str()]
+                        .keys()
+                        .all(|c| ordered.iter().any(|(_, o)| o.name.name == *c))
+            })
+            .copied()
+            .expect("acyclic");
+        ordered.push(next);
+    }
+    let mut all_contracts = contracts.clone();
+    for (file, wf) in ordered {
+        let lowered = lower_workflow(wf, &schemas, &all_contracts, &comp.sources, diags);
+        // Even when lowering failed, register a placeholder contract so callers
+        // do not report a cascade of "unknown workflow" errors.
+        let contract = match &lowered {
+            Some(ir) => TaskContract {
+                name: format!("{WORKFLOW_CONTRACT_PREFIX}{}", ir.name),
+                version: ir.version.clone(),
+                input: ir.input.clone(),
+                output: ir.output.clone(),
+                builtin: false,
+                workflow_hash: Some(ir.definition_hash.clone()),
+            },
+            None => TaskContract {
+                name: format!("{WORKFLOW_CONTRACT_PREFIX}{}", wf.name.name),
+                version: String::new(),
+                input: Type::Json,
+                output: Type::Json,
+                builtin: false,
+                workflow_hash: Some(String::new()),
+            },
+        };
+        all_contracts.insert(contract.name.clone(), contract);
+        if let Some(ir) = lowered {
             comp.workflows.push(ir);
             comp.workflow_files.push(file);
         }
@@ -409,6 +494,9 @@ fn lower_workflow(
         }
     };
 
+    // Set when a step names an unknown child workflow. That error (E0312) is
+    // reported before lowering, so it must stop IR generation explicitly.
+    let mut missing_child = false;
     let mut step_types: BTreeMap<String, Type> = BTreeMap::new();
     let mut step_contracts: HashMap<&str, Option<&TaskContract>> = HashMap::new();
     for (name, s) in &by_name {
@@ -418,14 +506,30 @@ fn lower_workflow(
                 step_contracts.insert(name, c);
                 c.map(|c| c.output.clone()).unwrap_or(Type::Json)
             }
+            Some(StepAction::Workflow(child, _)) => {
+                // Unknown children were already reported (E0312).
+                let c = contracts.get(&format!("{WORKFLOW_CONTRACT_PREFIX}{child}"));
+                missing_child |= c.is_none();
+                step_contracts.insert(name, c);
+                c.map(|c| c.output.clone()).unwrap_or(Type::Json)
+            }
             Some(StepAction::Sleep(..)) => Type::record(None, vec![]),
             None => {
                 diags.push(
                     Diagnostic::error("E0301", format!("step `{name}` does nothing"), s.name.span)
-                        .with_help("add `worker \"task.name\"` or `sleep 10s`"),
+                        .with_help(
+                            "add `worker \"task.name\"`, `workflow \"Name\"` or `sleep 10s`",
+                        ),
                 );
                 Type::Json
             }
+        };
+        let out = if s.body.for_each.is_some() {
+            Type::List {
+                item: Box::new(out),
+            }
+        } else {
+            out
         };
         let out = if s.body.condition.is_some() {
             out.optional()
@@ -463,9 +567,15 @@ fn lower_workflow(
             }
         }
         let mut refs = vec![];
-        for e in [&s.body.with, &s.body.condition, &s.body.idempotency_key]
-            .into_iter()
-            .flatten()
+        let items = s.body.for_each.as_ref().map(|f| &f.items);
+        for e in [
+            s.body.with.as_ref(),
+            s.body.condition.as_ref(),
+            s.body.idempotency_key.as_ref(),
+            items,
+        ]
+        .into_iter()
+        .flatten()
         {
             step_refs(e, &step_names, &mut refs);
         }
@@ -550,11 +660,89 @@ fn lower_workflow(
     for name in &order {
         let s = by_name[name];
         source_map.insert(name.to_string(), loc(s.name.span));
+        // `for item in <list>`: type the list and bind the loop variable.
+        let mut locals: Vec<(String, Type)> = vec![];
+        let for_each = s.body.for_each.as_ref().map(|f| {
+            let env = Env {
+                input: Some(&input_ty),
+                steps: &step_types,
+                allowed: None,
+                context: "a step",
+                locals: &[],
+            };
+            let mut ck = Checker { env: &env, diags };
+            let (t, items) = ck.check(&f.items, None);
+            let element = match t.unwrap_optional() {
+                Type::List { item } => (**item).clone(),
+                Type::Json => Type::Json,
+                other => {
+                    ck.diags.push(
+                        Diagnostic::error(
+                            "E0414",
+                            format!("`for` needs a list, found `{other}`"),
+                            f.items.span(),
+                        )
+                        .with_help(
+                            "iterate over a `List<T>` value, e.g. `for item in input.items`",
+                        ),
+                    );
+                    Type::Json
+                }
+            };
+            let var = &f.variable.name;
+            if step_names.contains(var.as_str()) || ["input", "execution"].contains(&var.as_str()) {
+                let what = if step_names.contains(var.as_str()) {
+                    "a step"
+                } else {
+                    "a built-in name"
+                };
+                ck.diags.push(
+                    Diagnostic::error(
+                        "E0413",
+                        format!("loop variable `{var}` shadows {what}"),
+                        f.variable.span,
+                    )
+                    .with_help("choose a different name, e.g. `item`"),
+                );
+            }
+            if matches!(s.action, Some(StepAction::Sleep(..))) {
+                ck.diags.push(Diagnostic::error(
+                    "E0307",
+                    "`for` is not allowed in a `sleep` step",
+                    f.span,
+                ));
+            }
+            locals.push((var.clone(), element));
+            let max_parallel = s.body.max_parallel.and_then(|(n, span)| {
+                if !(1..=10_000).contains(&n) {
+                    ck.diags.push(Diagnostic::error(
+                        "E0410",
+                        "`max_parallel` must be between 1 and 10000",
+                        span,
+                    ));
+                    None
+                } else {
+                    Some(n as u32)
+                }
+            });
+            ForEach {
+                variable: var.clone(),
+                items,
+                max_parallel,
+            }
+        });
+        if let (None, Some((_, span))) = (&s.body.for_each, s.body.max_parallel) {
+            diags.push(
+                Diagnostic::error("E0307", "`max_parallel` only applies to `for` steps", span)
+                    .with_help("add `for item in <list>` to fan the step out"),
+            );
+        }
         let env = Env {
             input: Some(&input_ty),
             steps: &step_types,
             allowed: None,
             context: "a step",
+            locals: &locals,
         };
         let mut ck = Checker { env: &env, diags };
         let condition = s.body.condition.as_ref().map(|c| {
@@ -576,6 +764,41 @@ fn lower_workflow(
                 }
                 let inv = lower_invocation(task, contract, &s.body, &mut ck, s.name.span);
                 Some(Action::Task(inv))
+            }
+            Some(StepAction::Workflow(child, _)) => {
+                let contract = step_contracts.get(name).copied().flatten();
+                if let Some(c) = contract {
+                    used_contracts.insert(c.name.clone(), c.clone());
+                }
+                // A child workflow is durable on its own: it is not retried,
+                // routed by language, or keyed by an idempotency key.
+                let mut bad = |span: Span, member: &str| {
+                    ck.diags.push(
+                        Diagnostic::error(
+                            "E0307",
+                            format!("`{member}` is not allowed in a `workflow` step"),
+                            span,
+                        )
+                        .with_note(
+                            "child workflows are durable; put retries on the child's own steps",
+                        ),
+                    );
+                };
+                if let Some(l) = &s.body.language {
+                    bad(l.span, "using");
+                }
+                if let Some(r) = &s.body.retry {
+                    bad(r.span, "retry");
+                }
+                if let Some(k) = &s.body.idempotency_key {
+                    bad(k.span(), "idempotency_key");
+                }
+                if let Some((_, sp)) = s.body.queue_timeout {
+                    bad(sp, "queue_timeout");
+                }
+                let task = format!("{WORKFLOW_CONTRACT_PREFIX}{child}");
+                let inv = lower_invocation(&task, contract, &s.body, &mut ck, s.name.span);
+                Some(Action::Workflow(inv))
             }
             Some(StepAction::Sleep(ms, _)) => {
                 reject_members(&s.body, "a `sleep` step", false, ck.diags);
@@ -608,6 +831,7 @@ fn lower_workflow(
                 steps: &comp_types,
                 allowed: Some((&allowed, &why)),
                 context: "a compensation",
+                locals: &locals,
             };
             let mut ck = Checker { env: &env, diags };
             reject_members(&c.body, "a `compensate` block", true, ck.diags);
@@ -619,10 +843,10 @@ fn lower_workflow(
                     }
                     Some(lower_invocation(task, contract, &c.body, &mut ck, c.span))
                 }
-                Some(StepAction::Sleep(_, span)) => {
+                Some(StepAction::Sleep(_, span)) | Some(StepAction::Workflow(_, span)) => {
                     ck.diags.push(Diagnostic::error(
                         "E0308",
-                        "compensation must call a worker, not `sleep`",
+                        "compensation must call a worker task",
                         *span,
                     ));
                     None
@@ -646,6 +870,7 @@ fn lower_workflow(
                 action,
                 dependencies,
                 condition,
+                for_each,
                 compensation,
                 output_type: step_types[*name].clone(),
             });
@@ -658,6 +883,7 @@ fn lower_workflow(
         steps: &step_types,
         allowed: None,
         context: "`return`",
+        locals: &[],
     };
     let mut ck = Checker { env: &env, diags };
     let (output, result) = match (&declared_output, &wf.ret) {
@@ -688,7 +914,7 @@ fn lower_workflow(
     };
 
     let errors = diags.iter().filter(|d| d.is_error()).count();
-    if errors > start_errors {
+    if errors > start_errors || missing_child {
         return None;
     }
     let ir = WorkflowIr {
@@ -726,6 +952,12 @@ fn reject_members(
     if allow_task_members {
         if let Some(c) = &body.condition {
             bad(c.span(), "when");
+        }
+        if let Some(f) = &body.for_each {
+            bad(f.span, "for");
+        }
+        if let Some((_, span)) = body.max_parallel {
+            bad(span, "max_parallel");
         }
         if let Some(a) = body.after.first() {
             bad(a.span, "after");
