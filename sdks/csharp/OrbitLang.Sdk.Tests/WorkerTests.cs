@@ -7,6 +7,7 @@ using Xunit;
 
 namespace OrbitLang.Sdk.Tests;
 
+[Collection("environment")]
 public sealed class WorkerTests
 {
     private sealed record EchoIn(int N);
