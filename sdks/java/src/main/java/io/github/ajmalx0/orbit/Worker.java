@@ -78,6 +78,7 @@ public final class Worker {
     private final ObjectMapper mapper;
     private final System.Logger log;
     private final HttpClient http;
+    private final String tlsHint;
 
     private final Map<String, Registered> tasks = new LinkedHashMap<>();
     private final Map<String, TaskContext> active = new ConcurrentHashMap<>();
@@ -108,20 +109,28 @@ public final class Worker {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(10));
         SSLContext ssl = b.sslContext;
-        String caCert = b.caCertFile != null ? b.caCertFile.toString() : firstNonEmpty(env.apply("ORBIT_CA_CERT"));
-        if (ssl == null && caCert != null) {
+        Path caCert = b.caCertFile != null ? b.caCertFile : path(env.apply("ORBIT_CA_CERT"));
+        Path clientCert = b.clientCert != null ? b.clientCert : path(env.apply("ORBIT_CLIENT_CERT"));
+        Path clientKey = b.clientCert != null ? b.clientKey : path(env.apply("ORBIT_CLIENT_KEY"));
+        if ((clientCert == null) != (clientKey == null)) {
+            throw new IllegalArgumentException("a client certificate needs both ORBIT_CLIENT_CERT and ORBIT_CLIENT_KEY");
+        }
+        if (ssl == null && (caCert != null || clientCert != null)) {
             try {
-                ssl = Tls.trusting(Path.of(caCert));
+                ssl = Tls.context(caCert, clientCert, clientKey);
             } catch (IOException e) {
-                throw new UncheckedIOException("cannot read CA certificate " + caCert, e);
+                throw new UncheckedIOException("cannot read TLS files (CA " + caCert + ", client certificate "
+                        + clientCert + ", key " + clientKey + ")", e);
             } catch (GeneralSecurityException e) {
-                throw new IllegalArgumentException("invalid CA certificate " + caCert + ": " + e.getMessage(), e);
+                throw new IllegalArgumentException("invalid TLS configuration: " + e.getMessage(), e);
             }
         }
         if (ssl != null) {
             hb.sslContext(ssl);
         }
         this.http = hb.build();
+        this.tlsHint = server.startsWith("https:") && clientCert == null && b.sslContext == null
+                ? " (if the runtime requires mutual TLS, set ORBIT_CLIENT_CERT and ORBIT_CLIENT_KEY)" : "";
     }
 
     /** @return a builder; unset options fall back to the {@code ORBIT_*} environment variables and defaults */
@@ -702,7 +711,7 @@ public final class Worker {
         try {
             resp = http.send(req.build(), HttpResponse.BodyHandlers.ofByteArray());
         } catch (IOException e) {
-            throw new ApiException(0, "CONNECTION", "cannot reach ORBIT runtime at " + server + ": " + e, e);
+            throw new ApiException(0, "CONNECTION", "cannot reach ORBIT runtime at " + server + ": " + e + tlsHint, e);
         }
         byte[] raw = resp.body() == null ? new byte[0] : resp.body();
         int status = resp.statusCode();
@@ -740,6 +749,10 @@ public final class Worker {
             }
         }
         return null;
+    }
+
+    private static Path path(String s) {
+        return s == null || s.isEmpty() ? null : Path.of(s);
     }
 
     private static String stripSlash(String s) {
@@ -790,7 +803,8 @@ public final class Worker {
 
     /**
      * Configures a {@link Worker}. Unset options use the {@code ORBIT_SERVER},
-     * {@code ORBIT_WORKER_TOKEN} / {@code ORBIT_TOKEN} and {@code ORBIT_CA_CERT}
+     * {@code ORBIT_WORKER_TOKEN} / {@code ORBIT_TOKEN}, {@code ORBIT_CA_CERT} and
+     * {@code ORBIT_CLIENT_CERT} / {@code ORBIT_CLIENT_KEY}
      * environment variables, then defaults.
      */
     public static final class Builder {
@@ -798,6 +812,8 @@ public final class Worker {
         private String server;
         private String token;
         private Path caCertFile;
+        private Path clientCert;
+        private Path clientKey;
         private SSLContext sslContext;
         private int concurrency;
         private String runtime;
@@ -848,7 +864,22 @@ public final class Worker {
         }
 
         /**
-         * @param sslContext TLS context to use instead of the CA certificate options
+         * Presents a client certificate for mutual TLS; the runtime identifies the worker by
+         * the certificate's DNS SAN or subject CN (default {@code ORBIT_CLIENT_CERT} and
+         * {@code ORBIT_CLIENT_KEY}).
+         *
+         * @param certPem PEM certificate chain, leaf first
+         * @param keyPem  PEM private key in PKCS#8 form ({@code BEGIN PRIVATE KEY}), RSA or EC
+         * @return this builder
+         */
+        public Builder clientCert(Path certPem, Path keyPem) {
+            this.clientCert = Objects.requireNonNull(certPem, "certPem");
+            this.clientKey = Objects.requireNonNull(keyPem, "keyPem");
+            return this;
+        }
+
+        /**
+         * @param sslContext TLS context to use instead of the CA and client certificate options
          * @return this builder
          */
         public Builder sslContext(SSLContext sslContext) {
