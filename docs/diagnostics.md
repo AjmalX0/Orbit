@@ -35,7 +35,7 @@ error[E0300]: unknown worker task `risk.analize`
 | E0103 | Unclosed `{` |
 | E0104 | Expected a top-level declaration |
 | E0105 | `on event` / `on failure` handlers are reserved but not supported in v0.1 |
-| E0106 | Duplicate member, or a step with both `worker` and `sleep` |
+| E0106 | Duplicate member, or a step with more than one of `worker`, `workflow`, `sleep` |
 | E0107 | Duplicate field in an object literal |
 
 ## Declarations and types (E02xx)
@@ -56,15 +56,17 @@ error[E0300]: unknown worker task `risk.analize`
 | Code  | Meaning |
 |-------|---------|
 | E0300 | Unknown worker task (no `task` contract declared) |
-| E0301 | Step has neither `worker` nor `sleep` |
+| E0301 | Step has no `worker`, `workflow` or `sleep` |
 | E0302 | Duplicate step name |
 | E0303 | `after` references an unknown step |
 | E0304 | Circular dependency (the cycle is printed) |
 | E0305 | Step depends on, or reads, itself |
 | E0306 | Reserved step name (`input`, `execution`, `output`, `if`, `then`, `else`) |
-| E0307 | Member not allowed here (e.g. `retry` on a `sleep` step, `when` in `compensate`) |
-| E0308 | Invalid compensation (on a `sleep` step, without a worker, or reading a step that is not an ancestor) |
+| E0307 | Member not allowed here (e.g. `retry` on a `sleep` step, `when` or `for` in `compensate`, `retry` on a `workflow` step, `max_parallel` without `for`) |
+| E0308 | Invalid compensation (on a `sleep` step, without a worker task, or reading a step that is not an ancestor) |
 | E0310 | Task input/output is not a record type |
+| E0311 | Workflows start each other in a cycle (the cycle is printed) |
+| E0312 | `workflow "Name"` names an unknown workflow |
 | W0301 | Unknown worker language in `using` |
 
 ## Expressions (E04xx)
@@ -80,7 +82,9 @@ error[E0300]: unknown worker task `risk.analize`
 | E0406 | Operator not defined for the operand types |
 | E0407 | Unknown function or wrong number of arguments |
 | E0408 | Condition is not `Bool` |
-| E0410 | Invalid retry policy or timeout |
+| E0410 | Invalid retry policy, timeout or `max_parallel` |
+| E0413 | A `for` loop variable shadows a step or a built-in name |
+| E0414 | `for` iterates over something that is not a list |
 
 ## Workflows (E05xx)
 

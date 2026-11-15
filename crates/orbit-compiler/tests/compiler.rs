@@ -512,3 +512,20 @@ fn formatting_never_changes_meaning() {
         );
     }
 }
+
+#[test]
+fn loop_variable_is_not_in_scope_in_when() {
+    let msg = errors(
+        r#"workflow W { version "1.0.0" input { xs: List<Float> }
+        step s { for x in input.xs when x > 1.0 worker "risk.analyze" with { amount: x } } }"#,
+    );
+    assert!(
+        msg.contains("E0401") && msg.contains("loop variable `x` is not in scope in `when`"),
+        "{msg}"
+    );
+    // A condition that does not use the loop variable is fine.
+    ok(
+        r#"workflow W { version "1.0.0" input { xs: List<Float>, go: Bool }
+        step s { for x in input.xs when input.go worker "risk.analyze" with { amount: x } } }"#,
+    );
+}
