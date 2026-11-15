@@ -73,6 +73,7 @@ fn status(e: EngineError) -> Status {
         403 => tonic::Code::PermissionDenied,
         404 => tonic::Code::NotFound,
         409 => tonic::Code::FailedPrecondition,
+        413 | 429 => tonic::Code::ResourceExhausted,
         _ => tonic::Code::Internal,
     };
     let mut s = Status::new(code, format!("{}: {}", e.code, e.message));

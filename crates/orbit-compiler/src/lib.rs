@@ -685,9 +685,7 @@ fn lower_workflow(
                 d = d.with_label(*span, format!("`{}` depends on `{}`", w[0], w[1]));
             }
         }
-        d = d.with_help(
-            "the step graph must be acyclic in ORBIT v0.1; remove one of these dependencies",
-        );
+        d = d.with_help("the step graph must be acyclic; remove one of these dependencies");
         diags.push(d);
         return None;
     }

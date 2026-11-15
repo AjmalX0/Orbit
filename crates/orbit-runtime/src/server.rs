@@ -133,6 +133,19 @@ fn allow(caller: &Caller, action: &str, workflow: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// A client may read a workflow definition only if it may read its executions.
+fn allow_definition(caller: &Caller, workflow: &str) -> ApiResult<()> {
+    if let Caller::Client(c) = caller {
+        if !c.can_read(workflow) {
+            return Err(forbidden(format!(
+                "client `{}` may not read the definition of `{workflow}`",
+                c.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `allow` for an existing execution, looked up by id.
 fn allow_execution(state: &Shared, caller: &Caller, action: &str, id: &str) -> ApiResult<()> {
     if matches!(caller, Caller::Client(_)) {
@@ -354,7 +367,7 @@ async fn get_workflow(
     Extension(caller): Extension<Caller>,
     Path((name, version)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    allow(&caller, "read", &name)?;
+    allow_definition(&caller, &name)?;
     let d = engine(&state)
         .definition(&name, Some(&version))
         .ok_or_else(|| {
@@ -372,7 +385,7 @@ async fn get_workflow_latest(
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    allow(&caller, "read", &name)?;
+    allow_definition(&caller, &name)?;
     let d = engine(&state).definition(&name, None).ok_or_else(|| {
         ApiError(EngineError::new(
             404,

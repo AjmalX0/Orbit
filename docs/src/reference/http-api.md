@@ -786,11 +786,11 @@ With `--grpc-addr`, the worker protocol is also served over gRPC as `orbit.worke
 | 403 | `PERMISSION_DENIED` |
 | 404 | `NOT_FOUND` |
 | 409 | `FAILED_PRECONDITION` |
-| 413 (`PAYLOAD_TOO_LARGE`, `CompleteTask`) | `INTERNAL` |
+| 413 (`PAYLOAD_TOO_LARGE`, `CompleteTask`) and 429 | `RESOURCE_EXHAUSTED` |
 | 500 | `INTERNAL` |
 | 503 (`NOT_LEADER`, cluster standby) | `UNAVAILABLE` |
 
-`PollTask` returns an `ExecuteTaskRequest` with an empty `token` where HTTP returns `204`. Client identities cannot use the gRPC binding: every call gets `PERMISSION_DENIED` with the message ``FORBIDDEN: client `app` may not use the worker protocol``. A result larger than `--max-payload-bytes` gets `INTERNAL` with `orbit-error-code: PAYLOAD_TOO_LARGE`, so check the metadata rather than the status code.
+`PollTask` returns an `ExecuteTaskRequest` with an empty `token` where HTTP returns `204`. Client identities cannot use the gRPC binding: every call gets `PERMISSION_DENIED` with the message ``FORBIDDEN: client `app` may not use the worker protocol``. A result larger than `--max-payload-bytes` gets `RESOURCE_EXHAUSTED` with `orbit-error-code: PAYLOAD_TOO_LARGE`.
 
 ## See also
 

@@ -162,7 +162,7 @@ error[E0304]: circular dependency between steps
 9 |     step second { worker "a.run" with { n: first.v } }
   |                                            ----- `second` depends on `first`
   = note: cycle: first -> second -> first
-  = help: the step graph must be acyclic in ORBIT v0.1; remove one of these dependencies
+  = help: the step graph must be acyclic; remove one of these dependencies
 
 error: compilation failed: 1 error(s), 0 warning(s)
 ```

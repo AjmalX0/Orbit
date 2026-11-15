@@ -115,7 +115,7 @@ error[E0202]: recursive schema `Category`
 3 |     parent: Category?
   |             ^^^^^^^^
   = note: cycle: Category -> Category
-  = help: ORBIT v0.1 schemas must be finite; break the cycle with a `JSON` or `String` id field
+  = help: schemas must be finite; break the cycle with a `JSON` or `String` id field
 
 error: compilation failed: 1 error(s), 0 warning(s)
 ```

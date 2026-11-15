@@ -60,7 +60,7 @@ impl<'a> Schemas<'a> {
                         diags.push(
                             Diagnostic::error("E0202", format!("recursive schema `{}`", id.name), id.span)
                                 .with_note(format!("cycle: {}", cycle.join(" -> ")))
-                                .with_help("ORBIT v0.1 schemas must be finite; break the cycle with a `JSON` or `String` id field"),
+                                .with_help("schemas must be finite; break the cycle with a `JSON` or `String` id field"),
                         );
                         return Type::Json;
                     }
