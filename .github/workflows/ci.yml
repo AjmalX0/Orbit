@@ -74,6 +74,14 @@ jobs:
           PGPASSWORD: orbit
         run: python3 -I tests/e2e/test_e2e.py EndToEnd
 
+  msrv:
+    name: minimum supported Rust (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - run: cargo build --workspace --locked
+
   vscode:
     runs-on: ubuntu-latest
     steps:

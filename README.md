@@ -67,7 +67,7 @@ error[E0405]: value may be `null` but `String` is required
 
 ## Quick start
 
-Requirements: Rust 1.80+, plus Python 3.9+ and/or Node.js 22.18+ for the
+Requirements: Rust 1.89+ (or a prebuilt binary), plus Python 3.9+ and/or Node.js 22.18+ for the
 example workers.
 
 ```bash
