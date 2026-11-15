@@ -27,6 +27,7 @@
 - [Signals and queries](language/signals.md)
 - [Compute steps](language/compute.md)
 - [Compensation](language/compensation.md)
+- [Outcome handlers](language/handlers.md)
 - [Expressions](language/expressions.md)
 - [Built-in functions](language/functions.md)
 - [HTTP adapter](language/http-adapter.md)

@@ -438,6 +438,8 @@ pub fn timeline(h: &Value, tty: bool) -> String {
         let mut detail = vec![];
         for key in [
             "step",
+            "kind",
+            "limit",
             "name",
             "signal",
             "signal_seq",
