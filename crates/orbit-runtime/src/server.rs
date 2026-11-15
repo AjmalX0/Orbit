@@ -31,7 +31,7 @@ pub struct AppState {
 
 pub type Shared = Arc<AppState>;
 
-pub struct ApiError(EngineError);
+pub struct ApiError(pub(crate) EngineError);
 
 impl From<EngineError> for ApiError {
     fn from(e: EngineError) -> Self {
@@ -57,7 +57,7 @@ fn bad_request(msg: impl Into<String>) -> ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-fn engine(state: &Shared) -> std::sync::MutexGuard<'_, Engine> {
+pub(crate) fn engine(state: &Shared) -> std::sync::MutexGuard<'_, Engine> {
     state.engine.lock().unwrap_or_else(|p| p.into_inner())
 }
 
@@ -124,62 +124,72 @@ fn forbidden(msg: impl Into<String>) -> ApiError {
 /// endpoints, so a compromised worker host cannot start, cancel or read
 /// executions. Per-worker identities are further limited by the handlers to
 /// their own id, tasks, sessions and task tokens.
+/// Establish the caller from a bearer token and/or a verified client
+/// certificate. Shared by the HTTP API and the gRPC binding. `Ok(None)` means
+/// no credential was presented while authentication is required.
+pub(crate) fn identify(
+    state: &AppState,
+    bearer: Option<&str>,
+    cert_der: Option<&[u8]>,
+) -> Result<Option<Caller>, ApiError> {
+    let secured = state.auth_token.is_some() || !state.identities.is_empty();
+    if !secured {
+        return Ok(Some(Caller::Open));
+    }
+    if let Some(t) = bearer {
+        if state
+            .auth_token
+            .as_ref()
+            .is_some_and(|a| constant_time_eq(t.as_bytes(), a.as_bytes()))
+        {
+            return Ok(Some(Caller::Admin));
+        }
+        if let Some(w) = state.identities.by_token(t) {
+            return Ok(Some(Caller::Worker(Arc::new(w.clone()))));
+        }
+        if state
+            .worker_token
+            .as_ref()
+            .is_some_and(|w| constant_time_eq(t.as_bytes(), w.as_bytes()))
+        {
+            return Ok(Some(Caller::SharedWorker));
+        }
+    }
+    if let Some(der) = cert_der {
+        return match state.identities.by_certificate(der) {
+            Some(w) => Ok(Some(Caller::Worker(Arc::new(w.clone())))),
+            None => Err(forbidden(
+                "the client certificate is valid but matches no worker in the workers file",
+            )),
+        };
+    }
+    Ok(None)
+}
+
 async fn auth(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let secured = state.auth_token.is_some() || !state.identities.is_empty();
-    let caller = if !secured {
-        Caller::Open
-    } else {
-        let bearer = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::to_string);
-        let cert = req
-            .extensions()
-            .get::<Arc<axum_server::tls::TlsInfo>>()
-            .and_then(|info| info.peer_certificates.first().cloned());
-        let by_token = |t: &str| state.identities.by_token(t).cloned();
-        match (bearer.as_deref(), cert) {
-            (Some(t), _)
-                if state
-                    .auth_token
-                    .as_ref()
-                    .is_some_and(|a| constant_time_eq(t.as_bytes(), a.as_bytes())) =>
-            {
-                Caller::Admin
-            }
-            (Some(t), _) if by_token(t).is_some() => Caller::Worker(Arc::new(by_token(t).unwrap())),
-            (Some(t), _)
-                if state
-                    .worker_token
-                    .as_ref()
-                    .is_some_and(|w| constant_time_eq(t.as_bytes(), w.as_bytes())) =>
-            {
-                Caller::SharedWorker
-            }
-            (_, Some(der)) => {
-                match state.identities.by_certificate(&der) {
-                    Some(w) => Caller::Worker(Arc::new(w.clone())),
-                    None => return ApiError(EngineError::new(
-                        403,
-                        "FORBIDDEN",
-                        "the client certificate is valid but matches no worker in the workers file",
-                    ))
-                    .into_response(),
-                }
-            }
-            _ if path == "/v1/health" => Caller::Open,
-            _ => {
-                return ApiError(EngineError::new(
-                    401,
-                    "UNAUTHENTICATED",
-                    "missing or invalid credentials",
-                ))
-                .into_response()
-            }
+    let bearer = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let cert = req
+        .extensions()
+        .get::<Arc<axum_server::tls::TlsInfo>>()
+        .and_then(|info| info.peer_certificates.first().cloned());
+    let caller = match identify(&state, bearer.as_deref(), cert.as_deref()) {
+        Ok(Some(c)) => c,
+        Ok(None) if path == "/v1/health" => Caller::Open,
+        Ok(None) => {
+            return ApiError(EngineError::new(
+                401,
+                "UNAUTHENTICATED",
+                "missing or invalid credentials",
+            ))
+            .into_response()
         }
+        Err(e) => return e.into_response(),
     };
     if matches!(caller, Caller::SharedWorker | Caller::Worker(_))
         && !is_worker_path(&path)
@@ -196,7 +206,7 @@ async fn auth(State(state): State<Shared>, mut req: Request, next: Next) -> Resp
 }
 
 /// A per-worker identity may only use sessions it opened.
-fn authorize_session(state: &Shared, caller: &Caller, session: &str) -> ApiResult<()> {
+pub(crate) fn authorize_session(state: &Shared, caller: &Caller, session: &str) -> ApiResult<()> {
     if let Some(id) = caller.identity() {
         if let Some(owner) = engine(state).session_worker(session) {
             if owner != id.id {
@@ -211,7 +221,7 @@ fn authorize_session(state: &Shared, caller: &Caller, session: &str) -> ApiResul
 }
 
 /// A per-worker identity may only report results for tokens issued to it.
-fn authorize_token(state: &Shared, caller: &Caller, token: &str) -> ApiResult<()> {
+pub(crate) fn authorize_token(state: &Shared, caller: &Caller, token: &str) -> ApiResult<()> {
     if let Some(id) = caller.identity() {
         if let Some(owner) = engine(state).token_worker(token) {
             if owner != id.id {
@@ -686,6 +696,8 @@ pub struct ServerConfig {
     pub worker_token: Option<String>,
     pub identities: Identities,
     pub tls: Option<TlsConfig>,
+    /// Also serve the gRPC binding of the worker protocol on this address.
+    pub grpc_addr: Option<SocketAddr>,
     pub body_limit: usize,
     pub tick_interval: Duration,
 }
@@ -704,7 +716,53 @@ pub async fn serve(
         identities: config.identities,
     });
     let app = router(state.clone(), config.body_limit);
-    let ticker = tokio::spawn(run_ticker(state, config.tick_interval));
+    let ticker = tokio::spawn(run_ticker(state.clone(), config.tick_interval));
+    // One shutdown signal fanned out to every listener.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown.await;
+        let _ = stop_tx.send(true);
+    });
+    let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|v| *v).await;
+    };
+    let grpc = match config.grpc_addr {
+        Some(addr) => {
+            let mut builder = tonic::transport::Server::builder();
+            if let Some(tls) = &config.tls {
+                let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+                let read = |p: &std::path::Path| {
+                    std::fs::read(p)
+                        .map_err(|e| io_err(format!("cannot read {}: {e}", p.display())))
+                };
+                let mut t = tonic::transport::ServerTlsConfig::new().identity(
+                    tonic::transport::Identity::from_pem(read(&tls.cert)?, read(&tls.key)?),
+                );
+                if let Some(ca) = &tls.client_ca {
+                    t = t
+                        .client_ca_root(tonic::transport::Certificate::from_pem(read(ca)?))
+                        .client_auth_optional(true);
+                }
+                builder = builder
+                    .tls_config(t)
+                    .map_err(|e| io_err(format!("gRPC TLS: {e}")))?;
+            }
+            let service = crate::grpc::GrpcWorkers::new(state.clone());
+            let rx = stop_rx.clone();
+            tracing::info!(addr = %addr, tls = config.tls.is_some(), "gRPC worker protocol listening");
+            Some(tokio::spawn(async move {
+                if let Err(e) = builder
+                    .add_service(service)
+                    .serve_with_shutdown(addr, stopped(rx))
+                    .await
+                {
+                    tracing::error!(error = %e, "gRPC server failed");
+                }
+            }))
+        }
+        None => None,
+    };
+    let shutdown = stopped(stop_rx);
     let result = match config.tls {
         None => {
             let listener = tokio::net::TcpListener::bind(config.addr).await?;
@@ -733,5 +791,8 @@ pub async fn serve(
         }
     };
     ticker.abort();
+    if let Some(g) = grpc {
+        let _ = g.await;
+    }
     result
 }

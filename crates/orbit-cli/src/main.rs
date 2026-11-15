@@ -234,6 +234,10 @@ struct ServerArgs {
     db: String,
     #[arg(long, env = "ORBIT_ADDR", default_value = "127.0.0.1:7233")]
     addr: std::net::SocketAddr,
+    /// Also serve the gRPC binding of the worker protocol on this address
+    /// (same credentials and TLS settings as the HTTP API).
+    #[arg(long, env = "ORBIT_GRPC_ADDR")]
+    grpc_addr: Option<std::net::SocketAddr>,
     /// Require this bearer token on every API call (except /v1/health).
     #[arg(long, env = "ORBIT_TOKEN", hide_env_values = true)]
     token: Option<String>,
@@ -777,6 +781,7 @@ fn server(mut args: ServerArgs) -> Res {
                 auth_token: args.token,
                 worker_token: args.worker_token,
                 identities,
+                grpc_addr: args.grpc_addr,
                 tls: args.tls_cert.zip(args.tls_key).map(|(cert, key)| {
                     orbit_runtime::server::TlsConfig {
                         cert,
