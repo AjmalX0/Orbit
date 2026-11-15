@@ -313,6 +313,8 @@ const KEYWORD_DOCS: &[(&str, &str)] = &[
     ("await", "`await <signal>` waits durably for the next signal of that name; its payload is the step output."),
     ("query", "`query <name> = <expr>` declares a read-only view of the execution state (steps that have not run read as `null`)."),
     ("compute", "`compute <expr>` evaluates a deterministic expression in the runtime, with no worker."),
+    ("on", "`on failure|cancel|timeout { step ... }` runs steps after compensation when the execution fails, is cancelled or times out; they can read `failure`."),
+    ("failure", "Inside `on` handlers: `failure.reason` (failed, cancelled, timed_out), `failure.code`, `failure.message`."),
     ("compensated_by", "On a task contract: steps calling this task must compensate with the named task (W0601/W0602)."),
     ("worker", "`worker \"task.name\"` runs a task implemented by a worker in any language."),
     ("task", "Declares a worker contract: version, input and output types."),

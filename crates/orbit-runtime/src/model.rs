@@ -169,6 +169,12 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deadline_ms: Option<u64>,
     },
+    /// Compensation (if any) is done and the `on <kind>` handler steps start.
+    /// `compensation` is the outcome recorded on the terminal event afterwards.
+    HandlersStarted {
+        kind: String,
+        compensation: CompensationOutcome,
+    },
     /// An `await` step took the signal received at history sequence `signal_seq`;
     /// its payload is the step output.
     SignalDelivered {
@@ -205,6 +211,7 @@ impl Event {
             Event::WorkflowCancelled { .. } => "WorkflowCancelled",
             Event::WorkflowTimedOut { .. } => "WorkflowTimedOut",
             Event::SignalReceived { .. } => "SignalReceived",
+            Event::HandlersStarted { .. } => "HandlersStarted",
             Event::SignalAwaitStarted { .. } => "SignalAwaitStarted",
             Event::SignalDelivered { .. } => "SignalDelivered",
         }
@@ -406,7 +413,23 @@ pub struct ExecutionState {
     /// Signals received so far, in arrival order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signals: Vec<ReceivedSignal>,
+    /// Set while `on failure|cancel|timeout` handler steps run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handlers: Option<HandlerPhase>,
     pub last_seq: u64,
+}
+
+/// The handler block running while an execution finishes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandlerPhase {
+    pub kind: String,
+    pub compensation: CompensationOutcome,
+}
+
+/// True for units that keep running while an execution winds down:
+/// compensations and `on` handler steps.
+pub fn is_cleanup_key(key: &str) -> bool {
+    key.starts_with("compensate:") || orbit_ir::parse_handler_key(key).is_some()
 }
 
 /// A signal in an execution's buffer.
@@ -490,6 +513,7 @@ impl ExecutionState {
             output: None,
             error: None,
             signals: vec![],
+            handlers: None,
             last_seq: 0,
         }
     }
@@ -701,6 +725,12 @@ pub fn apply(s: &mut ExecutionState, h: &HistoryEvent) {
             s.status = WorkflowStatus::TimedOut;
             s.compensation = Some(*compensation);
             s.finished_at_ms = Some(ts);
+        }
+        Event::HandlersStarted { kind, compensation } => {
+            s.handlers = Some(HandlerPhase {
+                kind: kind.clone(),
+                compensation: *compensation,
+            });
         }
         Event::SignalReceived { name, payload } => s.signals.push(ReceivedSignal {
             seq: h.seq,

@@ -1198,6 +1198,16 @@ fn lower_workflow(
         }
     }
 
+    // --- Outcome handlers (`on failure|cancel|timeout`).
+    let handlers = lower_handlers(
+        wf,
+        &step_types,
+        &input_ty,
+        contracts,
+        &mut used_contracts,
+        diags,
+    );
+
     let errors = diags.iter().filter(|d| d.is_error()).count();
     if errors > start_errors || missing_child {
         return None;
@@ -1216,12 +1226,301 @@ fn lower_workflow(
         contracts: used_contracts,
         signals: signal_types,
         queries,
+        handlers,
         source_map,
     };
     ir.ir_version = ir.required_ir_version().into();
     let ir = ir.seal();
     debug_assert!(ir.validate().is_ok(), "{:?}", ir.validate());
     Some(ir)
+}
+
+/// The type of `failure` inside `on` handlers.
+pub fn failure_type() -> Type {
+    Type::record(
+        Some("Failure"),
+        vec![
+            FieldType {
+                name: "reason".into(),
+                ty: Type::String,
+                default: None,
+            },
+            FieldType {
+                name: "code".into(),
+                ty: Type::String,
+                default: None,
+            },
+            FieldType {
+                name: "message".into(),
+                ty: Type::String,
+                default: None,
+            },
+        ],
+    )
+}
+
+/// Lower `on failure|cancel|timeout { step ... }` blocks. Handler steps may
+/// read the workflow input, `failure`, the outputs of main steps (optional:
+/// they may not have run) and earlier handler steps of the same block.
+fn lower_handlers(
+    wf: &ast::Workflow,
+    step_types: &BTreeMap<String, Type>,
+    input_ty: &Type,
+    contracts: &BTreeMap<String, TaskContract>,
+    used_contracts: &mut BTreeMap<String, TaskContract>,
+    diags: &mut Vec<Diagnostic>,
+) -> BTreeMap<String, Vec<StepIr>> {
+    let mut out: BTreeMap<String, Vec<StepIr>> = BTreeMap::new();
+    let mut seen_kinds: BTreeMap<&str, Span> = BTreeMap::new();
+    let failure = failure_type();
+    for h in &wf.handlers {
+        if let Some(prev) = seen_kinds.get(h.kind.name.as_str()) {
+            diags.push(
+                Diagnostic::error(
+                    "E0319",
+                    format!("`on {}` is declared more than once", h.kind.name),
+                    h.kind.span,
+                )
+                .with_label(*prev, "first declared here"),
+            );
+            continue;
+        }
+        seen_kinds.insert(&h.kind.name, h.kind.span);
+        // Names: unique in the block, distinct from main steps.
+        let mut by_name: BTreeMap<&str, &ast::Step> = BTreeMap::new();
+        for s in &h.steps {
+            let n = s.name.name.as_str();
+            if step_types.contains_key(n) || RESERVED_STEP_NAMES.contains(&n) || n == "failure" {
+                diags.push(
+                    Diagnostic::error(
+                        "E0302",
+                        format!("handler step `{n}` has the same name as a workflow step or a reserved name"),
+                        s.name.span,
+                    )
+                    .with_help("give handler steps their own names, e.g. `alert_ops`"),
+                );
+                continue;
+            }
+            if let Some(prev) = by_name.get(n) {
+                diags.push(
+                    Diagnostic::error(
+                        "E0302",
+                        format!("step `{n}` is defined more than once"),
+                        s.name.span,
+                    )
+                    .with_label(prev.name.span, "first defined here"),
+                );
+                continue;
+            }
+            by_name.insert(n, s);
+        }
+        let names: HashSet<&str> = by_name.keys().copied().collect();
+        // Dependencies within the block.
+        let mut deps: BTreeMap<&str, BTreeMap<&str, Span>> = BTreeMap::new();
+        for (name, s) in &by_name {
+            let entry = deps.entry(name).or_default();
+            for a in &s.body.after {
+                match names.get(a.name.as_str()) {
+                    Some(k) if *k != *name => {
+                        entry.insert(k, a.span);
+                    }
+                    _ => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0303",
+                                format!("`after` in an `on {}` block must name a step of the same block", h.kind.name),
+                                a.span,
+                            )
+                            .with_note("workflow steps have all finished before a handler runs"),
+                        );
+                    }
+                }
+            }
+            let mut refs = vec![];
+            let computed = match &s.action {
+                Some(StepAction::Compute(e, _)) => Some(e),
+                _ => None,
+            };
+            for e in [
+                s.body.with.as_ref(),
+                s.body.condition.as_ref(),
+                s.body.idempotency_key.as_ref(),
+                computed,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                step_refs(e, &names, &mut refs);
+            }
+            for r in refs {
+                if r.name != **name {
+                    let key = by_name.get_key_value(r.name.as_str()).unwrap().0;
+                    entry.entry(key).or_insert(r.span);
+                }
+            }
+        }
+        if let Some(cycle) = find_cycle(&deps) {
+            diags.push(
+                Diagnostic::error(
+                    "E0304",
+                    "circular dependency between handler steps",
+                    by_name[cycle[0]].name.span,
+                )
+                .with_note(format!("cycle: {}", cycle.join(" -> "))),
+            );
+            continue;
+        }
+        let mut order: Vec<&str> = vec![];
+        let source_order: Vec<&str> = h
+            .steps
+            .iter()
+            .map(|s| s.name.name.as_str())
+            .filter(|n| by_name.contains_key(n))
+            .collect();
+        while order.len() < source_order.len() {
+            let next = source_order
+                .iter()
+                .find(|n| !order.contains(n) && deps[*n].keys().all(|d| order.contains(d)))
+                .copied()
+                .expect("acyclic");
+            order.push(next);
+        }
+        // Types: main steps are optional here (they may not have run).
+        let mut types: BTreeMap<String, Type> = step_types
+            .iter()
+            .map(|(k, t)| (k.clone(), t.clone().optional()))
+            .collect();
+        let locals = vec![("failure".to_string(), failure.clone())];
+        let mut steps_ir = vec![];
+        for name in order {
+            let s = by_name[name];
+            let what = format!("an `on {}` step", h.kind.name);
+            let bad = |diags: &mut Vec<Diagnostic>, span: Span, member: &str| {
+                diags.push(Diagnostic::error(
+                    "E0307",
+                    format!("`{member}` is not allowed in {what}"),
+                    span,
+                ));
+            };
+            if let Some(f) = &s.body.for_each {
+                bad(diags, f.span, "for");
+            }
+            if let Some((_, span)) = s.body.max_parallel {
+                bad(diags, span, "max_parallel");
+            }
+            if let Some(c) = &s.compensation {
+                diags.push(Diagnostic::error(
+                    "E0308",
+                    "handler steps cannot declare `compensate`",
+                    c.span,
+                ));
+            }
+            let env = Env {
+                input: Some(input_ty),
+                steps: &types,
+                allowed: None,
+                context: "a handler",
+                locals: &locals,
+            };
+            let condition = s.body.condition.as_ref().map(|c| {
+                let mut ck = Checker {
+                    env: &env,
+                    diags: &mut *diags,
+                };
+                let (t, l) = ck.check(c, None);
+                if assignable(&t, &Type::Bool.optional()).is_err() {
+                    ck.diags.push(Diagnostic::error(
+                        "E0408",
+                        format!("`when` condition must be `Bool`, found `{t}`"),
+                        c.span(),
+                    ));
+                }
+                l
+            });
+            let mut ck = Checker {
+                env: &env,
+                diags: &mut *diags,
+            };
+            let (action, out_ty) = match &s.action {
+                Some(StepAction::Worker(task, span)) => match contracts.get(task) {
+                    Some(c) => {
+                        used_contracts.insert(c.name.clone(), c.clone());
+                        let inv = lower_invocation(task, Some(c), &s.body, &mut ck, s.name.span);
+                        (Some(Action::Task(inv)), c.output.clone())
+                    }
+                    None => {
+                        let mut d = Diagnostic::error(
+                            "E0300",
+                            format!("unknown worker task `{task}`"),
+                            *span,
+                        );
+                        if let Some(sug) = suggest(task, contracts.keys().map(String::as_str)) {
+                            d = d.with_help(format!("did you mean `{sug}`?"));
+                        }
+                        ck.diags.push(d);
+                        (None, Type::Json)
+                    }
+                },
+                Some(StepAction::Compute(e, _)) => {
+                    reject_members(&s.body, "a `compute` step", false, ck.diags);
+                    let (t, l) = ck.check(e, None);
+                    (Some(Action::Compute { expr: l }), t)
+                }
+                Some(StepAction::Sleep(ms, _)) => {
+                    reject_members(&s.body, "a `sleep` step", false, ck.diags);
+                    (
+                        Some(Action::Sleep { duration_ms: *ms }),
+                        Type::record(None, vec![]),
+                    )
+                }
+                Some(StepAction::Await(sig)) => {
+                    ck.diags.push(
+                        Diagnostic::error("E0307", format!("`await` is not allowed in {what}"), sig.span)
+                            .with_note("handlers run while the execution is finishing; it no longer accepts signals"),
+                    );
+                    (None, Type::Json)
+                }
+                Some(StepAction::Workflow(_, span)) => {
+                    ck.diags.push(Diagnostic::error(
+                        "E0307",
+                        format!("child workflows are not allowed in {what}"),
+                        *span,
+                    ));
+                    (None, Type::Json)
+                }
+                None => {
+                    ck.diags.push(Diagnostic::error(
+                        "E0301",
+                        format!("step `{name}` does nothing"),
+                        s.name.span,
+                    ));
+                    (None, Type::Json)
+                }
+            };
+            let out_ty = if s.body.condition.is_some() {
+                out_ty.optional()
+            } else {
+                out_ty
+            };
+            types.insert(name.to_string(), out_ty.clone());
+            if let Some(action) = action {
+                let mut dependencies: Vec<String> =
+                    deps[name].keys().map(|d| d.to_string()).collect();
+                dependencies.sort();
+                steps_ir.push(StepIr {
+                    id: name.to_string(),
+                    action,
+                    dependencies,
+                    condition,
+                    for_each: None,
+                    compensation: None,
+                    output_type: out_ty,
+                });
+            }
+        }
+        out.insert(h.kind.name.clone(), steps_ir);
+    }
+    out
 }
 
 /// The value of an IR expression that reads nothing (no input, steps,

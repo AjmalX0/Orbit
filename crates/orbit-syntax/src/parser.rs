@@ -468,6 +468,7 @@ impl Parser {
             steps: vec![],
             signals: vec![],
             queries: vec![],
+            handlers: vec![],
             ret: None,
             span: start,
         };
@@ -528,7 +529,24 @@ impl Parser {
                 }
                 "on" => {
                     let s = p.bump().span;
-                    let what = p.ident("`event` or `failure`")?;
+                    let kind = p.ident("`failure`, `cancel` or `timeout`")?;
+                    if ["failure", "cancel", "timeout"].contains(&kind.name.as_str()) {
+                        let mut steps = vec![];
+                        let end = p.block("handler", &["step"], |p| {
+                            if p.at_word("step") {
+                                steps.push(p.step()?);
+                                Ok(true)
+                            } else {
+                                Ok(false)
+                            }
+                        });
+                        wf.handlers.push(Handler {
+                            kind,
+                            steps,
+                            span: s.to(end),
+                        });
+                        return Ok(true);
+                    }
                     if matches!(p.kind(), TokenKind::Str(_)) {
                         p.bump();
                     }
@@ -551,15 +569,10 @@ impl Parser {
                     p.diagnostics.push(
                         Diagnostic::error(
                             "E0105",
-                            format!(
-                                "`on {}` handlers are reserved but not supported in ORBIT v0.1",
-                                what.name
-                            ),
+                            format!("`on {}` handlers are not supported", kind.name),
                             s.to(span),
                         )
-                        .with_help(
-                            "use a `compensate { ... }` block on the step that needs undoing",
-                        ),
+                        .with_help("use `on failure`, `on cancel` or `on timeout`"),
                     );
                 }
                 _ => return Ok(false),

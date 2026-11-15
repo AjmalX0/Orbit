@@ -10,7 +10,9 @@
 //! and `compensate:<unit>` for the compensation of a unit.
 
 use crate::model::*;
-use orbit_ir::{eval, Action, Invocation, Scope, StepIr, WorkflowIr};
+use orbit_ir::{
+    eval, handler_key, parse_handler_key, Action, Invocation, Scope, StepIr, WorkflowIr,
+};
 use serde_json::Value;
 
 /// Expression scope over an execution, optionally with a loop variable bound
@@ -20,6 +22,8 @@ pub struct StateScope<'a> {
     pub state: &'a ExecutionState,
     pub local: Option<(&'a str, &'a Value)>,
     pub own_output: Option<(&'a str, &'a Value)>,
+    /// `failure` inside `on` handlers: `{ reason, code, message }`.
+    pub failure: Option<Value>,
 }
 
 impl<'a> StateScope<'a> {
@@ -28,6 +32,7 @@ impl<'a> StateScope<'a> {
             state,
             local: None,
             own_output: None,
+            failure: None,
         }
     }
 }
@@ -43,10 +48,24 @@ impl Scope for StateScope<'_> {
                 return Some(v);
             }
         }
-        let u = self.state.units.get(step)?;
-        match u.status() {
-            UnitStatus::Succeeded | UnitStatus::Skipped => u.output.as_ref(),
+        // Inside a handler, a name refers to a step of the same handler block
+        // first (handler step names never clash with workflow step names).
+        let handler_unit = match (&self.failure, &self.state.handlers) {
+            (Some(_), Some(phase)) => self.state.units.get(&handler_key(&phase.kind, step)),
             _ => None,
+        };
+        let found = handler_unit
+            .or_else(|| self.state.units.get(step))
+            .and_then(|u| match u.status() {
+                UnitStatus::Succeeded | UnitStatus::Skipped => u.output.as_ref(),
+                _ => None,
+            });
+        // Handlers see steps that never ran (or did not succeed) as `null`;
+        // the compiler types them as optional there.
+        static NULL: Value = Value::Null;
+        match (found, &self.failure) {
+            (None, Some(_)) => Some(&NULL),
+            (found, _) => found,
         }
     }
 
@@ -60,12 +79,45 @@ impl Scope for StateScope<'_> {
     }
 
     fn local(&self, name: &str) -> Option<&Value> {
+        if name == "failure" {
+            if let Some(f) = &self.failure {
+                return Some(f);
+            }
+        }
         self.local.filter(|(n, _)| *n == name).map(|(_, v)| v)
     }
 }
 
+/// The `failure` value handlers see, from the abort reason.
+pub fn failure_value(state: &ExecutionState) -> Value {
+    let (reason, code, message) = match &state.abort {
+        Some(AbortReason::Failed { error }) => {
+            ("failed", error.code.clone(), error.message.clone())
+        }
+        Some(AbortReason::Cancelled { reason }) => {
+            ("cancelled", codes::CANCELLED.to_string(), reason.clone())
+        }
+        Some(AbortReason::TimedOut) => (
+            "timed_out",
+            codes::WORKFLOW_TIMEOUT.to_string(),
+            "workflow timed out".to_string(),
+        ),
+        None => ("failed", "UNKNOWN".to_string(), String::new()),
+    };
+    serde_json::json!({ "reason": reason, "code": code, "message": message })
+}
+
+/// The handler step behind a handler unit key.
+fn handler_step<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a StepIr> {
+    let (kind, id) = parse_handler_key(key)?;
+    def.handler_step(kind, id)
+}
+
 /// The invocation behind a unit key.
 pub fn invocation<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a Invocation> {
+    if let Some(step) = handler_step(def, key) {
+        return step.invocation();
+    }
     let k = parse_key(key);
     let step = def.step(k.step)?;
     if k.compensation {
@@ -97,6 +149,9 @@ fn schedule(state: &ExecutionState, def: &WorkflowIr, key: &str, inv: &Invocatio
     let k = parse_key(key);
     let mut scope = StateScope::new(state);
     scope.local = element(state, def, key);
+    if parse_handler_key(key).is_some() {
+        scope.failure = Some(failure_value(state));
+    }
     // Inside the compensation of an element, `<step>` is that element's output.
     let element_unit = if k.compensation && k.index.is_some() {
         key.strip_prefix("compensate:")
@@ -161,8 +216,7 @@ fn after_failure(
         .last_error
         .clone()
         .unwrap_or_else(|| TaskError::new("UNKNOWN", "attempt failed", true));
-    let is_compensation = key.starts_with("compensate:");
-    let aborting = state.abort.is_some() && !is_compensation;
+    let aborting = state.abort.is_some() && !is_cleanup_key(key);
     if let Some(inv) = inv {
         let policy = &inv.retry;
         let retryable = error.retryable && !policy.non_retryable.contains(&error.code);
@@ -289,7 +343,7 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
             }
             UnitStatus::RetryWait => {
                 if u.wake_at_ms.is_some_and(|w| now >= w) {
-                    if state.abort.is_some() && !key.starts_with("compensate:") {
+                    if state.abort.is_some() && !is_cleanup_key(key) {
                         out.push(Event::StepFailed {
                             step: key.clone(),
                             error: u.last_error.clone().unwrap_or_else(|| {
@@ -322,6 +376,9 @@ pub fn decide(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Event> 
         return out;
     }
 
+    if let Some(phase) = &state.handlers {
+        return decide_handlers(state, def, phase, now);
+    }
     match state.status {
         WorkflowStatus::Running => decide_running(state, def, now),
         WorkflowStatus::Compensating => decide_compensating(state, def),
@@ -345,6 +402,9 @@ fn awaited_signal<'a>(def: &'a WorkflowIr, key: &str) -> Option<&'a str> {
 fn compute(state: &ExecutionState, def: &WorkflowIr, key: &str, expr: &orbit_ir::Expr) -> Event {
     let mut scope = StateScope::new(state);
     scope.local = element(state, def, key);
+    if parse_handler_key(key).is_some() {
+        scope.failure = Some(failure_value(state));
+    }
     match eval(expr, &scope) {
         Ok(output) => Event::StepSucceeded {
             step: key.into(),
@@ -649,7 +709,7 @@ fn decide_running(state: &ExecutionState, def: &WorkflowIr, now: u64) -> Vec<Eve
     }
     done.sort_by_key(|d| std::cmp::Reverse(d.1));
     if done.is_empty() {
-        return vec![finish(state, CompensationOutcome::None)];
+        return conclude(state, def, CompensationOutcome::None);
     }
     let reason = match &state.abort {
         Some(AbortReason::Failed { error }) => error.message.clone(),
@@ -696,11 +756,130 @@ fn decide_compensating(state: &ExecutionState, def: &WorkflowIr) -> Vec<Event> {
         }
     }
     if !failures.is_empty() {
-        failures.push(finish(state, CompensationOutcome::Failed));
+        failures.extend(conclude(state, def, CompensationOutcome::Failed));
         return failures;
     }
-    vec![
-        Event::CompensationCompleted {},
-        finish(state, CompensationOutcome::Completed),
-    ]
+    let mut out = vec![Event::CompensationCompleted {}];
+    out.extend(conclude(state, def, CompensationOutcome::Completed));
+    out
+}
+
+/// The handler kind for the abort reason.
+fn handler_kind(state: &ExecutionState) -> &'static str {
+    match &state.abort {
+        Some(AbortReason::Cancelled { .. }) => "cancel",
+        Some(AbortReason::TimedOut) => "timeout",
+        _ => "failure",
+    }
+}
+
+/// After compensation: start the matching `on` handler, or finish.
+fn conclude(state: &ExecutionState, def: &WorkflowIr, outcome: CompensationOutcome) -> Vec<Event> {
+    let kind = handler_kind(state);
+    match def.handlers.get(kind) {
+        Some(steps) if !steps.is_empty() => vec![Event::HandlersStarted {
+            kind: kind.to_string(),
+            compensation: outcome,
+        }],
+        _ => vec![finish(state, outcome)],
+    }
+}
+
+/// Run the handler steps of the current phase; finish when they are all done.
+/// A failed handler step is recorded but does not change the outcome; steps
+/// that depend on it are cancelled.
+fn decide_handlers(
+    state: &ExecutionState,
+    def: &WorkflowIr,
+    phase: &HandlerPhase,
+    now: u64,
+) -> Vec<Event> {
+    let steps = def
+        .handlers
+        .get(&phase.kind)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut out = vec![];
+    let mut all_done = true;
+    for step in steps {
+        let key = handler_key(&phase.kind, &step.id);
+        let u = unit(state, &key);
+        if u.status().is_terminal() {
+            continue;
+        }
+        all_done = false;
+        if u.status() != UnitStatus::Pending {
+            continue;
+        }
+        let dep_status: Vec<UnitStatus> = step
+            .dependencies
+            .iter()
+            .map(|d| unit(state, &handler_key(&phase.kind, d)).status())
+            .collect();
+        if dep_status
+            .iter()
+            .any(|s| matches!(s, UnitStatus::Failed | UnitStatus::Cancelled))
+        {
+            out.push(Event::StepCancelled { step: key });
+            continue;
+        }
+        if !dep_status
+            .iter()
+            .all(|s| matches!(s, UnitStatus::Succeeded | UnitStatus::Skipped))
+        {
+            continue;
+        }
+        let mut scope = StateScope::new(state);
+        scope.failure = Some(failure_value(state));
+        if let Some(cond) = &step.condition {
+            match eval(cond, &scope) {
+                Ok(Value::Bool(true)) => {}
+                Ok(Value::Bool(false)) | Ok(Value::Null) => {
+                    out.push(Event::StepSkipped {
+                        step: key,
+                        reason: "`when` condition was false".into(),
+                    });
+                    continue;
+                }
+                Ok(other) => {
+                    out.push(Event::StepFailed {
+                        step: key,
+                        error: TaskError::new(
+                            codes::EXPRESSION_ERROR,
+                            format!("`when` evaluated to {other}, expected Bool"),
+                            false,
+                        ),
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    out.push(Event::StepFailed {
+                        step: key,
+                        error: TaskError::new(
+                            codes::EXPRESSION_ERROR,
+                            format!("evaluating `when`: {e}"),
+                            false,
+                        ),
+                    });
+                    continue;
+                }
+            }
+        }
+        match &step.action {
+            Action::Task(inv) | Action::Workflow(inv) => out.push(schedule(state, def, &key, inv)),
+            Action::Sleep { duration_ms } => out.push(Event::TimerStarted {
+                step: key,
+                fire_at_ms: now + duration_ms,
+            }),
+            Action::Compute { expr } => out.push(compute(state, def, &key, expr)),
+            Action::Await { .. } => out.push(Event::StepFailed {
+                step: key,
+                error: TaskError::new("UNKNOWN", "`await` is not allowed in a handler", false),
+            }),
+        }
+    }
+    if all_done && out.is_empty() {
+        return vec![finish(state, phase.compensation)];
+    }
+    out
 }

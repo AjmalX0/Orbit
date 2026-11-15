@@ -89,7 +89,19 @@ pub struct Workflow {
     pub steps: Vec<Step>,
     pub signals: Vec<SignalDecl>,
     pub queries: Vec<QueryDecl>,
+    /// `on failure|cancel|timeout { step ... }` blocks.
+    pub handlers: Vec<Handler>,
     pub ret: Option<Expr>,
+    pub span: Span,
+}
+
+/// `on <kind> { <steps> }`: steps that run after an execution fails
+/// (`failure`), is cancelled (`cancel`) or times out (`timeout`), once
+/// compensation has finished.
+#[derive(Debug, Clone)]
+pub struct Handler {
+    pub kind: Ident,
+    pub steps: Vec<Step>,
     pub span: Span,
 }
 

@@ -702,3 +702,60 @@ fn ir_version_stays_1_without_new_features() {
     let json = serde_json::to_string(&ir).unwrap();
     assert!(!json.contains("signals") && !json.contains("queries"));
 }
+
+#[test]
+fn outcome_handlers() {
+    let ir = ok(r#"workflow W { version "1.0.0"
+        step charge { worker "payments.charge" with { order_id: "o", amount: 1.0 } }
+        on failure {
+            step note { compute { code: failure.code, reason: failure.reason, tx: charge.transaction_id } }
+            step refund_note { compute note.code after note }
+        }
+        on timeout { step t { compute failure.message } }
+    }"#);
+    assert_eq!(ir.ir_version, "orbit-ir/2");
+    let f = &ir.handlers["failure"];
+    assert_eq!(
+        f.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["note", "refund_note"]
+    );
+    // Workflow steps may not have run, so they are optional inside handlers.
+    assert_eq!(
+        f[0].output_type.to_string(),
+        "{ code: String, reason: String, tx: String? }"
+    );
+    assert_eq!(f[1].dependencies, vec!["note"]);
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" step a { compute 1 } on failure { step x { compute 1 } } on failure { step y { compute 2 } } }"#
+        ),
+        vec!["E0319"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" step a { compute 1 } on failure { step a { compute 1 } } }"#
+        ),
+        vec!["E0302"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" signal s { x: Int } step a { await s timeout 1d } on failure { step x { await s } } }"#
+        ),
+        vec!["E0307"]
+    );
+    assert_eq!(
+        codes(
+            r#"workflow W { version "1.0.0" step a { compute 1 } on failure { step x { compute 1 after a } } }"#
+        ),
+        vec!["E0303"]
+    );
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" step a { compute 1 } on event "x" { } }"#),
+        vec!["E0105"]
+    );
+    // `failure` exists only inside handlers.
+    assert_eq!(
+        codes(r#"workflow W { version "1.0.0" step a { compute failure.code } }"#),
+        vec!["E0401"]
+    );
+}

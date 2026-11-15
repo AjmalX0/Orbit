@@ -1109,3 +1109,133 @@ fn a_failed_compensation_does_not_stop_the_others() {
     assert_eq!(s.units["compensate:one"].status(), UnitStatus::Succeeded);
     assert!(h.events(&id).contains(&"CompensationFailed"));
 }
+
+// ---------------------------------------------------------------- handlers
+
+const WITH_HANDLERS: &str = r#"workflow W { version "1.0.0"
+    input { n: Int }
+    step one { worker "a" with { n: input.n } compensate { worker "undo" with { n: one.n } } }
+    step boom { worker "b" after one with { n: 0 } }
+    on failure {
+        step report { compute { why: failure.code, msg: failure.message, reason: failure.reason, had_one: !is_null(one) } }
+        step alert { worker "a" with { n: 100 } }
+        step after_alert { worker "a" after alert with { n: alert.n } }
+    }
+    on cancel {
+        step note { compute failure.reason }
+    }
+}"#;
+
+#[test]
+fn on_failure_handlers_run_after_compensation() {
+    let mut h = Harness::new();
+    let ir = compile(WITH_HANDLERS);
+    assert_eq!(ir.ir_version, "orbit-ir/2");
+    let id = h.start(&ir, json!({ "n": 1 }));
+    let w = h.worker("w", "python", &["a", "b", "undo"]);
+    echo(&mut h, &w); // one
+    let t = h.poll(&w).unwrap();
+    h.engine
+        .fail(&t.token, TaskError::new("BOOM", "it broke", false))
+        .unwrap();
+    // Compensation first...
+    let t = h.poll(&w).unwrap();
+    assert_eq!(t.task_name, "undo");
+    h.engine.complete(&t.token, json!({ "ok": true })).unwrap();
+    // ...then the handler steps, still while the execution is not finished.
+    assert!(!h.state(&id).status.is_terminal());
+    let t = echo(&mut h, &w);
+    assert_eq!(t.input, json!({ "n": 100 }));
+    let t = echo(&mut h, &w);
+    assert_eq!(t.input, json!({ "n": 101 }));
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    assert_eq!(s.compensation, Some(CompensationOutcome::Completed));
+    assert_eq!(s.error.as_ref().unwrap().code, "BOOM");
+    assert_eq!(
+        s.units["on_failure:report"].output,
+        Some(
+            json!({ "why": "BOOM", "msg": "step `boom` failed: it broke", "reason": "failed", "had_one": true })
+        )
+    );
+    let ev = h.events(&id);
+    let pos = |n: &str| ev.iter().position(|e| *e == n).unwrap();
+    assert!(pos("CompensationCompleted") < pos("HandlersStarted"));
+    assert!(pos("HandlersStarted") < pos("WorkflowFailed"));
+}
+
+#[test]
+fn a_failing_handler_does_not_change_the_outcome() {
+    let mut h = Harness::new();
+    let ir = compile(WITH_HANDLERS);
+    let id = h.start(&ir, json!({ "n": 1 }));
+    let w = h.worker("w", "python", &["a", "b", "undo"]);
+    echo(&mut h, &w);
+    let t = h.poll(&w).unwrap();
+    h.engine
+        .fail(&t.token, TaskError::new("BOOM", "x", false))
+        .unwrap();
+    let t = h.poll(&w).unwrap();
+    h.engine.complete(&t.token, json!({ "ok": true })).unwrap();
+    let t = h.poll(&w).unwrap(); // alert
+    h.engine
+        .fail(&t.token, TaskError::new("PAGER_DOWN", "x", false))
+        .unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    assert_eq!(
+        s.error.as_ref().unwrap().code,
+        "BOOM",
+        "the handler's failure does not replace the cause"
+    );
+    assert_eq!(s.units["on_failure:alert"].status(), UnitStatus::Failed);
+    assert_eq!(
+        s.units["on_failure:after_alert"].status(),
+        UnitStatus::Cancelled
+    );
+}
+
+#[test]
+fn on_cancel_runs_for_cancellations_and_no_handler_means_no_change() {
+    let mut h = Harness::new();
+    let ir = compile(WITH_HANDLERS);
+    let id = h.start(&ir, json!({ "n": 1 }));
+    h.engine.cancel(&id, "customer asked").unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Cancelled);
+    assert_eq!(s.units["on_cancel:note"].output, Some(json!("cancelled")));
+    // A workflow timeout has no `on timeout` block here: it finishes directly.
+    let ir2 = compile(
+        r#"workflow T { version "1.0.0" timeout 1m step s { worker "a" with { n: 1 } }
+           on failure { step x { compute 1 } } }"#,
+    );
+    let id2 = h.start(&ir2, json!({}));
+    h.advance(60_000);
+    let s2 = h.state(&id2);
+    assert_eq!(s2.status, WorkflowStatus::TimedOut);
+    assert!(!h.events(&id2).contains(&"HandlersStarted"));
+}
+
+#[test]
+fn handlers_read_steps_that_never_ran_as_null() {
+    let mut h = Harness::new();
+    let ir = compile(
+        r#"workflow W { version "1.0.0"
+        step first { worker "b" with { n: 1 } }
+        step second { worker "a" after first with { n: 2 } }
+        on failure { step summary { compute { second_ran: !is_null(second), n: coalesce(second.n, -1) } } }
+    }"#,
+    );
+    let id = h.start(&ir, json!({}));
+    let w = h.worker("w", "python", &["a", "b"]);
+    let t = h.poll(&w).unwrap();
+    h.engine
+        .fail(&t.token, TaskError::new("NOPE", "x", false))
+        .unwrap();
+    let s = h.state(&id);
+    assert_eq!(s.status, WorkflowStatus::Failed);
+    assert_eq!(
+        s.units["on_failure:summary"].output,
+        Some(json!({ "second_ran": false, "n": -1 }))
+    );
+}

@@ -915,7 +915,7 @@ impl Engine {
                 Some(
                     u.status() == UnitStatus::Dispatched
                         && u.token.as_deref() == Some(token.as_str())
-                        && (st.abort.is_none() || key.starts_with("compensate:")),
+                        && (st.abort.is_none() || crate::model::is_cleanup_key(key)),
                 )
             });
             if live != Some(true) {

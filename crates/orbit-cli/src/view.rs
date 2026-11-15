@@ -276,6 +276,25 @@ pub fn ir_summary(wf: &WorkflowIr, tty: bool) -> String {
             let _ = writeln!(out, "  {name:<28} {}", q.output_type);
         }
     }
+    for (kind, steps) in &wf.handlers {
+        let _ = writeln!(out, "\n{}", paint(&format!("on {kind}"), BOLD, tty));
+        for s in steps {
+            let what = match &s.action {
+                Action::Task(i) | Action::Workflow(i) => {
+                    format!("{}@{}", i.task, i.contract_version)
+                }
+                Action::Sleep { duration_ms } => format!("sleep {}", duration(*duration_ms as i64)),
+                Action::Compute { .. } => "compute".to_string(),
+                Action::Await { signal, .. } => format!("await signal {signal}"),
+            };
+            let deps = if s.dependencies.is_empty() {
+                String::new()
+            } else {
+                format!(" after {}", s.dependencies.join(", "))
+            };
+            let _ = writeln!(out, "  {:<22} {what}{deps}", s.id);
+        }
+    }
     let _ = writeln!(out, "\n{}", paint("contracts", BOLD, tty));
     for c in wf.contracts.values() {
         let _ = writeln!(

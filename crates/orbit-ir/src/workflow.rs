@@ -45,6 +45,11 @@ pub struct WorkflowIr {
     /// Read-only queries over the execution state (`query <name> = <expr>`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub queries: BTreeMap<String, QueryIr>,
+    /// `on failure|cancel|timeout { ... }`: steps run after compensation when
+    /// the execution fails, is cancelled or times out. Keyed by kind; each list
+    /// is in topological order. Unit keys are `on_<kind>:<step>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub handlers: BTreeMap<String, Vec<StepIr>>,
     /// Source locations for diagnostics and tooling (not hashed).
     #[serde(default)]
     pub source_map: BTreeMap<String, SourceLocation>,
@@ -83,6 +88,21 @@ pub struct TaskContract {
     /// compensation that calls the named task (checked by the compiler).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compensated_by: Option<String>,
+}
+
+/// Handler kinds, in the order `on <kind>` accepts them.
+pub const HANDLER_KINDS: &[&str] = &["failure", "cancel", "timeout"];
+
+/// Unit key of a handler step: `on_<kind>:<step>`.
+pub fn handler_key(kind: &str, step: &str) -> String {
+    format!("on_{kind}:{step}")
+}
+
+/// `(kind, step)` for a handler unit key.
+pub fn parse_handler_key(key: &str) -> Option<(&str, &str)> {
+    let rest = key.strip_prefix("on_")?;
+    let (kind, step) = rest.split_once(':')?;
+    HANDLER_KINDS.contains(&kind).then_some((kind, step))
 }
 
 /// Prefix of contract names that refer to child workflows.
@@ -368,6 +388,23 @@ impl WorkflowIr {
             }
             seen.insert(s.id.as_str());
         }
+        for (kind, steps) in &self.handlers {
+            if !HANDLER_KINDS.contains(&kind.as_str()) {
+                return e(format!("unknown handler kind `{kind}`"));
+            }
+            for s in steps {
+                if let Some(inv) = s.invocation() {
+                    if self.contracts.get(&inv.task).map(|c| &c.version)
+                        != Some(&inv.contract_version)
+                    {
+                        return e(format!(
+                            "handler step `{}` uses task `{}` with no matching contract",
+                            s.id, inv.task
+                        ));
+                    }
+                }
+            }
+        }
         if !self.definition_hash.is_empty() && self.definition_hash != self.compute_hash() {
             return e(
                 "definition_hash does not match the IR content (was the file modified?)".into(),
@@ -386,10 +423,16 @@ impl WorkflowIr {
         }
     }
 
+    /// A handler step by kind and id.
+    pub fn handler_step(&self, kind: &str, id: &str) -> Option<&StepIr> {
+        self.handlers.get(kind)?.iter().find(|s| s.id == id)
+    }
+
     fn uses_v2_features(&self) -> bool {
         let lambda = |e: &Expr| e.contains_lambda();
         !self.signals.is_empty()
             || !self.queries.is_empty()
+            || !self.handlers.is_empty()
             || self.result.as_ref().is_some_and(lambda)
             || self.steps.iter().any(|s| {
                 matches!(s.action, Action::Await { .. } | Action::Compute { .. })
