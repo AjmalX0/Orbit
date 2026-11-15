@@ -16,6 +16,9 @@ cargo run -q -- fmt --check examples/*.orbit
 
 step "ORBIT example tests"
 cargo run -q -- test examples/*.test.orbit
+cargo run -q -- check --strict examples/onboarding.orbit examples/expense.orbit examples/agent.orbit examples/approval.orbit examples/checkout.orbit
+cargo run -q -- check --policy examples/policies/kyc.toml examples/onboarding.orbit
+cargo run -q -- check --policy examples/policies/fintech.toml examples/approval.orbit
 
 step "Python SDK"
 PYTHONPATH=sdks/python python3 -m unittest discover -s sdks/python/tests

@@ -1,0 +1,53 @@
+# Example organisation policy for customer onboarding (KYC).
+#
+#   orbit check --policy examples/policies/kyc.toml examples/onboarding.orbit
+#
+# See docs/src/guides/business-processes.md and docs/src/tooling/policy.md.
+
+[policy]
+name = "kyc"
+description = "Onboarding must be reversible, bounded in time and audited"
+workflows = ["Onboarding*"]
+
+# An account opened for a customer who did not complete onboarding must be
+# closed again.
+[[rule]]
+id = "accounts-reversible"
+type = "require_compensation"
+tasks = ["accounts.open"]
+
+# Verification providers are flaky; every call retries, with a deadline.
+[[rule]]
+id = "provider-retries"
+type = "require_retry"
+tasks = ["identity.*", "sanctions.*"]
+
+[[rule]]
+id = "provider-timeouts"
+type = "require_timeout"
+tasks = ["identity.*", "sanctions.*"]
+max = "1m"
+
+# A compliance review must be answered within a week.
+[[rule]]
+id = "review-deadline"
+type = "require_signal_timeout"
+signals = ["review"]
+max = "7d"
+
+# Failures and timeouts are recorded for the audit trail.
+[[rule]]
+id = "outcome-handlers"
+type = "require_handler"
+handlers = ["failure", "timeout"]
+
+[[rule]]
+id = "bounded-history"
+type = "require_limits"
+keys = ["max_history_events"]
+
+# Only approved services may be called.
+[[rule]]
+id = "approved-services"
+type = "allow_tasks"
+tasks = ["identity.*", "sanctions.*", "accounts.*", "audit.*", "customers.*"]

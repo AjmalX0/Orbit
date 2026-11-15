@@ -114,6 +114,75 @@ field (`E0403`), reading a value that may be `null` without handling it
 `W0604`), and an `await` without a timeout (`W0606`). See
 [Static safety checks](../language/safety.md).
 
+## Organisation rules as policy
+
+Some rules are not about one workflow but about every workflow in a domain:
+"accounts must be closable", "provider calls retry and have a deadline",
+"reviews are answered within a week". Write them once as a policy file and
+check every workflow against it in CI.
+[`examples/policies/kyc.toml`](https://github.com/AjmalX0/Orbit/blob/main/examples/policies/kyc.toml):
+
+```toml
+[policy]
+name = "kyc"
+workflows = ["Onboarding*"]
+
+[[rule]]
+id = "accounts-reversible"
+type = "require_compensation"
+tasks = ["accounts.open"]
+
+[[rule]]
+id = "provider-timeouts"
+type = "require_timeout"
+tasks = ["identity.*", "sanctions.*"]
+max = "1m"
+
+[[rule]]
+id = "review-deadline"
+type = "require_signal_timeout"
+signals = ["review"]
+max = "7d"
+
+[[rule]]
+id = "outcome-handlers"
+type = "require_handler"
+handlers = ["failure", "timeout"]
+```
+
+The onboarding workflow passes. Remove the `timeout` from the `identity`
+step and the check fails:
+
+```console
+$ orbit check --policy examples/policies/kyc.toml examples/onboarding.orbit
+error[P0104]: policy rule `provider-timeouts`: step `identity` calls `identity.verify` without a `timeout`
+  --> examples/onboarding.orbit:64:10
+   |
+64 |     step identity {
+   |          ^^^^^^^^
+   = note: required by policy kyc (examples/policies/kyc.toml)
+   = help: add `timeout 1m` to the step, or waive it: `// policy-allow: provider-timeouts <reason>`
+
+error: policy check failed: 1 error(s), 0 warning(s)
+```
+
+`orbit compile --policy` and `orbit deploy --policy` apply the same check,
+so a workflow that breaks a rule cannot be deployed. A deliberate exception
+is written next to the step it applies to, with a reason
+(`// policy-allow: provider-timeouts <reason>`), so it is reviewed like any
+other change. See [Policies](../tooling/policy.md) for every rule type.
+
+## Documentation and diagrams from the definition
+
+The process definition is also its documentation. `orbit graph` draws it
+(Mermaid, Graphviz or SVG), `orbit docs` writes a reference page per workflow
+and contract, and `orbit schema` exports JSON Schema for every input, output,
+signal and query, so other systems can validate payloads. `orbit diff` shows
+what changed between two versions of the process, in a form you can paste
+into a pull request. See [Graphs](../tooling/graph.md),
+[Documentation generation](../tooling/docs-generation.md) and
+[Process diffs](../tooling/diff.md).
+
 ## Testing every path
 
 Each path through the process is a `test` block with mocked services. Tests
