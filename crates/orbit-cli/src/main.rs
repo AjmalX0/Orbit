@@ -253,6 +253,16 @@ enum Command {
         /// Task patterns the worker may serve.
         #[arg(long = "task", default_value = "*")]
         tasks: Vec<String>,
+        /// Print a `[[client]]` entry with this id instead of a worker entry.
+        #[arg(long, conflicts_with_all = ["worker", "tasks"])]
+        client: Option<String>,
+        /// Workflow patterns the client may use (with --client).
+        #[arg(long = "workflow", requires = "client", default_value = "*")]
+        workflows: Vec<String>,
+        /// Actions the client is granted (with --client): start, signal,
+        /// query, read, cancel.
+        #[arg(long = "action", requires = "client", default_values_t = ["start".to_string(), "signal".to_string(), "query".to_string(), "read".to_string()])]
+        actions: Vec<String>,
     },
     /// Worker commands.
     Workers {
@@ -850,7 +860,13 @@ fn run(cmd: Command) -> Res {
             Ok(ExitCode::SUCCESS)
         }
         Command::Lsp => lsp::run().map(|_| ExitCode::SUCCESS),
-        Command::Token { worker, tasks } => {
+        Command::Token {
+            worker,
+            tasks,
+            client,
+            workflows,
+            actions,
+        } => {
             // Two v4 UUIDs from the OS CSPRNG: 244 random bits.
             let token = format!(
                 "{}{}",
@@ -862,6 +878,32 @@ fn run(cmd: Command) -> Res {
                 .map(|t| format!("{t:?}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let list = |v: &[String]| {
+                v.iter()
+                    .map(|t| format!("{t:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            if let Some(id) = client {
+                if let Some(bad) = actions
+                    .iter()
+                    .find(|a| !orbit_runtime::identity::CLIENT_ACTIONS.contains(&a.as_str()))
+                {
+                    return Err(format!(
+                        "unknown action `{bad}` (allowed: {})",
+                        orbit_runtime::identity::CLIENT_ACTIONS.join(", ")
+                    )
+                    .into());
+                }
+                println!("{token}");
+                eprintln!(
+                    "\nGive the token above to the application (ORBIT_TOKEN). Add this to the workers file:\n\n[[client]]\nid = {id:?}\ntoken_sha256 = {:?}\nworkflows = [{}]\nactions = [{}]\n",
+                    orbit_runtime::identity::sha256_hex(&token),
+                    list(&workflows),
+                    list(&actions)
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
             println!("{token}");
             eprintln!(
                 "\nGive the token above to the worker (ORBIT_WORKER_TOKEN). Add this to the workers file:\n\n[[worker]]\nid = {worker:?}\ntoken_sha256 = {:?}\ntasks = [{tasks}]\n",

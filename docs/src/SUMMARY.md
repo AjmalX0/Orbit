@@ -28,6 +28,7 @@
 - [Compute steps](language/compute.md)
 - [Compensation](language/compensation.md)
 - [Outcome handlers](language/handlers.md)
+- [Event handlers](language/events.md)
 - [Expressions](language/expressions.md)
 - [Built-in functions](language/functions.md)
 - [HTTP adapter](language/http-adapter.md)

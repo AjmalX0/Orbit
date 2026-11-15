@@ -192,9 +192,9 @@ Compensation units use the step events above with keys such as `compensate:reser
 Handler steps use the step events above with keys such as `on_failure:tell_customer`. While they run, the execution keeps its status (`RUNNING` or `COMPENSATING`). From `HandlersStarted` on, the execution state (`GET /v1/executions/{id}`) has a `handlers` field, for example `{"kind": "failure", "compensation": "none"}`; it stays after the terminal event and is absent for executions that ran no handler. When every handler step has finished, the terminal event is recorded with the original error. A handler step that fails does not change the execution's outcome. See [Outcome handlers](../language/handlers.md).
 
 ```json
-{"seq":13,"timestamp_ms":1794754619132,"type":"LimitExceeded","limit":"max_history_events","message":"the execution reached 10 history events (--max-history-events)"}
+{"seq":13,"timestamp_ms":1794754619132,"type":"LimitExceeded","limit":"max_history_events","message":"the execution reached 10 history events (--max-history-events or the workflow's `limits`)"}
 {"seq":15,"timestamp_ms":1794754619132,"type":"HandlersStarted","kind":"failure","compensation":"none"}
-{"seq":17,"timestamp_ms":1794754619132,"type":"WorkflowFailed","error":{"code":"LIMIT_EXCEEDED","message":"the execution reached 10 history events (--max-history-events)","retryable":false},"compensation":"none"}
+{"seq":17,"timestamp_ms":1794754619132,"type":"WorkflowFailed","error":{"code":"LIMIT_EXCEEDED","message":"the execution reached 10 history events (--max-history-events or the workflow's `limits`)","retryable":false},"compensation":"none"}
 ```
 
 ### Runtime error codes

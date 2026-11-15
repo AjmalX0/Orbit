@@ -100,7 +100,7 @@ At the top level of a file, only `import`, `schema`, `task` and `workflow` decla
 
 ### E0105: unsupported handler
 
-An `on` member names a handler kind other than `failure`, `cancel` or `timeout`. Message: ``` `on success` handlers are not supported ```, with help ``use `on failure`, `on cancel` or `on timeout` ``.
+An `on` member names a handler kind other than `failure`, `cancel`, `timeout` or `event`. Message: ``` `on success` handlers are not supported ```, with help ``use `on failure`, `on cancel`, `on timeout` or `on event <signal>` ``.
 
 ```text
 error[E0105]: `on success` handlers are not supported
@@ -108,7 +108,7 @@ error[E0105]: `on success` handlers are not supported
   |
 4 |     on success {
   |     ^^^^^^^^^^^^
-  = help: use `on failure`, `on cancel` or `on timeout`
+  = help: use `on failure`, `on cancel`, `on timeout` or `on event <signal>`
 ```
 
 To run steps after a successful execution, make them ordinary steps that depend on the others. See [Outcome handlers](../language/handlers.md).
@@ -234,7 +234,7 @@ A workflow declares two queries with the same name. Message: ``query `state` is 
 
 ### E0319: duplicate handler
 
-A workflow declares two `on` blocks of the same kind. Message: ``` `on failure` is declared more than once ```; a label marks the first declaration. Merge the steps into one block.
+A workflow declares two `on` blocks of the same kind, or two `on event` blocks for the same signal. Message: ``` `on failure` is declared more than once ```; a label marks the first declaration. Merge the steps into one block.
 
 ```text
 error[E0319]: `on failure` is declared more than once
@@ -244,6 +244,47 @@ error[E0319]: `on failure` is declared more than once
   |        ^^^^^^^
 4 |     on failure {
   |        ------- first declared here
+```
+
+### E0320: unknown limit
+
+A `limits` block names a field other than `max_fan_out`, `max_history_events` and `max_payload_bytes`. A close match is suggested.
+
+```text
+error[E0320]: unknown limit `max_fanout`
+ --> lim.orbit:3:14
+  |
+3 |     limits { max_fanout: 10, max_history_events: 0 }
+  |              ^^^^^^^^^^
+  = help: did you mean `max_fan_out`?
+```
+
+### E0321: invalid limit value
+
+A limit is zero, negative, or not an integer literal.
+
+```text
+error[E0321]: limit `max_history_events` must be a positive integer literal
+ --> lim.orbit:3:50
+  |
+3 |     limits { max_fanout: 10, max_history_events: 0 }
+  |                                                  ^
+  = help: for example `max_fan_out: 100`
+```
+
+### E0322: signal both awaited and handled
+
+A signal handled by an `on event` block is also the target of an `await` step. Every arriving signal of that name starts the block, so the `await` could never receive one. Use a separate signal for the `await`.
+
+```text
+error[E0322]: signal `note` is handled by `on event` and cannot also be awaited
+ --> aw.orbit:4:20
+  |
+4 |     step a { await note timeout 1h }
+  |                    ^^^^
+5 |     on event note {
+  |              ---- handled here
+  = note: every signal handled by `on event` starts the handler; an `await` would compete for it
 ```
 
 ### W0301: unknown worker language

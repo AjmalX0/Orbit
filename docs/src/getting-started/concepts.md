@@ -192,7 +192,7 @@ prints the raw events. See [Executions and history](../runtime/executions.md).
 
 Compiling a workflow produces a definition in the intermediate representation
 (`orbit-ir/1`, or `orbit-ir/2` for workflows that use signals, queries,
-`await` or `compute` steps, or lambdas). Registering it with the runtime (`orbit deploy`, or implicitly
+`await` or `compute` steps, lambdas, `on` handlers or a `limits` block). Registering it with the runtime (`orbit deploy`, or implicitly
 `orbit run`) stores it under its `name@version`, together with a SHA-256
 `definition_hash` of its semantic content.
 

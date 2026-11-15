@@ -439,13 +439,22 @@ async fn list_executions(
     Extension(caller): Extension<Caller>,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
+    // A client sees only the workflows it may read: look further back so the
+    // page still holds `limit` executions it is allowed to see.
+    let fetch = if matches!(caller, Caller::Client(_)) {
+        1000
+    } else {
+        limit
+    };
     let mut list = engine(&state).list_executions(
         q.status.as_deref().map(str::to_uppercase).as_deref(),
         q.workflow.as_deref(),
-        q.limit.unwrap_or(50),
+        fetch,
     )?;
     if let Caller::Client(c) = &caller {
         list.retain(|e| c.can_read(&e.workflow));
+        list.truncate(limit as usize);
     }
     Ok(Json(json!({ "executions": list })))
 }

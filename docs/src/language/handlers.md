@@ -125,7 +125,7 @@ steps still run.
 
 | Rule | Diagnostic |
 |------|------------|
-| Only `on failure`, `on cancel` and `on timeout` exist | `E0105` |
+| Only `on failure`, `on cancel`, `on timeout` and [`on event <signal>`](events.md) exist | `E0105` |
 | One block of each kind per workflow | `E0319` |
 | Handler step names must differ from workflow step names and from `failure` | `E0302` |
 | `after` may only name steps of the same block | `E0303` |
@@ -147,6 +147,7 @@ Workflows that declare handlers compile to `orbit-ir/2`; see
 
 ## See also
 
+- [Event handlers](events.md)
 - [Compensation](compensation.md)
 - [Retries and timeouts](retries-timeouts.md)
 - [Executions and history](../runtime/executions.md#handler-events)

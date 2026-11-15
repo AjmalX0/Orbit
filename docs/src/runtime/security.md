@@ -193,14 +193,26 @@ Other messages: ``client `app` needs `token_sha256` or `client_cert` ``, ``clien
 
 ### Generating a client token
 
-`orbit token` prints a new token on stdout. Give the token to the application and put its SHA-256 in the entry:
+`orbit token --client <id>` prints a new token on stdout and the matching `[[client]]` entry on stderr. `--workflow` (repeatable, default `*`) sets the workflow patterns and `--action` (repeatable, default `start`, `signal`, `query`, `read`) the granted actions:
 
-```bash
-TOKEN=$(orbit token 2>/dev/null)
-printf %s "$TOKEN" | sha256sum | cut -d' ' -f1
+```console
+$ orbit token --client billing --workflow 'Order*' --action start --action read
+c47e25df244d4b9c80df65eb6e3d457f43f565e91ae544599834c47de7301932
+
+Give the token above to the application (ORBIT_TOKEN). Add this to the workers file:
+
+[[client]]
+id = "billing"
+token_sha256 = "a632898a1f1166e52c3dd7c1c68ba2f0b495e566dc65e195b2b2fc37dbf94f4a"
+workflows = ["Order*"]
+actions = ["start", "read"]
 ```
 
-The `token_sha256` line of the `[[worker]]` entry that `orbit token` prints on stderr is the same hash, so you can also copy it into a `[[client]]` table.
+An unknown action is rejected: ``error: unknown action `deploy` (allowed: start, signal, query, read, cancel)``. To hash a token you already have:
+
+```bash
+printf %s "$TOKEN" | sha256sum | cut -d' ' -f1
+```
 
 ### What a client identity may do
 
@@ -213,7 +225,7 @@ A client identity can use only the execution API, for workflows that match one o
 | Evaluate a query (`orbit query`) | `query` |
 | Read an execution, its history, or wait for it (`orbit status`, `logs`, `inspect`, `run` without `--no-wait`); read a workflow definition | `read` |
 | Cancel an execution (`orbit cancel`) | `cancel` |
-| List executions or workflows (`orbit ps`) | nothing; the list shows only workflows it may `read` |
+| List executions or workflows (`orbit ps`) | nothing; the list shows only workflows it may `read`. A page of executions still holds up to `limit` entries it may read, taken from the 1000 most recent matching the other filters. |
 
 For a request about an existing execution, the workflow is the execution's workflow. Everything else is refused with `403 FORBIDDEN`: deploying workflows, `GET /v1/workers`, `/v1/metrics`, the worker protocol over HTTP (`/v1/workers/*`, `/v1/tasks/*`) and the gRPC binding.
 

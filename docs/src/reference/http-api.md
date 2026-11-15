@@ -160,7 +160,7 @@ A cluster standby:
 | `status` | string | Always `ok`. |
 | `api_version` | string | `orbit-api/1`. |
 | `runtime_version` | string | Version of the `orbit` binary. |
-| `ir_versions` | array of strings | IR versions this runtime accepts. ORBIT 0.1 lists only `orbit-ir/1`; workflows that use signals, queries, `await` or `compute` steps, or lambdas need a runtime that lists `orbit-ir/2`. |
+| `ir_versions` | array of strings | IR versions this runtime accepts. ORBIT 0.1 lists only `orbit-ir/1`; workflows that use signals, queries, `await` or `compute` steps, lambdas, `on` handlers or a `limits` block need a runtime that lists `orbit-ir/2`. |
 | `active_executions` | integer | Executions not yet terminal, held in memory. |
 | `worker_sessions` | integer | Worker sessions the runtime remembers, including ones that recently went silent. |
 | `role` | string | `single` without `--cluster`; `leader` or `standby` in cluster mode. |
@@ -312,7 +312,7 @@ Responses:
 {"error":{"code":"INVALID_INPUT","message":"workflow input is invalid at $.order_id: expected String, found an integer"}}
 {"error":{"code":"WORKFLOW_NOT_FOUND","message":"workflow OrderProcessing@9.9.9 is not registered"}}
 {"error":{"code":"EXECUTION_EXISTS","message":"execution `order-1001` already exists for a different workflow"}}
-{"error":{"code":"PAYLOAD_TOO_LARGE","message":"execution input is 414 bytes; the limit is 200 (--max-payload-bytes)"}}
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"execution input is 414 bytes; the limit is 200 (--max-payload-bytes or the workflow's `limits`)"}}
 {"error":{"code":"RESOURCE_EXHAUSTED","message":"2 executions are already running (--max-active-executions)"}}
 ```
 
@@ -544,7 +544,7 @@ Errors: `404 NOT_FOUND`; `409 EXECUTION_FINISHED` (checked first); `404 UNKNOWN_
 
 ```json
 {"error":{"code":"UNKNOWN_SIGNAL","message":"OrderApproval@1.0.0 has no signal `reveiw`; declared: review"}}
-{"error":{"code":"PAYLOAD_TOO_LARGE","message":"signal payload is 277 bytes; the limit is 200 (--max-payload-bytes)"}}
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"signal payload is 277 bytes; the limit is 200 (--max-payload-bytes or the workflow's `limits`)"}}
 {"error":{"code":"SIGNAL_PAYLOAD_INVALID","message":"payload for signal `review` is invalid at $.approved: expected Bool, found a string"}}
 ```
 
@@ -750,7 +750,7 @@ A success is accepted for any token issued for a step that is not yet resolved, 
 Errors: `400 INVALID_REQUEST` (`token is required`); `403 FORBIDDEN` when a per-worker identity reports for a token issued to another worker; `413 PAYLOAD_TOO_LARGE` when the output is larger than `--max-payload-bytes`. A refused output is not recorded and the attempt stays in flight, so the worker can still report a smaller result or a failure:
 
 ```json
-{"error":{"code":"PAYLOAD_TOO_LARGE","message":"task result is 312 bytes; the limit is 200 (--max-payload-bytes)"}}
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"task result is 312 bytes; the limit is 200 (--max-payload-bytes or the workflow's `limits`)"}}
 ```
 
 ### POST /v1/tasks/fail

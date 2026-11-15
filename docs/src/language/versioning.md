@@ -157,7 +157,7 @@ an `orbit-ir/2` feature. `GET /v1/health` lists the supported versions in
 ```
 
 A runtime that only lists `orbit-ir/1` (ORBIT 0.1) cannot register
-workflows that use signals, queries, `await`, `compute`, lambdas or outcome handlers. Upgrade
+workflows that use signals, queries, `await`, `compute`, lambdas, outcome or event handlers, or a `limits` block. Upgrade
 the runtime before you deploy them; definitions already registered keep
 working after the upgrade.
 

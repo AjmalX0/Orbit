@@ -350,7 +350,7 @@ Things that stay stable within a major version:
 
 - The HTTP API is versioned by path (`/v1`) and reports `api_version` `orbit-api/1`; new fields may appear in responses.
 - The worker protocol is `orbit.worker.v1`. SDKs that speak the same protocol version can connect to any runtime that serves it.
-- Compiled definitions are `orbit-ir/1`, or `orbit-ir/2` for workflows that use signals, queries, `await` or `compute` steps, or lambdas. `/v1/health` lists the IR versions a runtime accepts in `ir_versions`; upgrade the runtime before you deploy `orbit-ir/2` definitions to it. See [Versioning](../language/versioning.md#ir-version).
+- Compiled definitions are `orbit-ir/1`, or `orbit-ir/2` for workflows that use signals, queries, `await` or `compute` steps, lambdas, `on` handlers or a `limits` block. `/v1/health` lists the IR versions a runtime accepts in `ir_versions`; upgrade the runtime before you deploy `orbit-ir/2` definitions to it. See [Versioning](../language/versioning.md#ir-version).
 - The database schema is versioned in the `schema_version` table (version `1` in this release) and created on first start.
 
 Downgrading to an older runtime against a database written by a newer one is not supported. Workflow definitions are immutable, so upgrading the runtime never changes the behavior of a running execution's definition; deploy new workflow versions separately from runtime upgrades.

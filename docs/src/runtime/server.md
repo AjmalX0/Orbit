@@ -210,9 +210,29 @@ orbit server --token "$ORBIT_TOKEN" \
 
 `--max-payload-bytes` is separate from `--max-body`: `--max-body` limits the whole HTTP request body and is enforced before the request is read, with a plain-text `413`; `--max-payload-bytes` limits the value inside it and answers with the JSON error envelope.
 
+### Per-workflow limits
+
+A workflow can tighten the fan-out, history and payload limits for its own executions with a `limits` block. The stricter of the workflow's value and the server's option applies; a workflow cannot raise a server limit. `--max-active-executions` is server-wide only.
+
+```orbit
+workflow Shipment {
+    version "1.0.0"
+    limits { max_fan_out: 100, max_history_events: 5000, max_payload_bytes: 65536 }
+    ...
+}
+```
+
+| Field | Same as |
+|---|---|
+| `max_fan_out` | `--max-fan-out` |
+| `max_history_events` | `--max-history-events` |
+| `max_payload_bytes` | `--max-payload-bytes`, for this workflow's input, task results and signal payloads |
+
+Each value is a positive integer literal. An unknown field is error `E0320` (with a suggestion), and a zero, negative or computed value is error `E0321`. A workflow with a `limits` block compiles to `orbit-ir/2`, and `orbit inspect` lists the block. When a workflow limit is reached, the error is the same as for the server option and names both: ``the execution reached 5000 history events (--max-history-events or the workflow's `limits`)``.
+
 ### Active executions
 
-The limit applies to executions started through `POST /v1/executions` (and `orbit run`). Starting an `execution_id` that already exists is still answered with `200` and `"created": false` when the limit is reached, because it starts nothing. Child workflows are never refused, so a running parent can always start its children, but running children count toward the total.
+The limit applies to executions started through `POST /v1/executions` (and `orbit run`). Starting an `execution_id` that already exists is still answered with `200` and `"created": false` when the limit is reached, because it starts nothing. Child workflows are never refused and do not count toward the total, so a running parent can always start its children and the limit counts top-level executions only.
 
 ```console
 $ orbit server --token "$ORBIT_TOKEN" --max-active-executions 2
@@ -261,10 +281,10 @@ With `--max-fan-out 3`, an execution with four SKUs fails at the `for` step. The
 $ orbit logs labels-2
 +     0ms   #1  WorkflowCreated           
 +     0ms   #2  WorkflowStarted           
-+     2ms   #3  StepFailed                step=print error=LIMIT_EXCEEDED `for` over 4 elements exceeds the fan-out limit of 3 (--max-fan-out)
++     2ms   #3  StepFailed                step=print error=LIMIT_EXCEEDED `for` over 4 elements exceeds the fan-out limit of 3 (--max-fan-out or the workflow's `limits`)
 +     2ms   #4  HandlersStarted           kind=failure
 +     2ms   #5  StepSucceeded             step=on_failure:alert attempt=1
-+     2ms   #6  WorkflowFailed            error=LIMIT_EXCEEDED step `print` failed: `for` over 4 elements exceeds the fan-out limit of 3 (--max-fan-out)
++     2ms   #6  WorkflowFailed            error=LIMIT_EXCEEDED step `print` failed: `for` over 4 elements exceeds the fan-out limit of 3 (--max-fan-out or the workflow's `limits`)
 ```
 
 ### History events
@@ -291,7 +311,7 @@ $ orbit logs labels-3
 +   2m15s  #14  StepCancelled             step=print
 +   2m15s  #15  HandlersStarted           kind=failure
 +   2m15s  #16  StepSucceeded             step=on_failure:alert attempt=1
-+   2m15s  #17  WorkflowFailed            error=LIMIT_EXCEEDED the execution reached 10 history events (--max-history-events)
++   2m15s  #17  WorkflowFailed            error=LIMIT_EXCEEDED the execution reached 10 history events (--max-history-events or the workflow's `limits`)
 ```
 
 The limit protects the runtime from executions that never stop growing, such as a workflow that retries forever. Set it well above the size of your largest legitimate history: about three events per task attempt, plus one per fan-out step, signal and timer.
@@ -303,11 +323,11 @@ The size is the length of the value serialized as compact JSON. The check covers
 ```console
 $ orbit server --token "$ORBIT_TOKEN" --max-payload-bytes 200
 $ curl -s ... http://127.0.0.1:7233/v1/executions
-{"error":{"code":"PAYLOAD_TOO_LARGE","message":"execution input is 414 bytes; the limit is 200 (--max-payload-bytes)"}} 413
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"execution input is 414 bytes; the limit is 200 (--max-payload-bytes or the workflow's `limits`)"}} 413
 $ curl -s ... http://127.0.0.1:7233/v1/executions/review-1/signals/decision
-{"error":{"code":"PAYLOAD_TOO_LARGE","message":"signal payload is 277 bytes; the limit is 200 (--max-payload-bytes)"}} 413
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"signal payload is 277 bytes; the limit is 200 (--max-payload-bytes or the workflow's `limits`)"}} 413
 $ curl -s ... http://127.0.0.1:7233/v1/tasks/complete
-{"error":{"code":"PAYLOAD_TOO_LARGE","message":"task result is 312 bytes; the limit is 200 (--max-payload-bytes)"}} 413
+{"error":{"code":"PAYLOAD_TOO_LARGE","message":"task result is 312 bytes; the limit is 200 (--max-payload-bytes or the workflow's `limits`)"}} 413
 ```
 
 A refused task result is not recorded: the attempt stays in flight, so the worker can report a smaller result or a failure with `POST /v1/tasks/fail` before the attempt's timeout. Over gRPC the same refusal is a status with the `orbit-error-code` metadata `PAYLOAD_TOO_LARGE` (see [HTTP API: gRPC binding](../reference/http-api.md#grpc-binding)). Error details sent with `POST /v1/tasks/fail` are not checked.

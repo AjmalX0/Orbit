@@ -61,6 +61,8 @@ and is what you pass to `orbit run` and to the start API.
 | `on failure` | `on failure { steps }` | no | none | Steps that run after compensation when a step fails permanently or a resource limit is reached. See [Outcome handlers](handlers.md). |
 | `on cancel` | `on cancel { steps }` | no | none | Steps that run after compensation when the execution is cancelled. |
 | `on timeout` | `on timeout { steps }` | no | none | Steps that run after compensation when the workflow `timeout` passes. |
+| `on event` | `on event signal { steps }` | no | none | Steps that run every time that signal arrives, alongside the main steps; they read the payload as `event`. See [Event handlers](events.md). |
+| `limits` | `limits { max_fan_out: 100 }` | no | the server's limits | Stricter fan-out, history and payload limits for this workflow's executions. See [Per-workflow limits](../runtime/server.md#per-workflow-limits). |
 
 Members can appear in any order. `version`, `description` and `timeout`
 accept an optional `:` after the keyword. `input`, `output` and `signal name`
@@ -68,7 +70,8 @@ are followed directly by a record body. A workflow can declare any number of
 steps, signals and queries; step, signal and query names are separate
 namespaces, each unique within the workflow (`E0302`, `E0317`, `E0318`).
 
-A workflow has at most one `on` block of each kind (`E0319`); any other kind,
+A workflow has at most one `on` block of each kind, and one `on event` block
+per signal (`E0319`); any other kind,
 such as `on success`, is rejected with `E0105`. Handler blocks contain only
 `step` declarations. Use [compensation](compensation.md) to undo work, and
 [outcome handlers](handlers.md) for what should happen after it, such as

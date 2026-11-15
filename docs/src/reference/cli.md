@@ -211,7 +211,7 @@ ok Plain@1.0.0 (1 steps)
 
 ## orbit compile
 
-Compile workflow files to orbit-ir JSON. Each workflow is compiled to `orbit-ir/1`, or to `orbit-ir/2` when it uses signals, queries, `await` or `compute` steps, or lambdas (see [Versioning](../language/versioning.md#ir-version)).
+Compile workflow files to orbit-ir JSON. Each workflow is compiled to `orbit-ir/1`, or to `orbit-ir/2` when it uses signals, queries, `await` or `compute` steps, lambdas, `on` handlers or a `limits` block (see [Versioning](../language/versioning.md#ir-version)).
 
 ```text
 orbit compile [OPTIONS] [FILES]...
@@ -837,8 +837,11 @@ orbit token [OPTIONS]
 |---|---|---|---|
 | `--worker <WORKER>` | string | `my-worker` | Worker id for the generated `[[worker]]` entry. |
 | `--task <TASKS>` | string, repeatable | `*` | Task pattern the worker may serve. Repeat the flag for several patterns. |
+| `--client <CLIENT>` | string | none | Print a `[[client]]` entry with this id instead of a `[[worker]]` entry ([client identities](../runtime/security.md#client-identities)). Cannot be combined with `--worker` or `--task`. |
+| `--workflow <WORKFLOWS>` | string, repeatable | `*` | With `--client`: a workflow pattern the client may use. |
+| `--action <ACTIONS>` | string, repeatable | `start`, `signal`, `query`, `read` | With `--client`: a granted action (`start`, `signal`, `query`, `read`, `cancel`). |
 
-Exit codes: `0`.
+Exit codes: `0`; `1` for an unknown `--action`.
 
 ```console
 $ orbit token --worker payments-1 --task 'payments.*' --task audit.log
