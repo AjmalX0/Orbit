@@ -23,7 +23,7 @@ The tag produces:
 | Go module tag `sdks/go/vX.Y.Z` | the repository | nothing |
 | Crates `orbit-syntax`, `orbit-ir`, `orbit-compiler`, `orbit-runtime`, `orbit-worker`, `orbit-lang` | crates.io | secret `CARGO_REGISTRY_TOKEN` |
 | `orbit-lang-sdk` | PyPI | secret `PYPI_API_TOKEN`, or trusted publishing (environment `pypi`) with repository variable `PYPI_TRUSTED_PUBLISHING=true` |
-| `orbit-lang` | npm | secret `NPM_TOKEN` (unscoped package) |
+| `orbit-lang` | npm | trusted publishing (on npmjs.com: package `orbit-lang` → Settings → Trusted publisher → GitHub Actions, workflow `release.yml`) with repository variable `NPM_TRUSTED_PUBLISHING=true`; or secret `NPM_TOKEN` |
 | `OrbitLang.Sdk` | NuGet | secret `NUGET_API_KEY` |
 | `io.github.ajmalx0:orbit-sdk` | Maven Central | secrets `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, `MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE` (namespace `io.github.ajmalx0` verified on central.sonatype.com) |
 | VS Code extension `orbit-lang.orbit-lang` | Marketplace / Open VSX | secrets `VSCE_PAT` (publisher `orbit-lang`) / `OVSX_PAT` |
