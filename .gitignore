@@ -9,3 +9,5 @@ node_modules/
 sdks/typescript/dist/
 .orbit/
 .claude/worktrees/
+bin/
+obj/
