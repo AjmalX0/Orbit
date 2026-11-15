@@ -91,6 +91,7 @@ fn engine_config() -> EngineConfig {
         session_timeout_ms: 1_000,
         heartbeat_interval_ms: 500,
         http_adapter: false,
+        ..EngineConfig::default()
     }
 }
 
