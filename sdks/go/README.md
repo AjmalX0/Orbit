@@ -25,7 +25,7 @@ log.Fatal(w.Run(ctx)) // returns after in-flight tasks finish and the worker unr
   (timeout or workflow cancellation), when the attempt's deadline passes, or
   when the worker shuts down.
 * Return `orbit.Permanent(code, msg)` or `orbit.Retryable(code, msg)` for
-  business errors. Other errors are reported as retryable `UNHANDLED_ERROR`,
+  business errors. Other errors are reported as retryable `UNHANDLED_EXCEPTION`,
   and panics as retryable `PANIC`.
 * Configuration comes from `Options` or from `ORBIT_SERVER`,
   `ORBIT_WORKER_TOKEN` / `ORBIT_TOKEN` and `ORBIT_CA_CERT`.

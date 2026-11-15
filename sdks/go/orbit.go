@@ -438,7 +438,7 @@ func (w *Worker) execute(ctx, report context.Context, task *Task) {
 	}
 	var te *TaskError
 	if !errors.As(err, &te) {
-		te = &TaskError{Code: "UNHANDLED_ERROR", Message: err.Error(), Retryable: true}
+		te = &TaskError{Code: "UNHANDLED_EXCEPTION", Message: err.Error(), Retryable: true}
 	}
 	w.deliver(report, "/v1/tasks/fail", map[string]any{
 		"token": task.Token, "error_code": te.Code, "error_message": te.Message, "retryable": te.Retryable, "details": te.Details,
