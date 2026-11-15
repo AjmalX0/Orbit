@@ -11,7 +11,7 @@ use crate::store::{ExecutionSummary, PutDefinition, Store, WorkerRecord};
 use orbit_ir::{WorkflowIr, WORKFLOW_CONTRACT_PREFIX};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 pub type Clock = Box<dyn Fn() -> u64 + Send>;
@@ -125,6 +125,8 @@ struct Session {
     runtime: String,
     contracts: HashSet<(String, String)>,
     last_seen_ms: u64,
+    /// When `last_seen_ms` was last written to the worker registry.
+    persisted_seen_ms: u64,
     inflight: HashSet<String>,
 }
 
@@ -199,6 +201,11 @@ pub struct Engine {
     by_version: BTreeMap<(String, String), Arc<WorkflowIr>>,
     by_hash: HashMap<String, Arc<WorkflowIr>>,
     active: BTreeMap<String, ExecutionState>,
+    /// Units waiting for a worker, oldest first: `(scheduled_at_ms, execution,
+    /// unit)`. Kept in step with `active` by `reindex`, so `poll` does not
+    /// scan every execution.
+    ready: BTreeSet<(u64, String, String)>,
+    ready_by_execution: HashMap<String, Vec<(u64, String, String)>>,
     tokens: HashMap<String, (String, String)>,
     /// Which worker each task token was issued to (for per-worker authorization).
     token_workers: HashMap<String, String>,
@@ -231,6 +238,8 @@ impl Engine {
             by_version: BTreeMap::new(),
             by_hash: HashMap::new(),
             active: BTreeMap::new(),
+            ready: BTreeSet::new(),
+            ready_by_execution: HashMap::new(),
             tokens: HashMap::new(),
             token_workers: HashMap::new(),
             sessions: HashMap::new(),
@@ -289,6 +298,7 @@ impl Engine {
                 }
             }
             self.active.insert(id.clone(), state);
+            self.reindex(id);
         }
         if !ids.is_empty() {
             tracing::info!(
@@ -613,6 +623,29 @@ impl Engine {
         })
     }
 
+    /// Refresh the `ready` index for one execution after its state changed
+    /// (or it left `active`).
+    fn reindex(&mut self, id: &str) {
+        if let Some(old) = self.ready_by_execution.remove(id) {
+            for e in &old {
+                self.ready.remove(e);
+            }
+        }
+        let Some(state) = self.active.get(id) else {
+            return;
+        };
+        let entries: Vec<(u64, String, String)> = state
+            .units
+            .iter()
+            .filter(|(_, u)| u.status() == UnitStatus::Scheduled)
+            .map(|(k, u)| (u.scheduled_at_ms.unwrap_or(0), id.to_string(), k.clone()))
+            .collect();
+        if !entries.is_empty() {
+            self.ready.extend(entries.iter().cloned());
+            self.ready_by_execution.insert(id.to_string(), entries);
+        }
+    }
+
     /// Reject a payload larger than `--max-payload-bytes` (or the workflow's
     /// own `max_payload_bytes`, whichever is smaller).
     fn check_payload(&self, def: Option<&WorkflowIr>, what: &str, value: &Value) -> Result<()> {
@@ -753,6 +786,7 @@ impl Engine {
         } else {
             self.active.insert(id.to_string(), state);
         }
+        self.reindex(id);
         self.changed.notify_waiters();
         Ok(())
     }
@@ -923,6 +957,7 @@ impl Engine {
                     .map(|c| (c.task_name.clone(), c.contract_version.clone()))
                     .collect(),
                 last_seen_ms: now,
+                persisted_seen_ms: now,
                 inflight: HashSet::new(),
             },
         );
@@ -956,8 +991,13 @@ impl Engine {
             )
         })?;
         s.last_seen_ms = now;
-        let wid = s.worker_id.clone();
-        let _ = self.store.touch_worker(&wid, now);
+        // The registry's `last_seen` is informational (`GET /v1/workers`);
+        // writing it on every poll would cost a durable write per request.
+        if now >= s.persisted_seen_ms + 1_000 {
+            s.persisted_seen_ms = now;
+            let wid = s.worker_id.clone();
+            let _ = self.store.touch_worker(&wid, now);
+        }
         Ok(())
     }
 
@@ -1051,34 +1091,31 @@ impl Engine {
     pub fn poll(&mut self, session_id: &str) -> Result<Option<TaskAssignment>> {
         self.touch(session_id)?;
         let session = self.sessions[session_id].clone();
+        // The oldest scheduled unit this session can serve.
         let mut best: Option<(u64, String, String)> = None;
-        for (id, state) in &self.active {
+        for (at, id, key) in &self.ready {
+            let Some(state) = self.active.get(id) else {
+                continue;
+            };
             let Some(def) = self.by_hash.get(&state.definition_hash) else {
                 continue;
             };
-            for (key, u) in &state.units {
-                if u.status() != UnitStatus::Scheduled {
+            let Some(inv) = invocation(def, key) else {
+                continue;
+            };
+            if !session
+                .contracts
+                .contains(&(inv.task.clone(), inv.contract_version.clone()))
+            {
+                continue;
+            }
+            if let Some(lang) = &inv.language {
+                if !lang.eq_ignore_ascii_case(&session.runtime) && lang != "any" {
                     continue;
-                }
-                let Some(inv) = invocation(def, key) else {
-                    continue;
-                };
-                if !session
-                    .contracts
-                    .contains(&(inv.task.clone(), inv.contract_version.clone()))
-                {
-                    continue;
-                }
-                if let Some(lang) = &inv.language {
-                    if !lang.eq_ignore_ascii_case(&session.runtime) && lang != "any" {
-                        continue;
-                    }
-                }
-                let at = u.scheduled_at_ms.unwrap_or(0);
-                if best.as_ref().is_none_or(|(b, _, _)| at < *b) {
-                    best = Some((at, id.clone(), key.clone()));
                 }
             }
+            best = Some((*at, id.clone(), key.clone()));
+            break;
         }
         let Some((_, id, key)) = best else {
             return Ok(None);

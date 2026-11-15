@@ -892,8 +892,7 @@ fn run(cmd: Command) -> Res {
                     return Err(format!(
                         "unknown action `{bad}` (allowed: {})",
                         orbit_runtime::identity::CLIENT_ACTIONS.join(", ")
-                    )
-                    .into());
+                    ));
                 }
                 println!("{token}");
                 eprintln!(

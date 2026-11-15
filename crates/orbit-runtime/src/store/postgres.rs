@@ -104,6 +104,33 @@ fn connect_client(url: &str) -> Result<Client> {
     Ok(client)
 }
 
+type EventRow = (i64, &'static str, Option<String>, String, i64);
+
+/// Bind parameters for `append`'s statement: the execution id, the projection
+/// (when this statement writes it), then five per event.
+fn bind<'a>(
+    id: &'a String,
+    projection: Option<&[&'a (dyn postgres::types::ToSql + Sync); 7]>,
+    chunk: &'a [EventRow],
+) -> Vec<&'a (dyn postgres::types::ToSql + Sync)> {
+    let mut v: Vec<&'a (dyn postgres::types::ToSql + Sync)> =
+        Vec::with_capacity(8 + chunk.len() * 5);
+    v.push(id);
+    if let Some(p) = projection {
+        v.extend(p.iter().copied());
+    }
+    for (seq, ty, step, payload, ts) in chunk {
+        v.extend([
+            seq as &(dyn postgres::types::ToSql + Sync),
+            ty,
+            step,
+            payload,
+            ts,
+        ]);
+    }
+    v
+}
+
 fn bad_payload(e: serde_json::Error) -> StoreError {
     StoreError(format!("postgres: unreadable event payload: {e}"))
 }
@@ -239,7 +266,7 @@ impl PgStore {
             PgMode::ReadOnly => return Err(read_only()),
             PgMode::Fenced(term) => Some(term),
         };
-        let rows: Vec<(i64, &'static str, Option<String>, String, i64)> = events
+        let rows: Vec<EventRow> = events
             .iter()
             .map(|h| {
                 (
@@ -262,6 +289,49 @@ impl PgStore {
             state.last_seq as i64,
         );
         self.run(move |c| {
+            type P<'a> = &'a (dyn postgres::types::ToSql + Sync);
+            let (workflow, version, hash, status, created, updated, last_seq) = &projection;
+            // Events (in chunks that stay well under PostgreSQL's 65535 bind
+            // parameters) and the execution projection, written by one
+            // statement: a data-modifying CTE. Unfenced, that statement is the
+            // whole transaction, so a typical commit is one round trip.
+            let statement = |chunk: &[EventRow],
+                             with_projection: bool|
+             -> String {
+                let base = if with_projection { 8 } else { 1 };
+                let mut sql = String::from(
+                    "INSERT INTO execution_events (execution_id, seq, event_type, step, payload, timestamp_ms) VALUES ",
+                );
+                for i in 0..chunk.len() {
+                    let b = base + 1 + i * 5;
+                    if i > 0 {
+                        sql.push(',');
+                    }
+                    sql.push_str(&format!(
+                        "($1, ${}, ${}, ${}, ${}, ${})",
+                        b,
+                        b + 1,
+                        b + 2,
+                        b + 3,
+                        b + 4
+                    ));
+                }
+                if !with_projection {
+                    return sql;
+                }
+                format!(
+                    "WITH ev AS ({sql} RETURNING 1) \
+                     INSERT INTO workflow_executions (execution_id, workflow, version, definition_hash, status, created_at_ms, updated_at_ms, last_seq) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                     ON CONFLICT (execution_id) DO UPDATE SET status = EXCLUDED.status, updated_at_ms = EXCLUDED.updated_at_ms, last_seq = EXCLUDED.last_seq"
+                )
+            };
+            let proj: [P<'_>; 7] = [workflow, version, hash, status, created, updated, last_seq];
+            const CHUNK: usize = 1000;
+            if fence.is_none() && rows.len() <= CHUNK {
+                c.execute(&statement(&rows, true), &bind(&id, Some(&proj), &rows))?;
+                return Ok(());
+            }
             let mut tx = c.transaction()?;
             if let Some(term) = fence {
                 // FOR SHARE: a new leader's term increment waits for this
@@ -276,20 +346,14 @@ impl PgStore {
                     )));
                 }
             }
-            let ins = tx.prepare(
-                "INSERT INTO execution_events (execution_id, seq, event_type, step, payload, timestamp_ms)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )?;
-            for (seq, ty, step, payload, ts) in &rows {
-                tx.execute(&ins, &[&id, seq, ty, step, payload, ts])?;
+            let chunks: Vec<_> = rows.chunks(CHUNK).collect();
+            for (i, chunk) in chunks.iter().enumerate() {
+                let last = i + 1 == chunks.len();
+                tx.execute(
+                    &statement(chunk, last),
+                    &bind(&id, last.then_some(&proj), chunk),
+                )?;
             }
-            let (workflow, version, hash, status, created, updated, last_seq) = projection;
-            tx.execute(
-                "INSERT INTO workflow_executions (execution_id, workflow, version, definition_hash, status, created_at_ms, updated_at_ms, last_seq)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (execution_id) DO UPDATE SET status = EXCLUDED.status, updated_at_ms = EXCLUDED.updated_at_ms, last_seq = EXCLUDED.last_seq",
-                &[&id, &workflow, &version, &hash, &status, &created, &updated, &last_seq],
-            )?;
             tx.commit()?;
             Ok(())
         })
