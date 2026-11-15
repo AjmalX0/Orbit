@@ -10,8 +10,9 @@
 use super::{ExecutionSummary, PutDefinition, Result, StoreError, WorkerRecord, SCHEMA};
 use crate::model::{Event, ExecutionState, HistoryEvent};
 use orbit_ir::WorkflowIr;
-use postgres::{Client, NoTls};
+use postgres::Client;
 use std::sync::mpsc;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 type Job = Box<dyn FnOnce(&mut Client) + Send>;
 
@@ -19,8 +20,35 @@ pub struct PgStore {
     jobs: mpsc::Sender<Job>,
 }
 
+/// TLS for PostgreSQL connections, following the URL's `sslmode`: `prefer`
+/// (the default) uses TLS when the server offers it, `require` insists on it,
+/// `disable` never uses it. Certificates are verified against the public web
+/// PKI roots plus, if set, the PEM CA bundle in `ORBIT_DB_CA_CERT`.
+fn tls() -> Result<MakeRustlsConnect> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Ok(path) = std::env::var("ORBIT_DB_CA_CERT") {
+        let pem = std::fs::read(&path)
+            .map_err(|e| StoreError(format!("cannot read ORBIT_DB_CA_CERT {path}: {e}")))?;
+        for cert in rustls_pemfile::certs(&mut pem.as_slice()) {
+            let cert =
+                cert.map_err(|e| StoreError(format!("invalid certificate in {path}: {e}")))?;
+            roots
+                .add(cert)
+                .map_err(|e| StoreError(format!("invalid CA certificate in {path}: {e}")))?;
+        }
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| StoreError(format!("TLS configuration: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(MakeRustlsConnect::new(config))
+}
+
 fn connect_client(url: &str) -> Result<Client> {
-    let mut client = Client::connect(url, NoTls)?;
+    let mut client = Client::connect(url, tls()?)?;
     client.batch_execute(SCHEMA)?;
     let rows = client.query_one("SELECT COUNT(*) FROM schema_version", &[])?;
     if rows.get::<_, i64>(0) == 0 {

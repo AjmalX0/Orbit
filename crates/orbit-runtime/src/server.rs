@@ -512,6 +512,9 @@ pub async fn serve(
                 .await
         }
         Some(tls) => {
+            // Several rustls crypto backends are compiled in (via different
+            // dependencies); pick one explicitly so the choice is not ambiguous.
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
                 .await
                 .map_err(|e| {
