@@ -1,112 +1,39 @@
-//! SQLite persistence.
-//!
-//! The `execution_events` table is the source of truth. `workflow_executions`
-//! is a projection kept in the same transaction for fast listing. Every batch
-//! of events is appended atomically together with the projection update.
+//! SQLite backend (default; a single file, WAL mode with `synchronous=FULL`).
 
+use super::{ExecutionSummary, PutDefinition, Result, WorkerRecord, SCHEMA};
 use crate::model::{Event, ExecutionState, HistoryEvent};
 use orbit_ir::WorkflowIr;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
 use std::path::Path;
 
-pub struct Store {
+pub struct SqliteStore {
     conn: Connection,
 }
 
-#[derive(Debug)]
-pub enum PutDefinition {
-    Created,
-    Unchanged,
-    Conflict { existing_hash: String },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExecutionSummary {
-    pub execution_id: String,
-    pub workflow: String,
-    pub version: String,
-    pub status: String,
-    pub created_at_ms: u64,
-    pub updated_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WorkerRecord {
-    pub worker_id: String,
-    pub runtime: String,
-    pub sdk: Option<String>,
-    pub contracts: serde_json::Value,
-    pub last_seen_ms: u64,
-    pub registered_at_ms: u64,
-}
-
-pub type Result<T> = std::result::Result<T, rusqlite::Error>;
-
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS workflow_definitions (
-    name TEXT NOT NULL,
-    version TEXT NOT NULL,
-    definition_hash TEXT NOT NULL,
-    ir TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (name, version)
-);
-CREATE TABLE IF NOT EXISTS workflow_executions (
-    execution_id TEXT PRIMARY KEY,
-    workflow TEXT NOT NULL,
-    version TEXT NOT NULL,
-    definition_hash TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    last_seq INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_executions_status ON workflow_executions(status);
-CREATE TABLE IF NOT EXISTS execution_events (
-    execution_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    event_type TEXT NOT NULL,
-    step TEXT,
-    payload TEXT NOT NULL,
-    timestamp_ms INTEGER NOT NULL,
-    PRIMARY KEY (execution_id, seq)
-);
-CREATE TABLE IF NOT EXISTS worker_registry (
-    worker_id TEXT PRIMARY KEY,
-    runtime TEXT NOT NULL,
-    sdk TEXT,
-    contracts TEXT NOT NULL,
-    registered_at_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL
-);
-"#;
-
-impl Store {
-    pub fn open(path: &Path) -> Result<Store> {
+impl SqliteStore {
+    pub fn open(path: &Path) -> Result<SqliteStore> {
         let conn = Connection::open(path)?;
         Self::init(conn)
     }
 
-    pub fn in_memory() -> Result<Store> {
+    pub fn in_memory() -> Result<SqliteStore> {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Store> {
+    fn init(conn: Connection) -> Result<SqliteStore> {
         // WAL + FULL sync: a committed event survives power loss.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(&SCHEMA.replace("BIGINT", "INTEGER"))?;
         if conn.query_row("SELECT COUNT(*) FROM schema_version", [], |r| {
             r.get::<_, i64>(0)
         })? == 0
         {
             conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
         }
-        Ok(Store { conn })
+        Ok(SqliteStore { conn })
     }
 
     // ------------------------------------------------------------ definitions
@@ -197,7 +124,7 @@ impl Store {
                 state.last_seq as i64
             ],
         )?;
-        tx.commit()
+        Ok(tx.commit()?)
     }
 
     pub fn history(&self, id: &str) -> Result<Vec<HistoryEvent>> {
@@ -236,7 +163,7 @@ impl Store {
             "SELECT execution_id FROM workflow_executions WHERE status IN ('RUNNING', 'COMPENSATING') ORDER BY created_at_ms",
         )?;
         let rows = stmt.query_map([], |r| r.get(0))?;
-        rows.collect()
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn list_executions(
@@ -260,7 +187,7 @@ impl Store {
                 updated_at_ms: r.get::<_, i64>(5)? as u64,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn count_by_status(&self) -> Result<Vec<(String, u64)>> {
@@ -268,7 +195,7 @@ impl Store {
             .conn
             .prepare("SELECT status, COUNT(*) FROM workflow_executions GROUP BY status")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?;
-        rows.collect()
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     // ---------------------------------------------------------------- workers
@@ -305,6 +232,6 @@ impl Store {
                 last_seen_ms: r.get::<_, i64>(5)? as u64,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }

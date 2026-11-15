@@ -186,9 +186,15 @@ enum WorkersCommand {
 
 #[derive(Args)]
 struct ServerArgs {
-    /// SQLite database file holding definitions and execution history.
-    #[arg(long, env = "ORBIT_DB", default_value = "orbit.db")]
-    db: PathBuf,
+    /// Where definitions and execution history live: a SQLite file path, or a
+    /// PostgreSQL URL such as `postgres://user:pass@host:5432/orbit`.
+    #[arg(
+        long,
+        env = "ORBIT_DB",
+        default_value = "orbit.db",
+        hide_env_values = true
+    )]
+    db: String,
     #[arg(long, env = "ORBIT_ADDR", default_value = "127.0.0.1:7233")]
     addr: std::net::SocketAddr,
     /// Require this bearer token on every API call (except /v1/health).
@@ -625,6 +631,20 @@ fn deploy(client: &Client, wf: &WorkflowIr, tty: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// `postgres://user:secret@host/db` -> `postgres://user:***@host/db` for logs.
+fn redact_url(s: &str) -> String {
+    match (s.find("://"), s.rfind('@')) {
+        (Some(scheme), Some(at)) if at > scheme => {
+            let creds = &s[scheme + 3..at];
+            match creds.find(':') {
+                Some(colon) => format!("{}{}:***{}", &s[..scheme + 3], &creds[..colon], &s[at..]),
+                None => s.to_string(),
+            }
+        }
+        _ => s.to_string(),
+    }
+}
+
 fn server(mut args: ServerArgs) -> Res {
     // An empty token (e.g. `ORBIT_TOKEN=`) must not count as authentication.
     args.token = args.token.filter(|t| !t.trim().is_empty());
@@ -658,16 +678,18 @@ fn server(mut args: ServerArgs) -> Res {
             args.addr
         ));
     }
-    let store = orbit_runtime::Store::open(&args.db)
-        .map_err(|e| format!("cannot open database {}: {e}", args.db.display()))?;
+    let db_label = redact_url(&args.db);
+    let store = orbit_runtime::Store::connect(&args.db)
+        .map_err(|e| format!("cannot open database {db_label}: {e}"))?;
     let config = orbit_runtime::EngineConfig {
         session_timeout_ms: args.session_timeout.max(1) * 1000,
         heartbeat_interval_ms: (args.session_timeout.max(1) * 1000 / 6).max(500),
         http_adapter: args.enable_http_adapter,
     };
+    let store_backend = store.backend();
     let engine = orbit_runtime::Engine::open(store, config, orbit_runtime::engine::system_clock())
         .map_err(|e| e.to_string())?;
-    tracing::info!(db = %args.db.display(), http_adapter = args.enable_http_adapter, auth = args.token.is_some(), "starting ORBIT runtime");
+    tracing::info!(db = %db_label, backend = store_backend, http_adapter = args.enable_http_adapter, auth = args.token.is_some(), "starting ORBIT runtime");
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {
         let shutdown = async {

@@ -38,6 +38,14 @@ class Cluster:
         self.port = free_port()
         self.url = f"{'https' if tls_ca else 'http'}://127.0.0.1:{self.port}"
         self.db = os.path.join(self.dir, "orbit.db")
+        # With ORBIT_E2E_POSTGRES_URL (an admin URL such as
+        # postgres://orbit@127.0.0.1:5432/postgres) every cluster runs on its own
+        # freshly created PostgreSQL database instead of SQLite.
+        pg = os.environ.get("ORBIT_E2E_POSTGRES_URL")
+        if pg:
+            name = "orbit_e2e_" + os.path.basename(self.dir).replace("-", "_").lower()
+            subprocess.run(["psql", pg, "-qc", f"CREATE DATABASE {name}"], check=True)
+            self.db = pg.rsplit("/", 1)[0] + "/" + name
         self.server = None
         self.workers = []
         self.logs = []
