@@ -3,13 +3,32 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "orbit-sdk"
+name = "orbit-lang-sdk"
 version = "0.1.0"
 description = "Python worker SDK for the ORBIT orchestration runtime"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ORBIT contributors" }]
+keywords = ["orbit", "workflow", "orchestration", "durable-execution", "saga", "worker"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/AjmalX0/Orbit"
+Documentation = "https://github.com/AjmalX0/Orbit/tree/main/sdks/python"
+Issues = "https://github.com/AjmalX0/Orbit/issues"
 
 [tool.setuptools]
 packages = ["orbit_sdk"]
+
+[tool.setuptools.package-data]
+orbit_sdk = ["py.typed"]

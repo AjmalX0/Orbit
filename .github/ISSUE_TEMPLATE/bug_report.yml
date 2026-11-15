@@ -1,0 +1,20 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: { label: What happened, description: "Include the workflow (.orbit), commands and output." }
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: What you expected }
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes: { label: Version, description: "`orbit --version` and SDK versions" }
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Language / compiler, Runtime, CLI, Language server / VS Code, Python SDK, TypeScript SDK, Go SDK, Rust SDK, Java SDK, C# SDK, Documentation]

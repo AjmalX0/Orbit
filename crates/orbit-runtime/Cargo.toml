@@ -2,7 +2,15 @@
 name = "orbit-runtime"
 version.workspace = true
 edition.workspace = true
-description = "ORBIT durable single-node runtime: event-sourced engine, persistence, worker protocol and HTTP API"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "ORBIT durable workflow runtime: event-sourced engine, SQLite/PostgreSQL persistence, HTTP and gRPC worker protocols"
+keywords = ["orbit", "workflow", "orchestration", "durable-execution", "saga"]
+categories = ["asynchronous"]
+readme = "README.md"
 
 [dependencies]
 orbit-ir.workspace = true

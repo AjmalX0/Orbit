@@ -1,4 +1,4 @@
-# orbit-sdk (Python)
+# orbit-lang-sdk (Python)
 
 Python worker SDK for the [ORBIT](../../README.md) runtime. Standard library
 only, Python 3.9+.

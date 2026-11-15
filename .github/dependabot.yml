@@ -1,0 +1,8 @@
+version: 2
+updates:
+  - { package-ecosystem: cargo, directory: "/", schedule: { interval: weekly } }
+  - { package-ecosystem: github-actions, directory: "/", schedule: { interval: weekly } }
+  - { package-ecosystem: npm, directory: "/editors/vscode", schedule: { interval: weekly } }
+  - { package-ecosystem: maven, directory: "/sdks/java", schedule: { interval: weekly } }
+  - { package-ecosystem: nuget, directory: "/sdks/csharp", schedule: { interval: weekly } }
+  - { package-ecosystem: gomod, directory: "/sdks/go", schedule: { interval: weekly } }

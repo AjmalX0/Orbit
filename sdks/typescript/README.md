@@ -1,10 +1,10 @@
-# @orbit/sdk (TypeScript / JavaScript)
+# @orbit-lang/sdk (TypeScript / JavaScript)
 
 Worker SDK for the [ORBIT](../../README.md) runtime. No dependencies, built on
 `fetch` and `AbortController`.
 
 ```ts
-import { Worker, TaskError } from "@orbit/sdk";
+import { Worker, TaskError } from "@orbit-lang/sdk";
 
 const worker = new Worker({ workerId: "orders-worker", concurrency: 8 });
 

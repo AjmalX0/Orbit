@@ -4,24 +4,43 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orbit
+          POSTGRES_PASSWORD: orbit
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U orbit" --health-interval 2s --health-timeout 5s --health-retries 20
+    env:
+      ORBIT_TEST_POSTGRES_URL: postgres://orbit:orbit@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
+        with: { node-version: "22" }
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+        with: { python-version: "3.12" }
       - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-          cache: false
+        with: { go-version: "1.24", cache: false }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+
       - name: Format
         run: |
           cargo fmt --all --check
@@ -31,15 +50,40 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           (cd sdks/go && go vet ./...)
           (cd examples/workers/polyglot/go && go vet ./...)
-      - name: Rust tests (compiler, IR, runtime, CLI, Rust SDK)
+      - name: Rust tests (compiler, IR, runtime incl. PostgreSQL and gRPC, CLI, LSP, Rust SDK)
         run: cargo test
+      - name: ORBIT examples are formatted
+        run: cargo run -q -- fmt --check examples/*.orbit
       - name: Python SDK tests
         run: PYTHONPATH=sdks/python python3 -m unittest discover -s sdks/python/tests
       - name: TypeScript SDK typecheck and tests
         run: |
-          npx -y -p typescript@6.0.2 tsc -p sdks/typescript/tsconfig.json --noEmit
+          npx -y -p typescript@5.9.3 tsc -p sdks/typescript/tsconfig.json --noEmit
           cd sdks/typescript && npm test
       - name: Go SDK tests
         run: cd sdks/go && go test -race ./...
-      - name: End-to-end (4 languages, crash recovery, TLS and credentials)
+      - name: Java SDK tests
+        run: cd sdks/java && mvn -B -q verify && mvn -B -q install -DskipTests -Dgpg.skip=true
+      - name: C# SDK tests
+        run: cd sdks/csharp && dotnet test --nologo
+      - name: End-to-end (six languages, crash recovery, TLS, mTLS identities)
         run: cargo build && python3 -I tests/e2e/test_e2e.py
+      - name: End-to-end on PostgreSQL
+        env:
+          ORBIT_E2E_POSTGRES_URL: postgres://orbit:orbit@127.0.0.1:5432/postgres
+          PGPASSWORD: orbit
+        run: python3 -I tests/e2e/test_e2e.py EndToEnd
+
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: Build orbit
+        run: cargo build -p orbit-lang
+      - name: Build and package the extension
+        run: cd editors/vscode && npm ci && npm run compile && npx vsce package --out orbit-lang.vsix
+      - name: Integration test in a real VS Code
+        run: cd editors/vscode && ORBIT_BIN="$GITHUB_WORKSPACE/target/debug/orbit" xvfb-run -a npm test
