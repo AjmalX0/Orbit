@@ -396,13 +396,16 @@ fn each_schedule_occurrence_is_fired_by_exactly_one_node() {
         .collect();
     assert_eq!(per_node.iter().sum::<u64>(), fired, "{per_node:?}");
     // Consecutive occurrences: none was handled twice or lost (skipped
-    // ones are counted, not started).
+    // ones are counted, not started). Skips can also precede the first
+    // execution (a 1s occurrence ticked more than a second late), so the
+    // span between the first and last execution is a lower bound.
     let first = orbit_runtime::schedule::parse_time(ids[0].trim_start_matches("tick:")).unwrap();
     let last = orbit_runtime::schedule::parse_time(ids.last().unwrap().trim_start_matches("tick:"))
         .unwrap();
-    assert_eq!(
-        (last - first) / 1000 + 1,
-        fired + s["skipped"].as_u64().unwrap(),
+    let span = (last - first) / 1000 + 1;
+    assert!(fired <= span, "{s} {ids:?}");
+    assert!(
+        fired + s["skipped"].as_u64().unwrap() >= span,
         "{s} {ids:?}"
     );
 }

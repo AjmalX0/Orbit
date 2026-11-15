@@ -378,27 +378,16 @@ fn only_the_leader_fires_schedules_and_a_new_leader_carries_on() {
     assert_eq!(metric(&b.url, "orbit_schedules_fired_total"), 0);
     assert!(metric(&a.url, "orbit_schedules_fired_total") >= 2);
     // Every occurrence was handled once: started or skipped.
-    let ids = scheduled_ids(&a.url, "tick:");
-    let s = ok("GET", &format!("{}/v1/schedules/tick", a.url), None);
-    assert_eq!(
-        s["fired"].as_u64().unwrap() as usize,
-        ids.len(),
-        "{s} {ids:?}"
-    );
+    assert_fired_once(&a.url);
 
     // The leader goes away; the standby takes over and keeps firing.
     a.kill();
     assert_eq!(await_leader(&[&b], Duration::from_secs(10)), 0);
     std::thread::sleep(Duration::from_millis(3_000));
     assert!(metric(&b.url, "orbit_schedules_fired_total") >= 1);
-    let ids = scheduled_ids(&b.url, "tick:");
-    let s = ok("GET", &format!("{}/v1/schedules/tick", b.url), None);
-    assert_eq!(
-        s["fired"].as_u64().unwrap() as usize,
-        ids.len(),
-        "{s} {ids:?}"
-    );
-    assert!(ids.len() as u64 > fired);
+    assert_fired_once(&b.url);
+    // The new leader carried on from where the old one stopped.
+    assert!(scheduled_ids(&b.url, "tick:").len() as u64 > fired);
 }
 
 #[test]
@@ -579,4 +568,18 @@ fn a_deposed_leader_cannot_append() {
     .unwrap();
     assert!(ro.start("One", None, json!({ "n": 4 }), None).is_err());
     assert_eq!(ro.execution("f-1").unwrap().status.as_str(), "COMPLETED");
+}
+
+/// Every fire of `tick` started exactly one execution. The schedule keeps
+/// firing every second, so it is read first and one more execution may have
+/// started before the list is read.
+fn assert_fired_once(url: &str) {
+    let s = ok("GET", &format!("{url}/v1/schedules/tick"), None);
+    let fired = s["fired"].as_u64().unwrap() as usize;
+    let ids = scheduled_ids(url, "tick:");
+    let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    assert!(ids.len() == fired || ids.len() == fired + 1, "{s} {ids:?}");
+    let last = s["last_execution_id"].as_str().unwrap().to_string();
+    assert!(ids.contains(&last), "{s} {ids:?}");
 }
