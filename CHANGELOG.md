@@ -29,6 +29,14 @@ described in RFC-0001 §17.
   page with measured numbers.
 
 ### Runtime
+- **Several active servers.** `orbit server --cluster --cluster-mode shared`
+  runs every server on one PostgreSQL database as active. Each execution
+  tree is owned by one server and fenced by an epoch; when a server stops
+  heartbeating (`--node-timeout`), the others take its executions over.
+  Tasks are claimed from a shared queue (`SKIP LOCKED`, LISTEN/NOTIFY),
+  signals, cancels and results reach the owner through an inbox, and worker
+  sessions are cluster-wide, so a round-robin load balancer works. Standby
+  mode (`--cluster-mode standby`, the default) is unchanged.
 - Workers are handed work from an index of scheduled steps, so polling no
   longer scans every running execution: throughput stays flat as the number
   of executions in flight grows (about 20 times faster with 5000 running).

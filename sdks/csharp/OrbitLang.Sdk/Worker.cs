@@ -34,7 +34,7 @@ namespace OrbitLang.Sdk;
 public sealed class Worker : IDisposable
 {
     /// <summary>Version of this SDK.</summary>
-    public const string Version = "0.3.0";
+    public const string Version = "0.4.0";
 
     internal const string DefaultServer = "http://127.0.0.1:7233";
 

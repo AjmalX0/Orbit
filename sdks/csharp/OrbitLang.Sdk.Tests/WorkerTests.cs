@@ -98,7 +98,7 @@ public sealed class WorkerTests
             var reg = f.LastRegistration!;
             Assert.Equal("csharp-test", (string?)reg["worker_id"]);
             Assert.Equal("csharp", (string?)reg["runtime"]);
-            Assert.Equal("orbit-csharp/0.3.0", (string?)reg["sdk"]);
+            Assert.Equal("orbit-csharp/0.4.0", (string?)reg["sdk"]);
             Assert.Equal(7, reg["contracts"]!.AsArray().Count);
             Assert.Contains(reg["contracts"]!.AsArray(),
                 c => (string?)c!["task_name"] == "echo" && (string?)c["contract_version"] == "1.0.0");

@@ -44,6 +44,12 @@ started as fast as the clients could.
 | SQLite file | 5000 | 425 | 1276 |
 | PostgreSQL | 2000 | 138 | 413 |
 
+### Several servers (shared mode)
+
+Throughput of [shared mode](cluster.md#shared-mode-several-active-servers)
+with one, two and three servers, on the same machine, is in
+[Running several servers: throughput](cluster.md#throughput).
+
 ## What bounds the numbers
 
 - **Durable commits.** Every change to an execution is committed to the

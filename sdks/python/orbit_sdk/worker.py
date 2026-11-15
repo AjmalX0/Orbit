@@ -123,7 +123,7 @@ class Worker:
             body = {
                 "worker_id": self.worker_id,
                 "runtime": self.runtime,
-                "sdk": "orbit-python/0.3.0",
+                "sdk": "orbit-python/0.4.0",
                 "contracts": [{"task_name": t.name, "contract_version": t.version} for t in self._tasks.values()],
             }
             _, r = self.client.post("/v1/workers/register", body)

@@ -238,8 +238,8 @@ error: compatibility check failed: 2 error(s), 0 warning(s)</code></pre>
   <div class="wrap split">
     <div>
       <h2 class="section-title">Keep running when a server does not</h2>
-      <p>Run several <code>orbit server --cluster</code> processes on one PostgreSQL database. One is active; the others stand by and take over about a second after it stops, fenced so that a deposed server can never write. A load balancer reaches the active one through <code>/v1/ready</code>, and in-flight work is redelivered, not lost.</p>
-      <p>Resource limits cap running executions, fan-out, history length and payload size, and client identities give each application only the workflows and actions it needs. <a href="docs/runtime/cluster.html">Running several servers</a></p>
+      <p>Run several <code>orbit server --cluster</code> processes on one PostgreSQL database. In standby mode one is active and the others take over about a second after it stops, fenced so that a deposed server can never write. In shared mode (<code>--cluster-mode shared</code>) every server is active: executions are owned per server and taken over when one stops, tasks are claimed from a shared queue, and any server accepts any request behind a round-robin load balancer.</p>
+      <p>Resource limits cap running executions, fan-out, history length and payload size, and client identities give each application only the workflows and actions it needs. <a href="docs/runtime/cluster.html">Running several servers</a> &middot; <a href="docs/runtime/performance.html">Performance</a></p>
     </div>
 <pre class="terminal wrap-lines"><code><span class="dim"># node-1, the leader, is killed with SIGKILL at 13:55:46.19</span>
 <span class="dim"># node-2, standby until now:</span>

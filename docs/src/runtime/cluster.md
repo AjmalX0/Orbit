@@ -564,7 +564,7 @@ These numbers were measured on the machine this page was written on, so read the
 | 3, shared mode | 1 Python, 1 TypeScript | 42.6, 41.4 |
 | 3, shared mode | 2 Python, 2 TypeScript | 42.6 |
 
-Two runs of the same configuration are listed where there were two. What they show:
+Two runs of the same configuration are listed where there were two. The single-server rows were measured before the PostgreSQL commit changes in 0.4.0 (one statement per commit, fewer worker-registry writes), which make a single server faster than shown; shared mode writes through its own path and is not affected. What they show:
 
 - One shared server is about 25% slower than a single server: every task also writes a queue row, a claim and an ownership check.
 - Throughput grows with the number of shared servers, by about 30% for the second and 10% for the third here, where all of them compete for the same CPUs and the same PostgreSQL. Three shared servers did about 10% more than one single server.

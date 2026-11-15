@@ -193,7 +193,10 @@ without a timeout; `orbit check --strict` makes them build failures.
 signals and queries, and the version bump they require.
 
 **Runtime:** event-sourced and crash-safe. SQLite or PostgreSQL storage, and
-active/standby clusters on PostgreSQL with automatic failover (`--cluster`).
+clusters on PostgreSQL (`--cluster`): active/standby with automatic failover,
+or shared mode with every server active and executions taken over when a
+server stops. Measured throughput is on the
+[Performance](docs/src/runtime/performance.md) page.
 Event handlers (`on event <signal>`), outcome handlers (`on failure`,
 `on cancel`, `on timeout`), resource limits per server or per workflow, and
 client identities limited to workflows and actions.
@@ -266,8 +269,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status and license
 
-Version 0.3. Next: horizontal scaling across several active servers, and
-per-execution resource limits declared in the workflow
+Version 0.4. Next: grouping the commits of several executions into one
+transaction for higher durable throughput
 ([RFC-0001 Appendix A.5](specification/RFC-0001.md#a5-known-gaps)).
 
 Licensed under the [Apache License 2.0](LICENSE).
