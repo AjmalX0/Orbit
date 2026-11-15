@@ -1,0 +1,291 @@
+# Executions and history
+
+An execution is one run of a workflow definition with one input. The runtime records everything that happens to it as an append-only history of events, and derives its current state, and the state of each of its steps, from that history. This page describes the execution lifecycle, every execution and unit status, every history event with its fields, how the CLI shows them, and how cancellation and timeouts behave.
+
+## Event sourcing
+
+Every state change is an event appended to the `execution_events` table. The current state of an execution is the left fold of its events: replaying the history from the first event always produces the same state. A projection table, `workflow_executions`, is updated in the same transaction for listing, but the history is authoritative.
+
+Decisions come from a pure function, `decide(state, definition, now)`, that returns the events that should happen next: schedule ready steps, fan out `for` steps, fire timers, apply retry policies, start compensation, finish the workflow. The engine runs it until it returns nothing and commits the result as one batch. Because the decider performs no I/O and expressions cannot read the clock, every decision can be explained from the history.
+
+## Starting an execution
+
+You start an execution with `orbit run`, `POST /v1/executions`, or a parent workflow's `workflow "Name"` step.
+
+- The definition is chosen by name and optional version; without a version, the highest registered version (by semantic version order) is used. The execution is pinned to that definition's hash for its whole life.
+- Input defaults are applied and the input is validated strictly against the workflow's `input` type. An invalid input is rejected with `INVALID_INPUT` and no execution is created.
+- The execution id is a random UUID unless you pass one. A client-chosen id makes starting idempotent: starting the same id again returns the existing execution (`created: false`) instead of creating a second one. A child workflow's id is `<parent id>.<unit>`, with dots in place of brackets (`order-7.ship`, `order-7.reserve.2`).
+
+```console
+$ orbit run examples/order_processing.orbit --id order-1001 --no-wait --input-file input.json
+```
+
+## Execution statuses
+
+| Status | Terminal | Meaning |
+|---|---|---|
+| `RUNNING` | no | Steps are being scheduled and run. An execution that is being aborted (after a failure, a cancellation or a timeout) stays `RUNNING` while it withdraws queued work and waits for in-flight attempts. |
+| `COMPENSATING` | no | Compensations are running, one at a time, newest first. |
+| `COMPLETED` | yes | Every step finished and the `return` expression produced a valid output. |
+| `FAILED` | yes | A step failed permanently, the `return` expression failed, or the output did not match the workflow's `output` type. |
+| `CANCELLED` | yes | Cancellation was requested and the abort finished. |
+| `TIMED_OUT` | yes | The workflow `timeout` passed and the abort finished. |
+
+```text
+                  ┌──────────────► COMPLETED
+                  │
+RUNNING ──────────┼──────────────► FAILED | CANCELLED | TIMED_OUT     (nothing to compensate)
+                  │
+                  └─► COMPENSATING ─► FAILED | CANCELLED | TIMED_OUT
+```
+
+A terminal execution also carries `compensation`:
+
+| Value | Meaning |
+|---|---|
+| `none` | Nothing needed compensating. |
+| `completed` | Every compensation succeeded. |
+| `failed` | A compensation failed permanently. The history shows exactly what was and was not undone. |
+
+## Units
+
+The runtime schedules units. A unit is one of:
+
+| Unit key | What it is |
+|---|---|
+| `step` | A step. |
+| `step[i]` | Element `i` (from 0) of a `for` step. |
+| `compensate:<unit>` | The compensation of a unit, for example `compensate:reserve_inventory` or `compensate:reserve[2]`. |
+
+Each unit has a status, an attempt number, its evaluated input and idempotency key, its output or error, and the times it was scheduled, dispatched and finished. A unit's input and idempotency key are evaluated once, when it is first scheduled, and reused unchanged for retries and redeliveries.
+
+### Unit statuses
+
+| Status | Terminal | Meaning |
+|---|---|---|
+| `PENDING` | no | Not started: waiting for dependencies, or not reached. A pending unit has no `status` field in the API. |
+| `SCHEDULED` | no | Queued for a worker. Its input is evaluated and stored. |
+| `DISPATCHED` | no | A worker received it and holds a token for it. For a child workflow step: the child execution is running. |
+| `ATTEMPT_FAILED` | no | Transient: an attempt failed and the decider is choosing between a retry and failure. Never observed between commits. |
+| `UNCERTAIN` | no | Transient: the outcome of the attempt is unknown and it will be redelivered. Never observed between commits. |
+| `RETRY_WAIT` | no | Waiting for the backoff delay before the next attempt. |
+| `WAITING` | no | A `sleep` timer is running. |
+| `RUNNING` | no | A `for` step whose elements are running. |
+| `SUCCEEDED` | yes | Finished with an output. |
+| `SKIPPED` | yes | Its `when` condition was false (or `null`). Its output is `null`. |
+| `FAILED` | yes | Failed permanently: retries exhausted, a non-retryable error, or an error the runtime never retries. |
+| `CANCELLED` | yes | Withdrawn before it started because the execution is being aborted. |
+
+A step becomes eligible when every dependency is `SUCCEEDED` or `SKIPPED`, the execution is not being aborted, and its `when` condition is true. Independent steps are scheduled together and run concurrently.
+
+```text
+PENDING ─► SCHEDULED ─► DISPATCHED ─► SUCCEEDED
+   │           │             │
+   │           │             ├─► ATTEMPT_FAILED ─► RETRY_WAIT ─► SCHEDULED
+   │           │             │                  └► FAILED
+   │           │             └─► UNCERTAIN ─► SCHEDULED (redelivery)
+   │           └─► CANCELLED
+   ├─► SKIPPED
+   ├─► WAITING ─► SUCCEEDED            (sleep)
+   └─► RUNNING ─► SUCCEEDED | FAILED   (for)
+```
+
+## History events
+
+Every event has these fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `seq` | integer | Position in the history, starting at 1, without gaps. |
+| `timestamp_ms` | integer | Commit time, milliseconds since the Unix epoch. All events of one batch share it. |
+| `type` | string | Event type, below. |
+
+Error objects (`error`) have the fields `code` (string), `message` (string), `retryable` (boolean) and optionally `details` (any JSON). Events that refer to a unit carry its key in `step`.
+
+### Workflow events
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `WorkflowCreated` | `workflow`, `version`, `definition_hash`, `input`, `parent`? | The execution exists. `input` has defaults applied. `parent` (`{"execution_id", "step"}`) is set for child workflows. Always event 1. |
+| `WorkflowStarted` | none | The execution began. Always event 2. |
+| `WorkflowTimeoutReached` | none | The workflow `timeout` passed. The execution starts aborting. |
+| `CancelRequested` | `reason` | Cancellation was requested. The execution starts aborting, unless it is already aborting. |
+| `WorkflowCompleted` | `output` | Terminal: `COMPLETED`. |
+| `WorkflowFailed` | `error`, `compensation` | Terminal: `FAILED`. The error message names the failed step. |
+| `WorkflowCancelled` | `compensation` | Terminal: `CANCELLED`. |
+| `WorkflowTimedOut` | `compensation` | Terminal: `TIMED_OUT`. |
+
+### Step events
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `StepScheduled` | `step`, `attempt`, `input`, `idempotency_key`, `redelivery` | The unit is queued with its evaluated input. Recorded for the first attempt, for each retry (same input and key, next attempt number) and for each redelivery (same attempt number, `redelivery: true`). |
+| `StepSkipped` | `step`, `reason` | The `when` condition was false. |
+| `StepFanOut` | `step`, `items` | A `for` step evaluated its list once. One unit per element follows, `step[0]`, `step[1]`, and so on. |
+| `StepDispatched` | `step`, `attempt`, `token`, `worker_id`, `worker_session`, `deadline_ms` | A worker received the unit. `deadline_ms` is `null` without a `timeout`. For child workflows, `worker_id` is `orbit-runtime` and `worker_session` is `child:<child id>`. |
+| `StepSucceeded` | `step`, `attempt`, `output` | The unit finished. For a `for` step, `output` is the list of element outputs, in order. |
+| `StepAttemptFailed` | `step`, `attempt`, `error` | One attempt failed: a worker reported a failure, the attempt exceeded its `timeout` (`TIMEOUT`), it was not picked up within `queue_timeout` (`QUEUE_TIMEOUT`), its output violated the contract (`OUTPUT_CONTRACT_VIOLATION`), or a built-in task failed. |
+| `StepAttemptUncertain` | `step`, `attempt`, `reason` | The outcome of a dispatched attempt is unknown: the worker stopped responding, unregistered, or the runtime restarted while a built-in task ran. The same attempt is redelivered. |
+| `RetryScheduled` | `step`, `next_attempt`, `delay_ms`, `fire_at_ms` | The failed attempt will be retried after `delay_ms`. |
+| `StepFailed` | `step`, `error` | The unit failed permanently. For a regular step, the execution starts aborting. When retries were exhausted, the message ends with `(gave up after N attempts)`. |
+| `StepCancelled` | `step` | A unit that had not started was withdrawn because the execution is aborting. |
+| `TimerStarted` | `step`, `fire_at_ms` | A `sleep` step started its durable timer. |
+| `TimerFired` | `step` | The timer fired. The `sleep` step succeeds with `{}`. |
+| `StaleResultIgnored` | `step`, `token`, `outcome` | A result arrived that no longer matters. `outcome` is `duplicate` (the unit was already resolved) or `failure` (a failure for an attempt that is not the one in flight). It has no effect on the execution. |
+
+### Compensation events
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `CompensationStarted` | `reason`, `steps` | The execution is `COMPENSATING`. `steps` lists the units to compensate, newest success first. `reason` explains the abort. |
+| `CompensationCompleted` | none | Every compensation succeeded. Followed by the terminal event. |
+| `CompensationFailed` | `step`, `error` | A compensation failed permanently. `step` is the compensated unit. Followed by the terminal event with `compensation: failed`. |
+
+Compensation units use the step events above with keys such as `compensate:reserve_inventory`.
+
+### Runtime error codes
+
+Errors that the runtime itself produces use these codes:
+
+| Code | Retryable | Produced when |
+|---|---|---|
+| `TIMEOUT` | yes | An attempt exceeded its step `timeout`. |
+| `QUEUE_TIMEOUT` | no | No worker picked up the task within `queue_timeout`. |
+| `EXPRESSION_ERROR` | no | Evaluating `with`, `when`, `for`, `idempotency_key` or `return` failed, or `when` did not produce a `Bool`. |
+| `INPUT_CONTRACT_VIOLATION` | no | The evaluated step input does not match the task's input contract. |
+| `OUTPUT_CONTRACT_VIOLATION` | no | A worker's output does not match the task's output contract, or the workflow output does not match its `output` type. |
+| `ADAPTER_DISABLED` | no | An `orbit.http.request` step ran on a server without `--enable-http-adapter`. |
+| `HTTP_ERROR` | depends | The HTTP adapter failed: a missing or non-HTTP URL, a connection error, or an error response. |
+| `CHILD_NOT_REGISTERED`, `CHILD_START_FAILED`, `CHILD_MISSING` | no | A child workflow could not be started or found. |
+| `CHILD_CANCELLED`, `CHILD_TIMED_OUT` | no | A child workflow ended `CANCELLED` or `TIMED_OUT`. A child that ends `FAILED` passes its own error code up, with the child's id in `details.child_execution_id`. |
+| `CANCELLED` | no | A retry that was waiting when the execution started aborting, with no earlier error to report. |
+
+A worker's own error codes are passed through unchanged. Whether a worker error is retried depends on its `retryable` flag and the step's `non_retryable` list; see [Retries and timeouts](../language/retries-timeouts.md).
+
+## Example history
+
+The execution `order-1002` ran [`examples/order_processing.orbit`](https://github.com/AjmalX0/Orbit/blob/main/examples/order_processing.orbit). The first risk check failed with a retryable error and was retried; the worker reported the validation result twice; the payment was declined with a non-retryable error, so the reserved inventory was released:
+
+```console
+$ orbit logs order-1002
++     0ms   #1  WorkflowCreated
++     0ms   #2  WorkflowStarted
++     1ms   #3  StepScheduled             step=validate_order attempt=1
++     1ms   #4  StepScheduled             step=analyze_risk attempt=1
++    11ms   #5  StepDispatched            step=validate_order attempt=1 worker_id=ts-1
++    14ms   #6  StepSucceeded             step=validate_order attempt=1
++    15ms   #7  StepScheduled             step=reserve_inventory attempt=1
++    17ms   #8  StaleResultIgnored        step=validate_order outcome=duplicate
++    21ms   #9  StepDispatched            step=analyze_risk attempt=1 worker_id=py-1
++    23ms  #10  StepAttemptFailed         step=analyze_risk attempt=1 error=RISK_UNAVAILABLE scoring service returned 503
++    24ms  #11  RetryScheduled            step=analyze_risk delay_ms=1000
++    33ms  #12  StepDispatched            step=reserve_inventory attempt=1 worker_id=ts-1
++    35ms  #13  StepSucceeded             step=reserve_inventory attempt=1
++    1.0s  #14  StepScheduled             step=analyze_risk attempt=2
++    1.3s  #15  StepDispatched            step=analyze_risk attempt=2 worker_id=py-1
++    1.3s  #16  StepSucceeded             step=analyze_risk attempt=2
++    1.3s  #17  StepScheduled             step=process_payment attempt=1
++    1.6s  #18  StepDispatched            step=process_payment attempt=1 worker_id=py-1
++    1.6s  #19  StepAttemptFailed         step=process_payment attempt=1 error=CARD_DECLINED card was declined
++    1.6s  #20  StepFailed                step=process_payment error=CARD_DECLINED card was declined
++    1.6s  #21  StepCancelled             step=send_notification
++    1.6s  #22  CompensationStarted       reason=step `process_payment` failed: card was declined
++    1.6s  #23  StepScheduled             step=compensate:reserve_inventory attempt=1
++    1.6s  #24  StepDispatched            step=compensate:reserve_inventory attempt=1 worker_id=ts-1
++    1.6s  #25  StepSucceeded             step=compensate:reserve_inventory attempt=1
++    1.6s  #26  CompensationCompleted
++    1.6s  #27  WorkflowFailed            error=CARD_DECLINED step `process_payment` failed: card was declined
+```
+
+Some of the same events as raw JSON (`orbit logs order-1002 --json`):
+
+```json
+{"seq":11,"timestamp_ms":1794735367726,"type":"RetryScheduled","step":"analyze_risk","next_attempt":2,"delay_ms":1000,"fire_at_ms":1794735368726}
+{"seq":17,"timestamp_ms":1794735368974,"type":"StepScheduled","step":"process_payment","attempt":1,"input":{"order_id":"1002","amount":99.5,"currency":"USD"},"idempotency_key":"charge-1002","redelivery":false}
+{"seq":18,"timestamp_ms":1794735369286,"type":"StepDispatched","step":"process_payment","attempt":1,"token":"3d932a10-600d-4989-acc7-5234a3183b06","worker_id":"py-1","worker_session":"30e57815-e28e-4a2b-9c35-df96774668ae","deadline_ms":1794735399286}
+{"seq":19,"timestamp_ms":1794735369289,"type":"StepAttemptFailed","step":"process_payment","attempt":1,"error":{"code":"CARD_DECLINED","message":"card was declined","retryable":false,"details":{"decline_code":"insufficient_funds"}}}
+{"seq":22,"timestamp_ms":1794735369290,"type":"CompensationStarted","reason":"step `process_payment` failed: card was declined","steps":["reserve_inventory"]}
+{"seq":27,"timestamp_ms":1794735369299,"type":"WorkflowFailed","error":{"code":"CARD_DECLINED","message":"step `process_payment` failed: card was declined","retryable":false,"details":{"decline_code":"insufficient_funds"}},"compensation":"completed"}
+```
+
+A durable timer and a workflow timeout (`timeout 3s`, a `sleep 200ms` step, and no worker for the next step):
+
+```console
+$ orbit logs timeout-1
++     0ms   #1  WorkflowCreated
++     0ms   #2  WorkflowStarted
++     1ms   #3  TimerStarted              step=pause
++   284ms   #4  TimerFired                step=pause
++   284ms   #5  StepScheduled             step=work attempt=1
++    3.1s   #6  WorkflowTimeoutReached
++    3.1s   #7  StepCancelled             step=work
++    3.1s   #8  WorkflowTimedOut
+```
+
+A redelivery after a worker went silent is shown in [Delivery guarantees](guarantees.md#uncertain-attempts-and-redelivery).
+
+## Inspecting executions
+
+| Command | Shows |
+|---|---|
+| `orbit ps [--status S] [--workflow W] [--limit N]` | Recent executions, newest first, with status and age. |
+| `orbit status <id>` | The status, elapsed time, compensation outcome, error, a table of units (status, attempt, duration, error or worker) and the output. |
+| `orbit logs <id>` | The history as a timeline. `--json` prints the raw events, one per line, redacted. |
+| `orbit inspect <id>` | The full execution state as JSON, redacted. The same document as `GET /v1/executions/{id}`. |
+| `orbit workers list` | Registered workers, whether they are online, and how many tasks they hold. |
+
+```console
+$ orbit status order-1001
+COMPLETED order-1001  OrderProcessing@1.0.0
+  elapsed: 1.6s
+
+  STEP                         STATUS       ATTEMPT     TIME  DETAIL
+  validate_order               SUCCEEDED          1      3ms  worker ts-1
+  reserve_inventory            SUCCEEDED          1      3ms  worker ts-1
+  analyze_risk                 SUCCEEDED          2      3ms  worker py-1
+  process_payment              SUCCEEDED          1      3ms  worker py-1
+  send_notification            SUCCEEDED          1      2ms  worker ts-1
+
+  output: {"status":"completed","transaction_id":"tx-9","risk_score":0.12}
+```
+
+Units are listed in the order they last changed. `TIME` is the time from dispatch (or scheduling) to finish. Units that have not been scheduled yet are not listed. `orbit run` without `--no-wait` prints each unit transition as it happens and exits `0` only when the execution ends `COMPLETED`.
+
+For automation, use the [HTTP API](../reference/http-api.md): `GET /v1/executions/{id}` for state, `/history` for events, and `/wait?timeout_ms=` to block until the execution is terminal.
+
+## Cancellation
+
+`orbit cancel <id> [--reason R]` or `POST /v1/executions/{id}/cancel` requests cancellation. The runtime records `CancelRequested` and aborts the execution:
+
+1. Units that have not started are withdrawn (`StepCancelled`): pending units, queued units, running `sleep` timers and retries waiting for their backoff. A redelivery that is queued is not withdrawn, because its first delivery may have run.
+2. Attempts in flight are awaited, because they may still succeed and then need compensating. Their workers see the tokens in the `cancel` list of their next heartbeat (`ctx.cancelled` or `ctx.signal` in the SDKs). Stopping is cooperative: the runtime cannot stop an external operation that is already running.
+3. A child workflow whose parent is aborting is cancelled too, with the reason `parent workflow aborted`.
+4. Every succeeded unit with a `compensate` block is compensated, one at a time, newest first. Compensations run even though the execution is aborting, with their own retry policy.
+5. The execution ends `CANCELLED` with `compensation: none`, `completed` or `failed`.
+
+Cancellation is idempotent while the execution runs: a second request, or a request during an abort caused by a failure or timeout, records nothing and returns the current state. The original abort reason wins: a failed execution that you cancel during compensation still ends `FAILED`. Cancelling a terminal execution returns `409 EXECUTION_FINISHED`.
+
+```console
+$ orbit cancel order-2001 --reason "customer changed their mind"
+cancellation requested; execution is CANCELLED
+```
+
+## Timeouts
+
+Three timeouts apply, at different levels:
+
+| Timeout | Declared on | Measures | On expiry |
+|---|---|---|---|
+| `timeout` | a step | One attempt, from dispatch to result. | The attempt fails with `TIMEOUT` (retryable); the step is retried if attempts remain. The worker sees the token in its heartbeat `cancel` list. A late success for that attempt is still accepted while the step is unresolved. |
+| `queue_timeout` | a step | How long a scheduled task waits for a worker. Does not apply to redeliveries. | The attempt fails with `QUEUE_TIMEOUT` (not retried). |
+| `timeout` | the workflow | The whole execution, from `WorkflowCreated`. | `WorkflowTimeoutReached`, then the abort described under cancellation, ending `TIMED_OUT`. |
+
+The workflow timeout is checked only while the execution is `RUNNING` and not already aborting, so compensation is not cut short by the workflow timeout. A `workflow "Name"` step's `timeout` bounds the child execution; when it expires, the child is cancelled.
+
+## See also
+
+- [Delivery guarantees](guarantees.md)
+- [Compensation](../language/compensation.md)
+- [Retries and timeouts](../language/retries-timeouts.md)
+- [HTTP API](../reference/http-api.md)
+- [CLI](../reference/cli.md)
