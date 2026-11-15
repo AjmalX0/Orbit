@@ -159,8 +159,10 @@ jobs:
           generate_release_notes: true
       - name: Tag the Go module (sdks/go/vX.Y.Z)
         run: |
-          git tag "sdks/go/${GITHUB_REF_NAME}"
-          git push origin "sdks/go/${GITHUB_REF_NAME}"
+          tag="sdks/go/${GITHUB_REF_NAME}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then echo "$tag already exists"; exit 0; fi
+          git tag "$tag"
+          git push origin "$tag"
 
   publish-crates:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -180,14 +182,18 @@ jobs:
     environment: pypi
     permissions:
       id-token: write # PyPI trusted publishing
+    env: { PYPI_API_TOKEN: "${{ secrets.PYPI_API_TOKEN }}", PYPI_TRUSTED: "${{ vars.PYPI_TRUSTED_PUBLISHING }}" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: python -m pip install --quiet build && python -m build sdks/python
-      # Uses PyPI trusted publishing; set PYPI_API_TOKEN to use a token instead.
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # Publishes with secret PYPI_API_TOKEN, or with trusted publishing when the
+      # repository variable PYPI_TRUSTED_PUBLISHING is "true". Otherwise skipped.
+      - if: env.PYPI_API_TOKEN != '' || env.PYPI_TRUSTED == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          skip-existing: true
           packages-dir: sdks/python/dist
           password: ${{ secrets.PYPI_API_TOKEN }}
 
@@ -217,7 +223,7 @@ jobs:
       - if: env.NUGET_API_KEY != ''
         run: |
           cd sdks/csharp && dotnet pack OrbitLang.Sdk -c Release -o out
-          dotnet nuget push "out/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+          dotnet nuget push "out/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   publish-maven:
     if: startsWith(github.ref, 'refs/tags/v')
