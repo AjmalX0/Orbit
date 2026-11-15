@@ -62,9 +62,11 @@ Every option can also be set through the environment variable listed, except whe
 | `--max-body` | | bytes | `4194304` (4 MiB) | Maximum request body size. Larger requests get `413`. |
 | `--log-format` | | `text` or `json` | `text` | Log format. Logs go to stderr. |
 | `--insecure` | | flag | off | Allow a non-loopback `--addr` without a token. Use only on a trusted network. |
-| `--cluster` | `ORBIT_CLUSTER` | flag | off | Run as one of several servers on the same PostgreSQL database: one leader serves, the others stand by. Requires a PostgreSQL `--db`. See [Running several servers](cluster.md). |
-| `--node-id` | `ORBIT_NODE_ID` | string | host name | This server's name in the cluster. Requires `--cluster`. |
-| `--advertise-addr` | `ORBIT_ADVERTISE_ADDR` | URL | from `--addr` | URL standbys hand out for this server while it leads, for example `http://orbit-0.orbit:7233`. Without it, a wildcard `--addr` advertises nothing. Requires `--cluster`. |
+| `--cluster` | `ORBIT_CLUSTER` | flag | off | Run as one of several servers on the same PostgreSQL database. Requires a PostgreSQL `--db`. See [Running several servers](cluster.md). |
+| `--cluster-mode` | `ORBIT_CLUSTER_MODE` | `standby` or `shared` | `standby` | With `standby`, one leader serves and the others stand by. With `shared`, every server is active and they share executions and worker tasks. `shared` requires `--cluster`. See [Shared mode](cluster.md#shared-mode-several-active-servers). |
+| `--node-timeout` | `ORBIT_NODE_TIMEOUT` | seconds | `5` | Shared mode: a server whose heartbeat is older than this is dead, and the others take over its executions. Values below `2` are raised to `2`. |
+| `--node-id` | `ORBIT_NODE_ID` | string | host name | This server's name in the cluster. Must be unique among running servers. Requires `--cluster`. |
+| `--advertise-addr` | `ORBIT_ADVERTISE_ADDR` | URL | from `--addr` | URL standbys hand out for this server while it leads, and that shared mode lists in `/v1/health`, for example `http://orbit-0.orbit:7233`. Without it, a wildcard `--addr` advertises nothing. Requires `--cluster`. |
 
 The server also reads `ORBIT_LOG` (log filter), `ORBIT_DB_CA_CERT` (CA for PostgreSQL TLS), `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_SERVICE_NAME`. See [Environment variables](../reference/environment.md).
 
@@ -81,6 +83,8 @@ The server checks its configuration before it opens the database and exits with 
 | `--tls-client-ca` without `client_cert` entries | `` --tls-client-ca needs --workers-file entries with `client_cert` to map certificates to workers `` |
 | An invalid workers file | for example `` workers.toml: worker `a` needs `token_sha256` or `client_cert` `` |
 | `--cluster` with a SQLite `--db` | `--cluster requires a PostgreSQL database (--db postgres://...): the servers share it for leader election and history` |
+| `--cluster-mode shared` without `--cluster` | `--cluster-mode shared requires --cluster` |
+| Shared mode while another running server uses the same `--node-id` (after waiting three `--node-timeout`s for it to stop) | `` cannot join the shared cluster: STORAGE_ERROR: another server with node id `orbit-0` is running (it heartbeated 637 ms ago); give every server its own --node-id `` |
 
 An empty token (`ORBIT_TOKEN=`) counts as no token.
 
@@ -329,7 +333,7 @@ INFO orbit_runtime::engine: recovered active executions from history executions=
 
 Attempts that were in flight before the restart get one session timeout for their workers to reconnect and report a result. After that, attempts nobody reported are redelivered. See [Delivery guarantees](guarantees.md#crash-recovery).
 
-Because recovery runs before the listener is bound, connection attempts fail until the server is ready. A runtime with many active executions takes longer to start. In cluster mode the order differs: a server binds its listener at once as a standby and recovers only when it is elected; see [Running several servers](cluster.md).
+Because recovery runs before the listener is bound, connection attempts fail until the server is ready. A runtime with many active executions takes longer to start. In cluster mode the order differs: a server binds its listener at once as a standby and recovers only when it is elected; in shared mode a server binds at once and resumes the executions it owned before it restarted, then reports ready. See [Running several servers](cluster.md).
 
 ## Health and readiness
 
@@ -339,9 +343,9 @@ Because recovery runs before the listener is bound, connection attempts fail unt
 {"status":"ok","api_version":"orbit-api/1","runtime_version":"0.2.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":0,"role":"single","node_id":null,"term":null,"leader":null}
 ```
 
-Use it for liveness probes, and for readiness of a single server: a single server answers only after recovery. The response also carries `role` (`single`, or `leader` and `standby` in cluster mode), `node_id`, `term` and `leader`.
+Use it for liveness probes, and for readiness of a single server: a single server answers only after recovery. The response also carries `role` (`single`, `leader` and `standby` in cluster mode, `shared` in shared mode), `node_id`, `term` and `leader`; in shared mode also `owned_executions`, `tasks_claimed` and `nodes`.
 
-`GET /v1/ready` never requires authentication either. It returns `200` on a single server and on a cluster leader, and `503` on a standby. Use it as the readiness or load-balancer health check when you run several servers, so traffic reaches only the leader. See [Running several servers](cluster.md#load-balancer-configuration).
+`GET /v1/ready` never requires authentication either. It returns `200` on a single server, on a cluster leader and on every live server in shared mode, and `503` on a standby. Use it as the readiness or load-balancer health check when you run several servers, so traffic reaches only servers that accept writes. See [Running several servers](cluster.md#load-balancer-configuration).
 
 If you use mutual TLS, a probe that presents a client certificate matching no worker gets `403`; send probes without a client certificate.
 
@@ -372,7 +376,7 @@ Version 0.1.0 handles only `SIGINT`; `SIGTERM` ends a 0.1.0 server immediately, 
 
 ## Single node and cluster mode
 
-Without `--cluster`, one server owns a database. Do not run two such servers against the same SQLite file or PostgreSQL database: each would keep its own in-memory view of active executions and dispatch the same work. For availability, either run one server under a supervisor that restarts it (systemd, Kubernetes with one replica) and rely on recovery, or run several servers with `--cluster` on PostgreSQL: one is elected leader, the others take over if it fails. See [Running several servers](cluster.md) and [Storage](storage.md#single-node).
+Without `--cluster`, one server owns a database. Do not run two such servers against the same SQLite file or PostgreSQL database: each would keep its own in-memory view of active executions and dispatch the same work. For availability, either run one server under a supervisor that restarts it (systemd, Kubernetes with one replica) and rely on recovery, or run several servers with `--cluster` on PostgreSQL: one is elected leader, the others take over if it fails. To spread the work over several servers, add `--cluster-mode shared`: every server is active, and the others take over the executions of a server that fails. See [Running several servers](cluster.md) and [Storage](storage.md#single-node).
 
 ## See also
 

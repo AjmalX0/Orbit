@@ -27,6 +27,8 @@ Read by `orbit server`.
 | `ORBIT_MAX_HISTORY_EVENTS` | `--max-history-events` | unlimited | Maximum history events per execution; past it the execution fails with `LIMIT_EXCEEDED`. |
 | `ORBIT_MAX_PAYLOAD_BYTES` | `--max-payload-bytes` | unlimited | Maximum size in bytes of an execution input, task result or signal payload; larger ones get `413 PAYLOAD_TOO_LARGE`. |
 | `ORBIT_CLUSTER` | `--cluster` | unset | `true` to run as one of several servers on one PostgreSQL database. |
+| `ORBIT_CLUSTER_MODE` | `--cluster-mode` | `standby` | `shared` to make every server of the cluster active. |
+| `ORBIT_NODE_TIMEOUT` | `--node-timeout` | `5` | Shared mode: seconds without a heartbeat after which a server is considered dead. |
 | `ORBIT_NODE_ID` | `--node-id` | host name | This server's name in the cluster. |
 | `ORBIT_ADVERTISE_ADDR` | `--advertise-addr` | derived from `--addr` | URL handed out for this server while it leads. |
 

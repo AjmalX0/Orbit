@@ -470,9 +470,30 @@ orbit server [OPTIONS]
 | `--session-timeout <SESSION_TIMEOUT>` | integer, seconds | `30` | | Seconds without contact after which a worker is considered lost. |
 | `--max-body <MAX_BODY>` | integer, bytes | `4194304` | | Maximum request body size. |
 | `--log-format <LOG_FORMAT>` | `text` or `json` | `text` | | Log format. Logs go to stderr. |
-| `--cluster` | flag | off | `ORBIT_CLUSTER` | Run as one of several servers on the same PostgreSQL database; one leader serves, the others stand by and take over if it fails. Requires a PostgreSQL `--db`. See [Running several servers](../runtime/cluster.md). |
-| `--node-id <NODE_ID>` | string | the host name | `ORBIT_NODE_ID` | This server's name in the cluster. Requires `--cluster`. |
-| `--advertise-addr <ADVERTISE_ADDR>` | URL | derived from `--addr` unless it is a wildcard address | `ORBIT_ADVERTISE_ADDR` | URL other servers give out to reach this one while it leads. Requires `--cluster`. |
+| `--cluster` | flag | off | `ORBIT_CLUSTER` | Run as one of several servers on the same PostgreSQL database. By default one leader serves and the others stand by and take over if it fails. Requires a PostgreSQL `--db`. See [Running several servers](../runtime/cluster.md). |
+| `--cluster-mode <CLUSTER_MODE>` | `standby` or `shared` | `standby` | `ORBIT_CLUSTER_MODE` | With `shared`, every server is active and they share executions and worker tasks. `shared` requires `--cluster`. See [Shared mode](../runtime/cluster.md#shared-mode-several-active-servers). |
+| `--node-timeout <NODE_TIMEOUT>` | integer, seconds | `5` | `ORBIT_NODE_TIMEOUT` | Shared mode: seconds without a heartbeat after which a server is considered dead and the others take over its executions (minimum 2). |
+| `--node-id <NODE_ID>` | string | the host name | `ORBIT_NODE_ID` | This server's name in the cluster. Must be unique among running servers. Requires `--cluster`. |
+| `--advertise-addr <ADVERTISE_ADDR>` | URL | derived from `--addr` unless it is a wildcard address | `ORBIT_ADVERTISE_ADDR` | URL other servers give out to reach this one while it leads, and that shared mode lists in `/v1/health`. Requires `--cluster`. |
+
+The cluster options as `orbit server --help` prints them:
+
+```console
+$ orbit server --help
+...
+      --cluster
+          Run as one of several servers on the same PostgreSQL database. By default one leader serves and the others stand by and take over if it fails; see --cluster-mode [env: ORBIT_CLUSTER=]
+      --cluster-mode <CLUSTER_MODE>
+          With --cluster: `standby` (one leader serves, the others stand by) or `shared` (every server is active and they share executions and tasks) [env: ORBIT_CLUSTER_MODE=] [default: standby] [possible values: standby, shared]
+      --node-timeout <NODE_TIMEOUT>
+          Shared mode: seconds without a heartbeat after which a server is considered dead and the others take over its executions (minimum 2) [env: ORBIT_NODE_TIMEOUT=] [default: 5]
+      --node-id <NODE_ID>
+          This server's name in the cluster (default: the host name) [env: ORBIT_NODE_ID=]
+      --advertise-addr <ADVERTISE_ADDR>
+          URL other servers give out to reach this one while it leads, and that shared mode lists in /v1/health, e.g. http://orbit-0.orbit:7233 (default: derived from --addr when it is not a wildcard address) [env: ORBIT_ADVERTISE_ADDR=]
+  -h, --help
+          Print help
+```
 
 The server reads `ORBIT_LOG` (log filter) and `ORBIT_DB_CA_CERT` (extra CA for PostgreSQL) from the environment. See [Environment variables](environment.md). The four `--max-*` limits are described in [Running the server: resource limits](../runtime/server.md#resource-limits).
 
@@ -493,6 +514,8 @@ $ orbit server --token t --tls-cert server.pem --tls-key server.key --tls-client
 error: --tls-client-ca needs --workers-file entries with `client_cert` to map certificates to workers
 $ orbit server --cluster --db orbit.db
 error: --cluster requires a PostgreSQL database (--db postgres://...): the servers share it for leader election and history
+$ orbit server --cluster-mode shared --db postgres://orbit@db/orbit
+error: --cluster-mode shared requires --cluster
 ```
 
 ## orbit deploy

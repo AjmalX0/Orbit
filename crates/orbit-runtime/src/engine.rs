@@ -208,6 +208,9 @@ pub struct Engine {
     pub metrics: Metrics,
     pub changed: Arc<tokio::sync::Notify>,
     telemetry: Option<crate::telemetry::Exporter>,
+    /// Shared mode (`--cluster-mode shared`): ownership, task queue and inbox
+    /// shared with the other servers. `None` everywhere else.
+    pub(crate) shared: Option<Arc<crate::shared::Ctx>>,
 }
 
 fn semver_key(v: &str) -> (Vec<u64>, String) {
@@ -238,6 +241,7 @@ impl Engine {
             metrics: Metrics::default(),
             changed: Arc::new(tokio::sync::Notify::new()),
             telemetry: None,
+            shared: None,
         };
         for ir in engine.store.definitions().map_err(EngineError::storage)? {
             engine.cache_definition(ir);
@@ -380,6 +384,10 @@ impl Engine {
         input: Value,
         execution_id: Option<String>,
     ) -> Result<StartResult> {
+        if self.shared.is_some() && self.definition(workflow, version).is_none() {
+            // Registered on another server since this one loaded definitions.
+            self.refresh_definitions()?;
+        }
         let def = self.definition(workflow, version).ok_or_else(|| {
             EngineError::new(
                 404,
@@ -493,6 +501,10 @@ impl Engine {
                 format!("execution is already {}", state.status.as_str()),
             ));
         }
+        if self.forwards(id) {
+            self.forward_command(id, "cancel", json!({ "reason": reason }))?;
+            return Ok(state);
+        }
         if state.abort.is_none() {
             self.commit(
                 id,
@@ -548,6 +560,10 @@ impl Engine {
                 "SIGNAL_PAYLOAD_INVALID",
                 format!("payload for signal `{name}` is invalid at {e}"),
             ));
+        }
+        if self.forwards(id) {
+            self.forward_command(id, "signal", json!({ "name": name, "payload": payload }))?;
+            return Ok(0);
         }
         let seq = state.last_seq + 1;
         self.commit(
@@ -682,9 +698,14 @@ impl Engine {
             apply(&mut state, &h);
             history.push(h);
         }
-        self.store
-            .append(&state, &history)
-            .map_err(EngineError::storage)?;
+        match &self.shared {
+            Some(ctx) => {
+                let def = self.by_hash.get(&state.definition_hash).cloned();
+                ctx.append(&mut self.store, &state, &history, def.as_deref())
+            }
+            None => self.store.append(&state, &history),
+        }
+        .map_err(EngineError::storage)?;
         // Export spans only once the events are durable.
         if let Some(t) = &self.telemetry {
             let ctx = self.trace_context(&state);
@@ -817,9 +838,21 @@ impl Engine {
                 } else if let Some(inst) = session.strip_prefix(BUILTIN_SESSION_PREFIX) {
                     inst == self.instance
                 } else {
-                    self.sessions
+                    let session_alive = self
+                        .sessions
                         .get(&session)
                         .is_some_and(|s| now < s.last_seen_ms + timeout)
+                        || self
+                            .shared
+                            .as_ref()
+                            .is_some_and(|c| c.session_alive(&session, timeout));
+                    // Shared mode: the server that handed the task out died
+                    // and its result has not arrived.
+                    session_alive
+                        && !self
+                            .shared
+                            .as_ref()
+                            .is_some_and(|c| c.claim_lost(u.token.as_deref()))
                 };
                 let since = u.dispatched_at_ms.unwrap_or(0).max(self.started_at_ms);
                 if !alive && now >= since + timeout {
@@ -918,6 +951,9 @@ impl Engine {
                 inflight: HashSet::new(),
             },
         );
+        if let Some(ctx) = &self.shared {
+            ctx.save_session(&session_id, &req.worker_id, &req.runtime, &req.contracts)?;
+        }
         self.store
             .upsert_worker(&WorkerRecord {
                 worker_id: req.worker_id.clone(),
@@ -939,6 +975,12 @@ impl Engine {
     }
 
     fn touch(&mut self, session_id: &str) -> Result<()> {
+        if self.shared.is_some() && !self.sessions.contains_key(session_id) {
+            self.load_shared_session(session_id)?;
+        }
+        if let Some(ctx) = &self.shared {
+            ctx.touched(session_id);
+        }
         let now = self.now();
         let s = self.sessions.get_mut(session_id).ok_or_else(|| {
             EngineError::new(
@@ -976,6 +1018,9 @@ impl Engine {
                     .remove(&token);
             }
         }
+        if let Some(ctx) = &self.shared {
+            cancel.extend(ctx.cancelled_for(session_id)?);
+        }
         Ok(HeartbeatAck {
             accepted: true,
             cancel,
@@ -983,6 +1028,12 @@ impl Engine {
     }
 
     pub fn unregister_worker(&mut self, session_id: &str) -> Result<()> {
+        if self.shared.is_some() {
+            if !self.sessions.contains_key(session_id) {
+                self.load_shared_session(session_id)?;
+            }
+            self.release_shared_session(session_id)?;
+        }
         let s = self
             .sessions
             .remove(session_id)
@@ -1018,6 +1069,9 @@ impl Engine {
     pub fn workers(&self) -> Result<Vec<WorkerInfo>> {
         let now = self.now();
         let records = self.store.workers().map_err(EngineError::storage)?;
+        if let Some(ctx) = &self.shared {
+            return ctx.workers(records, self.config.session_timeout_ms);
+        }
         Ok(records
             .into_iter()
             .map(|record| {
@@ -1042,6 +1096,9 @@ impl Engine {
     /// Hand the oldest matching queued task to a worker, if any.
     pub fn poll(&mut self, session_id: &str) -> Result<Option<TaskAssignment>> {
         self.touch(session_id)?;
+        if self.shared.is_some() {
+            return self.shared_poll(session_id);
+        }
         let session = self.sessions[session_id].clone();
         let mut best: Option<(u64, String, String)> = None;
         for (id, state) in &self.active {
@@ -1331,6 +1388,14 @@ impl Engine {
 
     /// Record a successful task result.
     pub fn complete(&mut self, token: &str, mut output: Value) -> Result<ResultAck> {
+        if self.forwards_result(token) {
+            self.check_payload("task result", &output)?;
+            return self.forward_result(
+                token,
+                "complete",
+                json!({ "token": token, "output": output }),
+            );
+        }
         let (id, key, unit, def) = match self.resolve_token(token)? {
             Ok(x) => x,
             Err(ack) => return Ok(ack),
@@ -1384,6 +1449,9 @@ impl Engine {
 
     /// Record a failed attempt.
     pub fn fail(&mut self, token: &str, error: TaskError) -> Result<ResultAck> {
+        if self.forwards_result(token) {
+            return self.forward_result(token, "fail", json!({ "token": token, "error": error }));
+        }
         let (id, key, unit, _) = match self.resolve_token(token)? {
             Ok(x) => x,
             Err(ack) => return Ok(ack),
@@ -1429,6 +1497,9 @@ impl Engine {
                 reason: Some("unknown token (execution finished or token invalid)".into()),
             }));
         };
+        if let Some(ctx) = &self.shared {
+            ctx.stage_done(&id, token);
+        }
         let state = &self.active[&id];
         let unit = state.units.get(&key).cloned().unwrap_or_default();
         let def = self.by_hash[&state.definition_hash].clone();
@@ -1566,5 +1637,403 @@ fn enforce_limits(limits: &Limits, state: &ExecutionState, events: &mut Vec<Even
                 ),
             });
         }
+    }
+}
+
+// ------------------------------------------------------------ shared mode
+//
+// Engine operations used by `crate::shared` (`--cluster-mode shared`). In
+// that mode this engine holds only the executions this server owns; the
+// methods below load and drop them, record dispatches made by other servers,
+// and route commands for executions owned elsewhere to their owner's inbox.
+
+impl Engine {
+    /// The shared-mode context, when this engine runs in shared mode.
+    pub fn shared_context(&self) -> Option<Arc<crate::shared::Ctx>> {
+        self.shared.clone()
+    }
+
+    /// True when this engine holds (owns) the execution.
+    pub(crate) fn owns(&self, id: &str) -> bool {
+        self.active.contains_key(id)
+    }
+
+    /// A command for `id` must be sent to the server that owns it.
+    fn forwards(&self, id: &str) -> bool {
+        self.shared.as_ref().is_some_and(|c| !c.applying_inbox()) && !self.active.contains_key(id)
+    }
+
+    /// A result for `token` must be sent to the owner of its execution (the
+    /// token was issued by another server, or its dispatch is not recorded yet).
+    fn forwards_result(&self, token: &str) -> bool {
+        self.shared.as_ref().is_some_and(|c| !c.applying_inbox())
+            && !self.tokens.contains_key(token)
+    }
+
+    fn forward_command(&mut self, id: &str, kind: &str, payload: Value) -> Result<()> {
+        let ctx = self.shared.clone().expect("shared mode");
+        match ctx.forward(id, kind, payload, None)? {
+            Some(seq) => {
+                crate::shared::note_forwarded(seq);
+                Ok(())
+            }
+            None => Err(EngineError::new(
+                409,
+                "EXECUTION_FINISHED",
+                "execution has already finished",
+            )),
+        }
+    }
+
+    fn forward_result(&mut self, token: &str, kind: &str, payload: Value) -> Result<ResultAck> {
+        let unknown = ResultAck {
+            accepted: false,
+            reason: Some("unknown token (execution finished or token invalid)".into()),
+        };
+        let Some(exec) = crate::shared::token_execution(token) else {
+            return Ok(unknown);
+        };
+        let ctx = self.shared.clone().expect("shared mode");
+        Ok(match ctx.forward(exec, kind, payload, Some(token))? {
+            Some(_) => ResultAck {
+                accepted: true,
+                reason: None,
+            },
+            None => unknown,
+        })
+    }
+
+    /// Claim a task from the shared queue for a worker session.
+    fn shared_poll(&mut self, session_id: &str) -> Result<Option<TaskAssignment>> {
+        let ctx = self.shared.clone().expect("shared mode");
+        if !ctx.should_claim(session_id) {
+            return Ok(None);
+        }
+        let s = self.sessions[session_id].clone();
+        for _ in 0..16 {
+            let now = self.now();
+            match ctx.claim(session_id, &s.worker_id, &s.runtime, &s.contracts, now)? {
+                crate::shared::Claimed::Nothing => return Ok(None),
+                crate::shared::Claimed::Stale => continue,
+                crate::shared::Claimed::Remote(a) => return Ok(Some(a)),
+                crate::shared::Claimed::Local {
+                    row_id,
+                    offer,
+                    assignment: a,
+                } => {
+                    match self.apply_dispatch(
+                        &a.execution_id,
+                        &a.step_id,
+                        a.attempt,
+                        offer,
+                        &a.token,
+                        &s.worker_id,
+                        session_id,
+                        a.deadline_ms,
+                    ) {
+                        Ok(true) => return Ok(Some(a)),
+                        Ok(false) => {
+                            ctx.retire(row_id, &a.token)?;
+                            continue;
+                        }
+                        Err(e) => {
+                            let _ = ctx.release(row_id, &a.token);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Shared-mode poll, first half: touch the session and return what a
+    /// claim needs, or `None` when the queue has not changed since this
+    /// session last found it empty.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prepare_claim(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<(String, String, HashSet<(String, String)>)>> {
+        self.touch(session_id)?;
+        let ctx = self.shared.clone().expect("shared mode");
+        if !ctx.should_claim(session_id) {
+            return Ok(None);
+        }
+        let s = &self.sessions[session_id];
+        Ok(Some((
+            s.worker_id.clone(),
+            s.runtime.clone(),
+            s.contracts.clone(),
+        )))
+    }
+
+    /// Record a dispatch made from the shared queue, if the unit is still
+    /// waiting for exactly that offer. Returns false for a stale claim.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_dispatch(
+        &mut self,
+        id: &str,
+        key: &str,
+        attempt: u32,
+        offer: u32,
+        token: &str,
+        worker_id: &str,
+        session: &str,
+        deadline_ms: Option<u64>,
+    ) -> Result<bool> {
+        let current = self
+            .active
+            .get(id)
+            .and_then(|s| s.units.get(key))
+            .is_some_and(|u| {
+                u.status() == UnitStatus::Scheduled
+                    && u.attempt == attempt
+                    && u.dispatch_count == offer
+            });
+        if !current {
+            return Ok(false);
+        }
+        self.commit(
+            id,
+            vec![Event::StepDispatched {
+                step: key.to_string(),
+                attempt,
+                token: token.to_string(),
+                worker_id: worker_id.to_string(),
+                worker_session: session.to_string(),
+                deadline_ms,
+            }],
+        )?;
+        Ok(true)
+    }
+
+    /// The attempt holding `token` lost its worker (it unregistered on
+    /// another server): its outcome is uncertain and it is redelivered.
+    pub(crate) fn mark_uncertain(&mut self, token: &str, reason: &str) -> Result<bool> {
+        let Some((id, key)) = self.tokens.get(token).cloned() else {
+            return Ok(false);
+        };
+        let Some(u) = self.active.get(&id).and_then(|s| s.units.get(&key)) else {
+            return Ok(false);
+        };
+        if u.status() != UnitStatus::Dispatched || u.token.as_deref() != Some(token) {
+            return Ok(false);
+        }
+        let attempt = u.attempt;
+        tracing::warn!(execution_id = %id, step = %key, attempt, reason = %reason, "attempt outcome uncertain; redelivering");
+        self.commit(
+            &id,
+            vec![Event::StepAttemptUncertain {
+                step: key,
+                attempt,
+                reason: reason.to_string(),
+            }],
+        )?;
+        self.advance(&id)?;
+        Ok(true)
+    }
+
+    /// Load a worker session registered on another server.
+    fn load_shared_session(&mut self, session_id: &str) -> Result<()> {
+        let ctx = self.shared.clone().expect("shared mode");
+        if let Some((worker_id, runtime, contracts)) =
+            ctx.load_session(session_id, self.config.session_timeout_ms)?
+        {
+            let now = self.now();
+            self.sessions.insert(
+                session_id.to_string(),
+                Session {
+                    worker_id,
+                    runtime,
+                    contracts: contracts.into_iter().collect(),
+                    last_seen_ms: now,
+                    inflight: HashSet::new(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Unregistration in shared mode: delete the session everywhere and
+    /// redeliver what it held, wherever those executions are owned.
+    fn release_shared_session(&mut self, session_id: &str) -> Result<()> {
+        let ctx = self.shared.clone().expect("shared mode");
+        for (exec, token) in ctx.drop_session(session_id)? {
+            if self.tokens.contains_key(&token) {
+                self.mark_uncertain(&token, "worker unregistered")?;
+            } else {
+                ctx.forward(
+                    &exec,
+                    "uncertain",
+                    json!({ "token": token, "reason": "worker unregistered" }),
+                    None,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Engine::session_worker`] that also finds sessions opened on other
+    /// servers (shared mode).
+    pub fn session_worker_lookup(&mut self, session_id: &str) -> Option<String> {
+        if self.shared.is_some() && !self.sessions.contains_key(session_id) {
+            let _ = self.load_shared_session(session_id);
+        }
+        self.session_worker(session_id).map(str::to_string)
+    }
+
+    /// [`Engine::token_worker`] that also finds tokens issued by other
+    /// servers (shared mode).
+    pub fn token_worker_lookup(&self, token: &str) -> Option<String> {
+        if let Some(w) = self.token_worker(token) {
+            return Some(w.to_string());
+        }
+        self.shared.as_ref().and_then(|c| c.token_worker(token))
+    }
+
+    /// Take ownership of executions (startup or takeover): rebuild them from
+    /// history like [`Engine::open`] does, put their queued tasks back on the
+    /// shared queue, and resume them. Attempts in flight stay in flight while
+    /// their worker sessions live; the others become uncertain and are
+    /// redelivered by the liveness check.
+    pub(crate) fn adopt(&mut self, items: &[(String, i64)], from: &str) -> Result<usize> {
+        let ctx = self.shared.clone().expect("shared mode");
+        let mut loaded = vec![];
+        let mut in_flight = 0;
+        for (id, epoch) in items {
+            let history = self.store.history(id).map_err(EngineError::storage)?;
+            if history.is_empty() {
+                continue;
+            }
+            let state = ExecutionState::replay(id, &history);
+            if state.status.is_terminal() {
+                continue;
+            }
+            if !self.by_hash.contains_key(&state.definition_hash) {
+                self.refresh_definitions()?;
+            }
+            for h in &history {
+                if let Event::StepDispatched {
+                    token, worker_id, ..
+                } = &h.event
+                {
+                    self.token_workers.insert(token.clone(), worker_id.clone());
+                }
+            }
+            for (key, u) in &state.units {
+                for (t, _) in &u.tokens {
+                    self.tokens.insert(t.clone(), (id.clone(), key.clone()));
+                }
+                if u.status() == UnitStatus::Dispatched {
+                    in_flight += 1;
+                }
+            }
+            ctx.set_epoch(id, *epoch);
+            self.active.insert(id.clone(), state);
+            loaded.push(id.clone());
+        }
+        let mut offers = vec![];
+        for id in &loaded {
+            let state = &self.active[id];
+            let Some(def) = self.by_hash.get(&state.definition_hash) else {
+                continue;
+            };
+            for (key, u) in &state.units {
+                if u.status() == UnitStatus::Scheduled {
+                    if let Some(o) = crate::shared::offer_for(state, key, def) {
+                        offers.push((id.clone(), o));
+                    }
+                }
+            }
+        }
+        ctx.republish(offers, from)?;
+        if !loaded.is_empty() {
+            tracing::info!(
+                executions = loaded.len(),
+                in_flight,
+                from = %from,
+                "shared: took ownership of executions"
+            );
+        }
+        for id in &loaded {
+            if let Err(e) = self.advance(id) {
+                tracing::error!(execution_id = %id, error = %e, "shared: resuming an adopted execution failed");
+            }
+        }
+        Ok(loaded.len())
+    }
+
+    /// Drop an execution this server no longer owns (another server took it
+    /// over): it stops ticking it and forgets its tokens.
+    pub(crate) fn evict(&mut self, id: &str) {
+        if let Some(state) = self.active.remove(id) {
+            for u in state.units.values() {
+                for (t, _) in &u.tokens {
+                    self.tokens.remove(t);
+                    self.token_workers.remove(t);
+                }
+            }
+            tracing::warn!(execution_id = %id, "shared: another server owns this execution now; dropped it");
+        }
+        if let Some(ctx) = &self.shared {
+            ctx.forget(id);
+        }
+    }
+
+    /// (session, token) of the worker attempts in flight in executions this
+    /// engine owns.
+    pub(crate) fn dispatched_attempts(&self) -> Vec<(String, String)> {
+        let mut out = vec![];
+        for state in self.active.values() {
+            for u in state.units.values() {
+                if u.status() != UnitStatus::Dispatched {
+                    continue;
+                }
+                if let (Some(s), Some(t)) = (&u.worker_session, &u.token) {
+                    if !s.starts_with(CHILD_SESSION_PREFIX)
+                        && !s.starts_with(BUILTIN_SESSION_PREFIX)
+                    {
+                        out.push((s.clone(), t.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Forget sessions that no longer exist (unregistered or expired elsewhere).
+    pub(crate) fn forget_sessions(&mut self, ids: &[String]) {
+        for id in ids {
+            self.sessions.remove(id);
+        }
+    }
+
+    /// Ids of the executions this engine owns.
+    pub(crate) fn owned_ids(&self) -> Vec<String> {
+        self.active.keys().cloned().collect()
+    }
+
+    /// Queued worker units (execution, unit, attempt, offer) of owned executions.
+    pub(crate) fn queued_units(&self) -> Vec<(String, String, i64, i64)> {
+        let mut out = vec![];
+        for (id, state) in &self.active {
+            let Some(def) = self.by_hash.get(&state.definition_hash) else {
+                continue;
+            };
+            for (key, u) in &state.units {
+                if u.status() == UnitStatus::Scheduled
+                    && crate::shared::worker_invocation(def, key).is_some()
+                {
+                    out.push((
+                        id.clone(),
+                        key.clone(),
+                        u.attempt as i64,
+                        u.dispatch_count as i64,
+                    ));
+                }
+            }
+        }
+        out
     }
 }

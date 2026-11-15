@@ -2,7 +2,7 @@
 
 With `--cluster`, you can run two or more `orbit server` processes against the same PostgreSQL database. One of them, the leader, runs the engine and serves every route. The others are standbys: they serve read-only routes from the database and take over within about a second if the leader stops. This page explains the architecture, how the leader is elected and fenced, what happens during a failover, how to put a load balancer in front of the servers, and the limits of the design.
 
-Cluster mode is for availability, not for throughput. Only one server executes workflows at a time.
+This default mode, `--cluster-mode standby`, is for availability, not for throughput: only one server executes workflows at a time. With `--cluster-mode shared`, every server is active and they share the work; see [Shared mode](#shared-mode-several-active-servers).
 
 ## Architecture
 
@@ -259,7 +259,7 @@ $ curl -s http://127.0.0.1:7302/v1/ready
 
 | Field | Meaning |
 |---|---|
-| `role` | `leader`, `standby`, or `single` without `--cluster`. |
+| `role` | `leader`, `standby`, `shared` in [shared mode](#health-fields-1), or `single` without `--cluster`. |
 | `node_id` | This server's `--node-id` (`null` without `--cluster`). |
 | `term` | The leadership term this server last saw. It increases by one at every election. |
 | `leader` | `{"node_id", "addr"}` of the current leader as recorded in `orbit_cluster`, or `null`. |
@@ -279,10 +279,316 @@ WHERE application_name LIKE 'orbit-cluster:%';
 - **Same configuration everywhere.** The leader applies its own options. Differences between servers (session timeout, workers file, HTTP adapter) change behavior at each failover.
 - **Version skew.** During a rolling upgrade, the new version may become leader before the old one is gone. Upgrade standbys first, then stop the leader; never let an older version lead a database written by a newer one.
 
+## Shared mode (several active servers)
+
+With `--cluster --cluster-mode shared`, every server is active. Each one serves every route, starts and runs executions, and hands tasks to the workers that poll it. When a server dies, the others take over its executions. Use it when one server is not enough for your load, or when you want every replica to take traffic.
+
+The sections above describe the default mode, `--cluster-mode standby`. Shared mode needs no election: there is no leader, no term and no `NOT_LEADER` answer.
+
+### Architecture
+
+```text
+              clients, CLI, workers
+                       │  one address
+                       ▼
+        load balancer (round robin) ── health check: GET /v1/ready (200 on every live server)
+          │              │              │
+          ▼              ▼              ▼
+   ┌────────────┐ ┌────────────┐ ┌────────────┐
+   │ orbit-0    │ │ orbit-1    │ │ orbit-2    │   every server: full engine for the
+   │ engine:    │ │ engine:    │ │ engine:    │   executions it owns, claims tasks for
+   │ owned exec │ │ owned exec │ │ owned exec │   the workers that poll it, reads
+   └─────┬──────┘ └─────┬──────┘ └─────┬──────┘   everything else from the database
+         │              │              │   store, queue, inbox, notifications
+         ▼              ▼              ▼
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │ PostgreSQL                                                          │
+   │  execution_events, workflow_executions …  history, as before        │
+   │  orbit_nodes      heartbeats                                        │
+   │  orbit_owners     owner and epoch per running execution             │
+   │  orbit_tasks      shared task queue                                 │
+   │  orbit_inbox      commands for an execution's owner                 │
+   │  orbit_sessions   worker sessions, usable through any server        │
+   │  LISTEN/NOTIFY    orbit_tasks, orbit_inbox, orbit_done, orbit_defs  │
+   └─────────────────────────────────────────────────────────────────────┘
+```
+
+Each server keeps seven connections to PostgreSQL: the store (history appends), four for request-path statements (claims, forwarding, sessions), one for its heartbeat, takeovers and inbox, and one that listens for notifications. Size `max_connections` for that, plus your other clients.
+
+| What | Where it lives | Who acts on it |
+|---|---|---|
+| History of an execution | `execution_events`, as on one server | Only its owner appends. Any server reads. |
+| Running executions | In the memory of their owner, rebuilt from history on takeover | The owner ticks timers, retries, deadlines and child workflows. |
+| Worker tasks | `orbit_tasks` | Any server claims them for the workers polling it. |
+| Commands for an execution owned elsewhere | `orbit_inbox` | Its owner applies them in order. |
+| Worker sessions | `orbit_sessions`, cached by every server that serves the worker | A worker can poll, heartbeat and report through any server. |
+| Workflow definitions | `workflow_definitions`, as on one server | Any server registers; the others reload on a notification. |
+
+### Start a shared cluster
+
+Point every server at the same database, with `--cluster --cluster-mode shared` and a unique node id:
+
+```bash
+orbit server --cluster --cluster-mode shared --db "$ORBIT_DB" --addr 0.0.0.0:7233 --token "$ORBIT_TOKEN" \
+  --node-id orbit-0 --advertise-addr http://orbit-0.orbit.internal:7233
+orbit server --cluster --cluster-mode shared --db "$ORBIT_DB" --addr 0.0.0.0:7233 --token "$ORBIT_TOKEN" \
+  --node-id orbit-1 --advertise-addr http://orbit-1.orbit.internal:7233
+orbit server --cluster --cluster-mode shared --db "$ORBIT_DB" --addr 0.0.0.0:7233 --token "$ORBIT_TOKEN" \
+  --node-id orbit-2 --advertise-addr http://orbit-2.orbit.internal:7233
+```
+
+| Option | Environment | Default | Meaning |
+|---|---|---|---|
+| `--cluster-mode` | `ORBIT_CLUSTER_MODE` | `standby` | `shared` makes every server active. Requires `--cluster`. |
+| `--node-timeout` | `ORBIT_NODE_TIMEOUT` | `5` | Seconds without a heartbeat after which a server is dead and the others take over its executions. At least `2`. |
+| `--node-id` | `ORBIT_NODE_ID` | the host name | Must be unique among running servers. A server that finds its id heartbeating from another process waits up to three node timeouts for it to expire (a quick restart), then refuses to start. |
+| `--advertise-addr` | `ORBIT_ADVERTISE_ADDR` | from `--addr` | Shown for this server in the `nodes` list of `/v1/health`. |
+
+Give all servers the same credentials, workers file, TLS settings, `--session-timeout` and `--node-timeout`. A server registers, resumes the executions it owned before a restart, and then reports ready:
+
+```console
+INFO orbit_runtime::shared: cluster mode: shared (every server active) node_id=node-1 advertise_addr="http://127.0.0.1:36263" node_timeout_ms=3000
+INFO orbit_runtime::server: ORBIT runtime listening addr=127.0.0.1:36263 tls=false
+INFO orbit_runtime::shared: shared: node is serving node_id=node-1 resumed=0
+```
+
+### Ownership and fencing
+
+The server that starts an execution owns it, and records that in `orbit_owners` with epoch `1` in the same transaction as `WorkflowCreated`. A child workflow is owned by its parent's owner and shares its root execution id, so a parent and its children always move together.
+
+Only the owner appends to an execution's history. Every append checks, in its own transaction:
+
+```sql
+SELECT node_id, epoch FROM orbit_owners WHERE execution_id = $1 FOR SHARE
+```
+
+and aborts unless the row still names this server at the epoch it holds. This is the same pattern as the term check of standby mode, per execution. The row lock orders an append and a takeover: a takeover waits for an append in progress, and an append that starts after a takeover sees the new epoch. A server that lost an execution, because it was paused longer than the node timeout for example, cannot write to it, and its request fails without changing anything:
+
+```text
+STORAGE_ERROR: fenced: execution `f-1` is owned by node `node-new` at epoch 2; this node held epoch 1
+```
+
+The server then drops the execution from memory. When an execution reaches a terminal status, its ownership row is deleted in the same transaction.
+
+Every server writes its heartbeat to `orbit_nodes` every second, with the database clock. A server whose heartbeat is older than `--node-timeout` is dead. Every second, each live server looks for executions owned by dead servers and takes over its share of them:
+
+```sql
+UPDATE orbit_owners SET node_id = $me, epoch = epoch + 1, since_ms = <now>
+WHERE root_id = $root AND node_id = $dead RETURNING execution_id, epoch
+```
+
+The `WHERE node_id = $dead` makes the takeover single-winner: when two servers try at once, the second waits for the first, re-reads the row, and updates nothing. The share is chosen by rendezvous hashing of each root execution id over the live servers, so the executions of a dead server are spread evenly over the survivors without coordination; a server takes them in batches of 100 execution trees. It then rebuilds the executions from history, as a restarted server does: queued tasks go back on the queue, timers continue, and attempts in flight stay in flight while their workers are alive.
+
+A server that stops gracefully (`SIGTERM`, Ctrl+C) sets its heartbeat to `0` on the way out, so the others take its executions over at once instead of after the node timeout:
+
+```console
+INFO orbit_runtime::shared: shared: left the cluster; other servers take over this server's executions
+```
+
+A server that restarts with the same `--node-id` increments the epoch of the executions it still owns, which fences the previous process, and resumes them.
+
+### Task queue
+
+When the owner schedules a worker task (`StepScheduled`, including retries, redeliveries, compensations and handler steps), it inserts a row into `orbit_tasks` in the same transaction and sends `NOTIFY orbit_tasks`. Built-in tasks (the HTTP adapter) and child workflows are not queued: the owner runs them itself.
+
+A worker polls any server. That server claims the oldest row matching the worker's contracts and `using` language:
+
+```sql
+WITH c AS (SELECT id FROM orbit_tasks WHERE state = 'queued' AND (task_name, contract_version) IN (...)
+           AND (language IS NULL OR language = 'any' OR language = $runtime)
+           ORDER BY enqueued_ms, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+UPDATE orbit_tasks t SET state = 'claimed', token = ... FROM c WHERE t.id = c.id
+```
+
+`SKIP LOCKED` lets servers claim different rows at the same time without waiting for each other. In the same transaction, the claiming server checks the owner. If it owns the execution itself, it records `StepDispatched` right after the claim; if it dies in between, the server that takes the execution over puts the task back on the queue. Otherwise it writes a `dispatched` entry into the owner's inbox, so that the owner records `StepDispatched` with the worker id and session, and the claiming server returns the task to the worker at once. Task tokens have the form `<execution id>/<uuid>`, so any server can tell which execution a result belongs to.
+
+Long polls wake up on `NOTIFY orbit_tasks`; every second they also look again, in case a notification was missed.
+
+When the owner no longer needs an attempt (it timed out, the execution is being cancelled or failed, the step was redelivered), it marks the row `cancelled` in the same transaction. The next heartbeat of the worker's session, on whichever server, returns that token in its `cancel` list, once, as on a single server.
+
+### Inbox
+
+A command for an execution that another server owns is written to `orbit_inbox` and announced with `NOTIFY orbit_inbox` to the owner:
+
+| Kind | Sent when | Applied by the owner as |
+|---|---|---|
+| `dispatched` | A server claimed a task of the execution. | `StepDispatched`, if the unit still waits for exactly that offer; otherwise ignored, and the worker is told to cancel. |
+| `complete`, `fail` | A worker reported a result through a server that does not own the execution. | `POST /v1/tasks/complete` or `fail`, as on one server. |
+| `uncertain` | A worker unregistered while holding a task. | `StepAttemptUncertain` and redelivery. |
+| `signal`, `cancel` | A client sent a signal or a cancellation to a server that does not own the execution. | As on one server; the reply goes back to the waiting server. |
+
+The owner applies its entries in `seq` order, through the same engine methods a request would use, and deletes each entry in the same transaction as the events it causes. Ordering matters for one case: a worker that is fast enough reports its result before the owner has recorded the dispatch. Both entries are in the inbox, the dispatch first, so the result finds its token.
+
+A signal or cancellation that reaches the wrong server is validated there first: the execution must exist and be running, the signal must be declared and its payload valid. Errors such as `404 UNKNOWN_SIGNAL`, `409 EXECUTION_FINISHED` or `422 SIGNAL_PAYLOAD_INVALID` are answered at once, exactly as on one server. A valid one goes to the owner's inbox, and the receiving server waits up to 10 seconds for the owner's reply, so the response carries the signal's `seq` and the cancelled execution's state as usual.
+
+Starting an execution needs no inbox: the server that receives the request owns the new execution. Reads (`GET` executions, history, lists, queries, `wait`) work on every server from the database; `wait` wakes on `NOTIFY orbit_done`.
+
+### Worker sessions
+
+Sessions are stored in `orbit_sessions`, so a session registered through one server works through all of them. A load balancer can send every request of a worker to a different server. When a server dies, its workers' polls fail, the SDK retries through the load balancer and reaches another server with the same session: no new registration, and the tasks the worker is running stay in flight. Their results reach the new owner through the inbox.
+
+Servers write the sessions' last contact to the database every 250 ms, and owners read it for the sessions holding their attempts every 500 ms. A worker that goes silent is declared lost one `--session-timeout` after its last contact, plus about one second, and its attempts are redelivered with the same idempotency key.
+
+### Failure handling
+
+These logs come from the setup of the end-to-end test `SharedCluster`: three servers with `--session-timeout 3 --node-timeout 3`, a round-robin proxy that sends each new connection to the next server answering `200` on `/v1/ready`, and the Python and TypeScript example workers. `node-2` owns two orders whose charge takes 3 seconds; it is killed with `SIGKILL` while both charges run.
+
+```console
+# test driver
+KILL node-2 at 2026-11-15T16:33:26.037Z
+
+# Python worker: its polls through node-2 break; it retries through the proxy
+2026-11-15 16:33:26,041 WARNING orbit poll failed: cannot reach ORBIT runtime at http://127.0.0.1:44679: Remote end closed connection without response; retrying in 0.2s
+
+# node-3, one node timeout later
+2026-11-15T16:33:29.189807Z  WARN orbit_runtime::shared: shared: taking over executions of a node that stopped heartbeating from=node-2 executions=2
+2026-11-15T16:33:29.192739Z  INFO orbit_runtime::engine: shared: took ownership of executions executions=2 in_flight=2 from=node-2
+2026-11-15T16:33:29.244878Z  INFO orbit_runtime::engine: execution completed execution_id=sh-D91
+2026-11-15T16:33:29.260564Z  INFO orbit_runtime::engine: execution completed execution_id=sh-D90
+```
+
+The charges finished on the worker at about 16:33:29.0, while `node-2` was dead. The worker reported through the other servers, which stored the results in `node-2`'s inbox; `node-3` applied them right after the takeover. The charge's history shows one dispatch and one success:
+
+```text
+seq 12  16:33:25.919  StepScheduled   process_payment
+seq 13  16:33:25.986  StepDispatched  process_payment  worker_session=3ed3dc41-ffb6-4453-a1fa-cfe24fce9f6f
+seq 14  16:33:29.194  StepSucceeded   process_payment
+```
+
+When the worker dies together with the server, the new owner redelivers the attempt one session timeout after the worker's last contact (test `test_c_kill_a_node_and_a_worker_mid_run`; the Python worker was killed with the server and started again):
+
+```console
+# node-2
+2026-11-15T16:26:03.423315Z  WARN orbit_runtime::shared: shared: taking over executions of a node that stopped heartbeating from=node-3 executions=1
+2026-11-15T16:26:03.424848Z  INFO orbit_runtime::engine: shared: took ownership of executions executions=1 in_flight=1 from=node-3
+2026-11-15T16:26:03.676284Z  WARN orbit_runtime::engine: attempt outcome uncertain; redelivering execution_id=sh-SH-C91 step=process_payment attempt=1 reason=worker `orders-python` stopped responding
+
+# restarted Python worker
+2026-11-15 16:26:03,690 INFO orbit executing {"execution_id": "sh-SH-C91", "step": "process_payment", "attempt": 1, "task": "payments.charge", "redelivery": true}
+```
+
+| Time after the kill | What happens |
+|---|---|
+| 0 s | The server's connections close. Workers' polls and result reports through it fail, and the SDKs retry; the proxy sends the retries to the other servers. The workers' sessions are in the database, so the other servers accept them. |
+| until `--node-timeout` | The dead server's executions wait: nobody ticks them or records their results. Results reported meanwhile are stored in its inbox. Executions owned by the other servers continue. |
+| `--node-timeout` | The other servers see the stale heartbeat, take over the dead server's executions (spread by rendezvous hashing), rebuild them from history and apply the waiting inbox entries. |
+| next result | Results of attempts that were in flight are accepted by the new owner: their tokens are in the history it rebuilt. |
+| `--node-timeout` + `--session-timeout` | An attempt the dead server handed out is redelivered if its result has not arrived, because the worker may never have received it. A late result of the first attempt is still accepted. |
+| one `--session-timeout` after a worker's last contact | Attempts of workers that died too are uncertain and redelivered (`StepAttemptUncertain`, `redelivery: true`). |
+
+| Failure | What happens |
+|---|---|
+| A server crashes or is killed | As above: about `--node-timeout` until its executions continue elsewhere. Committed events are kept; an uncommitted request is lost and the client gets a connection error; retry it (with an `execution_id` for starts). |
+| A server stops gracefully | Its executions are taken over within about a second. |
+| A server pauses (stop-the-world, frozen VM) longer than `--node-timeout` | Its executions are taken over. When it resumes, its appends fail with `fenced:`; it drops those executions from memory and continues with the ones it still owns. |
+| A server loses the database | It cannot heartbeat; after `--node-timeout` its `/v1/ready` answers `503` and the others take over. When it reconnects, it compares its executions with `orbit_owners` and drops those it lost. |
+| A worker dies | Its attempts are redelivered after the session timeout, by their owners, as on one server. |
+| PostgreSQL fails over | All servers reconnect to the new primary and continue. |
+
+### Load balancer configuration
+
+Every live server accepts every request, so balance over all of them and health-check `GET /v1/ready`: it answers `200` on a live server and `503` while a server resumes its executions at startup, cannot write its heartbeat, or shares its node id with another running server. Keep `/v1/health` for liveness.
+
+Sessions are shared, so no stickiness is needed. Long polls and waits last up to 60 and 300 seconds; set the backend timeout above that.
+
+HAProxy:
+
+```text
+backend orbit
+    mode http
+    balance roundrobin
+    option httpchk GET /v1/ready
+    http-check expect status 200
+    default-server inter 1s fall 2 rise 1
+    retry-on conn-failure
+    server orbit-0 orbit-0.orbit.internal:7233 check
+    server orbit-1 orbit-1.orbit.internal:7233 check
+    server orbit-2 orbit-2.orbit.internal:7233 check
+    timeout server 330s
+```
+
+nginx:
+
+```nginx
+upstream orbit {
+    server orbit-0.orbit.internal:7233 max_fails=1 fail_timeout=2s;
+    server orbit-1.orbit.internal:7233 max_fails=1 fail_timeout=2s;
+    server orbit-2.orbit.internal:7233 max_fails=1 fail_timeout=2s;
+}
+server {
+    listen 7233;
+    location / {
+        proxy_pass http://orbit;
+        proxy_next_upstream error timeout;
+        proxy_read_timeout 330s;
+    }
+}
+```
+
+Do not add `non_idempotent` to `proxy_next_upstream` in shared mode: a request that reached a server that died may have been applied.
+
+On Kubernetes, use a `Deployment` or `StatefulSet` with several replicas, `--node-id` from the pod name (`ORBIT_NODE_ID` from `metadata.name`), `ORBIT_CLUSTER_MODE=shared`, and the readiness probe on `/v1/ready` from [Kubernetes](#kubernetes). The `Service` balances over all ready pods.
+
+### Health fields
+
+```console
+$ curl -s http://127.0.0.1:46825/v1/health
+{"status":"ok","api_version":"orbit-api/1","runtime_version":"0.3.0","ir_versions":["orbit-ir/1","orbit-ir/2"],"active_executions":0,"worker_sessions":2,"role":"shared","node_id":"node-1","term":null,"leader":null,"owned_executions":0,"tasks_claimed":18,"nodes":[{"node_id":"node-1","addr":"http://127.0.0.1:46825","live":true,"heartbeat_age_ms":2,"owned_executions":0},{"node_id":"node-3","addr":"http://127.0.0.1:47377","live":true,"heartbeat_age_ms":248,"owned_executions":0}]}
+$ curl -s http://127.0.0.1:46825/v1/ready
+{"role":"shared","node_id":"node-1","term":null,"leader":null,"owned_executions":0,"tasks_claimed":0,"nodes":[{"node_id":"node-1","addr":"http://127.0.0.1:46825","live":true,"heartbeat_age_ms":1,"owned_executions":0},{"node_id":"node-2","addr":"http://127.0.0.1:36959","live":true,"heartbeat_age_ms":709,"owned_executions":0},{"node_id":"node-3","addr":"http://127.0.0.1:47377","live":true,"heartbeat_age_ms":274,"owned_executions":0}],"ready":true}
+```
+
+The first response was taken after `node-2` was killed: it is no longer listed, because it is not live and owns nothing.
+
+| Field | Meaning |
+|---|---|
+| `role` | `shared`. |
+| `node_id` | This server's `--node-id`. |
+| `term`, `leader` | Always `null` in shared mode. |
+| `active_executions`, `owned_executions` | Running executions this server owns. |
+| `tasks_claimed` | Tasks this server handed to workers since it started. |
+| `nodes` | Every server that is live or still owns executions, with `addr`, `live`, `heartbeat_age_ms` and `owned_executions`. |
+
+Metrics (`/v1/metrics`) stay per server: each counts the events it committed and the executions it owns. Sum them across servers in your monitoring.
+
+### Throughput
+
+These numbers were measured on the machine this page was written on, so read them as the shape of the scaling, not as capacity: 4 vCPUs, PostgreSQL 16 on the same machine with default settings (`synchronous_commit = on`), a release build, and every server, worker and client sharing those 4 CPUs and one disk. The workload is the end-to-end setup: `OrderProcessing` (six worker tasks per order) with the Python and TypeScript example workers (concurrency 8 each), 600 orders started by 64 concurrent clients that each wait for their order to complete, and shared servers behind the round-robin proxy.
+
+| Servers | Worker processes | Orders per second |
+|---|---|---|
+| 1, single server (no `--cluster`) | 1 Python, 1 TypeScript | 37.2, 38.2 |
+| 1, single server (no `--cluster`) | 2 Python, 2 TypeScript | 32.6 |
+| 1, shared mode | 1 Python, 1 TypeScript | 28.4, 29.9 |
+| 2, shared mode | 1 Python, 1 TypeScript | 37.3 |
+| 3, shared mode | 1 Python, 1 TypeScript | 42.6, 41.4 |
+| 3, shared mode | 2 Python, 2 TypeScript | 42.6 |
+
+Two runs of the same configuration are listed where there were two. What they show:
+
+- One shared server is about 25% slower than a single server: every task also writes a queue row, a claim and an ownership check.
+- Throughput grows with the number of shared servers, by about 30% for the second and 10% for the third here, where all of them compete for the same CPUs and the same PostgreSQL. Three shared servers did about 10% more than one single server.
+- More worker processes did not help: the servers and PostgreSQL were the limit, not the workers.
+
+On separate machines the servers do not compete for CPU, and PostgreSQL's commit rate becomes the limit: each task commits its dispatch and its result, as on one server, plus the claim.
+
+### Limits
+
+- **PostgreSQL only, and PostgreSQL is the bottleneck.** Every dispatch, result and heartbeat is a database round trip, as on one server, plus the queue and inbox writes. Adding servers adds CPU for the engines and connections for workers; it does not add database capacity.
+- **Failover of an execution waits for `--node-timeout`.** A lower value detects dead servers faster but turns long pauses into takeovers; each server must be able to write its heartbeat within it.
+- **A server that dies can cause redeliveries.** Attempts it handed out whose results do not arrive within `--node-timeout` plus `--session-timeout` are redelivered, even if the worker is still running them. Idempotency keys make this safe, as for any redelivery.
+- **Clocks.** Liveness uses the database clock, but timers, retries and timeouts use the owner's clock. Keep server clocks synchronized.
+- **Limits are per server.** `--max-active-executions` limits the executions each server owns.
+- **One owner per execution tree.** An execution and its child workflows run on one server. A single very large execution does not spread.
+- **Node ids must be unique.** Two running processes with the same `--node-id` are refused or stop serving; they would otherwise take each other's executions.
+- **No mixed modes.** Do not run `standby` and `shared` servers, or servers without `--cluster`, on the same database.
+- **Version skew.** During a rolling upgrade, servers of both versions run at once. Upgrade one server at a time, and do not roll back to a version without shared mode while executions are owned in `orbit_owners`.
+
 ## See also
 
 - [Running the server](server.md)
 - [Storage](storage.md#cluster-table)
+- [Storage: shared-mode tables](storage.md#shared-mode-tables)
 - [Deployment](deployment.md#kubernetes-with-two-replicas)
 - [Delivery guarantees](guarantees.md)
 - [HTTP API: GET /v1/ready](../reference/http-api.md#get-v1ready)

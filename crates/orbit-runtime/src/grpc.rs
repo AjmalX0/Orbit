@@ -220,9 +220,8 @@ impl WorkerService for GrpcWorkers {
             let notified = self.state.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(t) = engine(&self.state)
-                .poll(&r.worker_session_id)
-                .map_err(status)?
+            if let Some(t) =
+                crate::shared::poll(&self.state, &r.worker_session_id).map_err(status)?
             {
                 return Ok(Response::new(pb::ExecuteTaskRequest {
                     token: t.token,

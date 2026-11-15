@@ -33,6 +33,12 @@ pub enum PgMode {
     /// Every history append verifies, in its own transaction, that the
     /// cluster term is still this one, so a deposed leader cannot write.
     Fenced(i64),
+    /// Shared mode (`--cluster-mode shared`, see `crate::shared`): every node
+    /// writes, but only to the executions it owns. Appends go through
+    /// [`PgStore::append_shared`], which checks the execution's ownership
+    /// epoch; no execution counts as active at open, because a node loads
+    /// the executions it owns or takes over explicitly.
+    Shared,
 }
 
 /// Table holding the cluster's leadership term (created by `crate::cluster`).
@@ -104,6 +110,28 @@ fn connect_client(url: &str) -> Result<Client> {
     Ok(client)
 }
 
+/// Like [`connect_client`], with the schema created under an advisory lock:
+/// shared-mode servers usually start together, and concurrent
+/// `CREATE TABLE IF NOT EXISTS` statements can fail.
+fn connect_client_serialized(url: &str) -> Result<Client> {
+    let mut client = Client::connect(url, tls()?)?;
+    let mut tx = client.transaction()?;
+    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&BASE_SCHEMA_LOCK_KEY])?;
+    tx.batch_execute(SCHEMA)?;
+    if tx
+        .query_one("SELECT COUNT(*) FROM schema_version", &[])?
+        .get::<_, i64>(0)
+        == 0
+    {
+        tx.execute("INSERT INTO schema_version (version) VALUES (1)", &[])?;
+    }
+    tx.commit()?;
+    Ok(client)
+}
+
+/// Advisory lock key serialising creation of the base schema (shared mode).
+const BASE_SCHEMA_LOCK_KEY: i64 = 0x6f72_6269_7473_6362;
+
 fn bad_payload(e: serde_json::Error) -> StoreError {
     StoreError(format!("postgres: unreadable event payload: {e}"))
 }
@@ -121,7 +149,11 @@ impl PgStore {
         std::thread::Builder::new()
             .name("orbit-postgres".into())
             .spawn(move || {
-                let mut client = match connect_client(&url) {
+                let open = |url: &str| match mode {
+                    PgMode::Shared => connect_client_serialized(url),
+                    _ => connect_client(url),
+                };
+                let mut client = match open(&url) {
                     Ok(c) => {
                         let _ = ready_tx.send(Ok(()));
                         c
@@ -133,7 +165,7 @@ impl PgStore {
                 };
                 for job in rx {
                     if client.is_closed() {
-                        match connect_client(&url) {
+                        match open(&url) {
                             Ok(c) => {
                                 tracing::warn!("reconnected to PostgreSQL");
                                 client = c;
@@ -151,7 +183,7 @@ impl PgStore {
         Ok(PgStore { jobs, mode })
     }
 
-    fn run<T: Send + 'static>(
+    pub(crate) fn run<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Client) -> Result<T> + Send + 'static,
     ) -> Result<T> {
@@ -238,6 +270,12 @@ impl PgStore {
             PgMode::ReadWrite => None,
             PgMode::ReadOnly => return Err(read_only()),
             PgMode::Fenced(term) => Some(term),
+            PgMode::Shared => {
+                return Err(StoreError(
+                    "shared mode: history appends must carry the execution's ownership epoch"
+                        .into(),
+                ))
+            }
         };
         let rows: Vec<(i64, &'static str, Option<String>, String, i64)> = events
             .iter()
@@ -319,7 +357,7 @@ impl PgStore {
     }
 
     pub fn active_execution_ids(&self) -> Result<Vec<String>> {
-        if self.mode == PgMode::ReadOnly {
+        if matches!(self.mode, PgMode::ReadOnly | PgMode::Shared) {
             return Ok(vec![]);
         }
         self.run(|c| {
@@ -418,6 +456,279 @@ impl PgStore {
                 last_seen_ms: r.get::<_, i64>(5) as u64,
             })
             .collect())
+        })
+    }
+}
+
+// ------------------------------------------------------------- shared mode
+
+/// Database time in milliseconds. Shared mode measures node heartbeats and
+/// worker session liveness with it, so clock differences between servers do
+/// not decide who is alive.
+pub(crate) const NOW_MS: &str = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
+/// Tables of shared mode (created by `crate::shared`). See
+/// `docs/src/runtime/storage.md` for what each column means.
+pub(crate) const SHARED_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS orbit_nodes (
+    node_id TEXT PRIMARY KEY,
+    incarnation TEXT NOT NULL,
+    addr TEXT,
+    heartbeat_ms BIGINT NOT NULL,
+    started_ms BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS orbit_owners (
+    execution_id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    epoch BIGINT NOT NULL,
+    since_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orbit_owners_node ON orbit_owners(node_id);
+CREATE INDEX IF NOT EXISTS idx_orbit_owners_root ON orbit_owners(root_id);
+CREATE TABLE IF NOT EXISTS orbit_tasks (
+    id BIGSERIAL PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    unit_key TEXT NOT NULL,
+    attempt BIGINT NOT NULL,
+    offer BIGINT NOT NULL,
+    task_name TEXT NOT NULL,
+    contract_version TEXT NOT NULL,
+    language TEXT,
+    payload TEXT NOT NULL,
+    enqueued_ms BIGINT NOT NULL,
+    state TEXT NOT NULL,
+    token TEXT,
+    claimed_by TEXT,
+    claimed_inc TEXT,
+    claimed_session TEXT,
+    claimed_worker TEXT,
+    claimed_ms BIGINT,
+    updated_ms BIGINT NOT NULL,
+    UNIQUE (execution_id, unit_key, attempt, offer)
+);
+CREATE INDEX IF NOT EXISTS idx_orbit_tasks_queued ON orbit_tasks(task_name, enqueued_ms) WHERE state = 'queued';
+CREATE INDEX IF NOT EXISTS idx_orbit_tasks_token ON orbit_tasks(token);
+CREATE INDEX IF NOT EXISTS idx_orbit_tasks_session ON orbit_tasks(claimed_session);
+CREATE TABLE IF NOT EXISTS orbit_inbox (
+    seq BIGSERIAL PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    token TEXT,
+    payload TEXT NOT NULL,
+    created_ms BIGINT NOT NULL,
+    done_ms BIGINT,
+    result TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_orbit_inbox_execution ON orbit_inbox(execution_id, seq);
+CREATE TABLE IF NOT EXISTS orbit_sessions (
+    session_id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    contracts TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    registered_ms BIGINT NOT NULL,
+    last_seen_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orbit_sessions_worker ON orbit_sessions(worker_id);
+"#;
+
+/// A worker task to put on the shared queue (one row per offer of a unit).
+#[derive(Debug, Clone)]
+pub(crate) struct TaskOffer {
+    pub unit_key: String,
+    pub attempt: i64,
+    /// The unit's dispatch count when it was scheduled: together with the
+    /// attempt it identifies this offer, so a claim of an older offer of the
+    /// same unit is recognised as stale.
+    pub offer: i64,
+    pub task_name: String,
+    pub contract_version: String,
+    pub language: Option<String>,
+    /// The task assignment without token and deadline (JSON).
+    pub payload: String,
+    pub enqueued_ms: i64,
+}
+
+/// Queue rows of a unit to withdraw: every queued or claimed row of the unit
+/// except the offer in `keep` (attempt, offer) becomes `cancelled`, which
+/// tells the worker holding it to stop at its next heartbeat.
+#[derive(Debug, Clone)]
+pub(crate) struct UnitSync {
+    pub unit_key: String,
+    pub keep: Option<(i64, i64)>,
+}
+
+/// Everything shared mode writes in the same transaction as a history append.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SharedAppend {
+    pub node_id: String,
+    /// The ownership epoch this node holds for the execution; `None` for a
+    /// new execution, whose ownership row is created at epoch 1.
+    pub epoch: Option<i64>,
+    pub parent: Option<String>,
+    pub offers: Vec<TaskOffer>,
+    pub syncs: Vec<UnitSync>,
+    /// Tokens whose result arrived: their queue rows become `done`.
+    pub done_tokens: Vec<String>,
+    /// Inbox entries applied by this append: (seq, reply). Entries without a
+    /// reply are deleted; the others are marked done with the reply.
+    pub consumed: Vec<(i64, Option<String>)>,
+    /// Set when the execution reaches a terminal status: the reply recorded
+    /// for commands still waiting in its inbox.
+    pub finished_reply: Option<String>,
+}
+
+impl PgStore {
+    /// Shared-mode append: checks that this node still owns the execution at
+    /// its epoch (`SELECT ... FOR SHARE`, the same pattern as the cluster
+    /// term), then writes the events, the projection and the queue and inbox
+    /// changes in one transaction.
+    pub(crate) fn append_shared(
+        &mut self,
+        state: &ExecutionState,
+        events: &[HistoryEvent],
+        ext: SharedAppend,
+    ) -> Result<()> {
+        if self.mode != PgMode::Shared {
+            return Err(StoreError("append_shared needs a shared-mode store".into()));
+        }
+        let rows: Vec<(i64, &'static str, Option<String>, String, i64)> = events
+            .iter()
+            .map(|h| {
+                (
+                    h.seq as i64,
+                    h.event.name(),
+                    h.event.step().map(str::to_string),
+                    serde_json::to_string(&h.event).expect("event serialises"),
+                    h.timestamp_ms as i64,
+                )
+            })
+            .collect();
+        let id = state.id.clone();
+        let projection = (
+            state.workflow.clone(),
+            state.version.clone(),
+            state.definition_hash.clone(),
+            state.status.as_str(),
+            state.created_at_ms as i64,
+            state.updated_at_ms as i64,
+            state.last_seq as i64,
+        );
+        let now = state.updated_at_ms as i64;
+        self.run(move |c| {
+            let mut tx = c.transaction()?;
+            let node = &ext.node_id;
+            match ext.epoch {
+                Some(epoch) => {
+                    // FOR SHARE: a takeover's epoch increment waits for this
+                    // transaction, and this read sees any increment committed first.
+                    let owner: Option<(String, i64)> = tx
+                        .query_opt(
+                            "SELECT node_id, epoch FROM orbit_owners WHERE execution_id = $1 FOR SHARE",
+                            &[&id],
+                        )?
+                        .map(|r| (r.get(0), r.get(1)));
+                    if owner.as_ref() != Some(&(node.clone(), epoch)) {
+                        return Err(StoreError(match owner {
+                            Some((n, e)) => format!(
+                                "fenced: execution `{id}` is owned by node `{n}` at epoch {e}; this node held epoch {epoch}"
+                            ),
+                            None => format!(
+                                "fenced: execution `{id}` has no owner any more; this node held epoch {epoch}"
+                            ),
+                        }));
+                    }
+                }
+                None => {
+                    let created = tx.execute(
+                        &format!(
+                            "INSERT INTO orbit_owners (execution_id, root_id, node_id, epoch, since_ms)
+                             VALUES ($1, COALESCE((SELECT root_id FROM orbit_owners WHERE execution_id = $2), $1), $3, 1, {NOW_MS})
+                             ON CONFLICT DO NOTHING"
+                        ),
+                        &[&id, &ext.parent, node],
+                    )?;
+                    if created == 0 {
+                        return Err(StoreError(format!(
+                            "fenced: execution `{id}` was created by another server at the same time"
+                        )));
+                    }
+                }
+            }
+            let ins = tx.prepare(
+                "INSERT INTO execution_events (execution_id, seq, event_type, step, payload, timestamp_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )?;
+            for (seq, ty, step, payload, ts) in &rows {
+                tx.execute(&ins, &[&id, seq, ty, step, payload, ts])?;
+            }
+            let (workflow, version, hash, status, created, updated, last_seq) = projection;
+            tx.execute(
+                "INSERT INTO workflow_executions (execution_id, workflow, version, definition_hash, status, created_at_ms, updated_at_ms, last_seq)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (execution_id) DO UPDATE SET status = EXCLUDED.status, updated_at_ms = EXCLUDED.updated_at_ms, last_seq = EXCLUDED.last_seq",
+                &[&id, &workflow, &version, &hash, &status, &created, &updated, &last_seq],
+            )?;
+            if !ext.done_tokens.is_empty() {
+                tx.execute(
+                    "UPDATE orbit_tasks SET state = 'done', updated_ms = $2 WHERE token = ANY($1) AND state IN ('claimed', 'cancelled')",
+                    &[&ext.done_tokens, &now],
+                )?;
+            }
+            if !ext.offers.is_empty() {
+                let ins = tx.prepare(
+                    "INSERT INTO orbit_tasks (execution_id, unit_key, attempt, offer, task_name, contract_version, language, payload, enqueued_ms, state, updated_ms)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10)
+                     ON CONFLICT (execution_id, unit_key, attempt, offer) DO NOTHING",
+                )?;
+                for o in &ext.offers {
+                    tx.execute(
+                        &ins,
+                        &[&id, &o.unit_key, &o.attempt, &o.offer, &o.task_name, &o.contract_version, &o.language, &o.payload, &o.enqueued_ms, &now],
+                    )?;
+                }
+            }
+            if !ext.syncs.is_empty() {
+                let upd = tx.prepare(
+                    "UPDATE orbit_tasks SET state = 'cancelled', updated_ms = $5
+                     WHERE execution_id = $1 AND unit_key = $2 AND state IN ('queued', 'claimed') AND NOT (attempt = $3 AND offer = $4)",
+                )?;
+                for s in &ext.syncs {
+                    let (a, o) = s.keep.unwrap_or((-1, -1));
+                    tx.execute(&upd, &[&id, &s.unit_key, &a, &o, &now])?;
+                }
+            }
+            for (seq, reply) in &ext.consumed {
+                match reply {
+                    None => tx.execute("DELETE FROM orbit_inbox WHERE seq = $1", &[seq])?,
+                    Some(r) => tx.execute(
+                        "UPDATE orbit_inbox SET done_ms = $2, result = $3 WHERE seq = $1",
+                        &[seq, &now, r],
+                    )?,
+                };
+            }
+            if let Some(reply) = &ext.finished_reply {
+                tx.execute(
+                    "UPDATE orbit_tasks SET state = 'cancelled', updated_ms = $2 WHERE execution_id = $1 AND state IN ('queued', 'claimed')",
+                    &[&id, &now],
+                )?;
+                tx.execute("DELETE FROM orbit_owners WHERE execution_id = $1", &[&id])?;
+                tx.execute(
+                    "UPDATE orbit_inbox SET done_ms = $2, result = $3 WHERE execution_id = $1 AND done_ms IS NULL AND kind IN ('signal', 'cancel')",
+                    &[&id, &now, reply],
+                )?;
+                tx.execute(
+                    "DELETE FROM orbit_inbox WHERE execution_id = $1 AND done_ms IS NULL",
+                    &[&id],
+                )?;
+                tx.execute("SELECT pg_notify('orbit_done', $1)", &[&id])?;
+            }
+            if !ext.offers.is_empty() {
+                tx.execute("SELECT pg_notify('orbit_tasks', '')", &[])?;
+            }
+            tx.commit()?;
+            Ok(())
         })
     }
 }
