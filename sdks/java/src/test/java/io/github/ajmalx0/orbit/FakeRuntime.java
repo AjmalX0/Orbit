@@ -30,6 +30,7 @@ final class FakeRuntime implements AutoCloseable {
     final Map<String, JsonNode> failed = new HashMap<>();
     List<String> cancel = new ArrayList<>();
     String authHeader;
+    String peer; // subject of the client certificate (HTTPS with client auth only)
     JsonNode registerBody;
 
     private final HttpServer server;
@@ -71,6 +72,13 @@ final class FakeRuntime implements AutoCloseable {
         String path = ex.getRequestURI().getPath();
         synchronized (this) {
             authHeader = ex.getRequestHeaders().getFirst("authorization");
+            if (ex instanceof com.sun.net.httpserver.HttpsExchange https) {
+                try {
+                    peer = https.getSSLSession().getPeerPrincipal().getName();
+                } catch (javax.net.ssl.SSLPeerUnverifiedException e) {
+                    peer = null;
+                }
+            }
         }
         switch (path) {
             case "/v1/workers/register" -> {
