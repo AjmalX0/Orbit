@@ -234,6 +234,10 @@ struct ServerArgs {
     db: String,
     #[arg(long, env = "ORBIT_ADDR", default_value = "127.0.0.1:7233")]
     addr: std::net::SocketAddr,
+    /// Export OpenTelemetry traces (OTLP/HTTP, JSON) to this collector, e.g.
+    /// http://localhost:4318. Honours OTEL_EXPORTER_OTLP_HEADERS and OTEL_SERVICE_NAME.
+    #[arg(long, env = "OTEL_EXPORTER_OTLP_ENDPOINT")]
+    otlp_endpoint: Option<String>,
     /// Also serve the gRPC binding of the worker protocol on this address
     /// (same credentials and TLS settings as the HTTP API).
     #[arg(long, env = "ORBIT_GRPC_ADDR")]
@@ -767,6 +771,10 @@ fn server(mut args: ServerArgs) -> Res {
     let store_backend = store.backend();
     let engine = orbit_runtime::Engine::open(store, config, orbit_runtime::engine::system_clock())
         .map_err(|e| e.to_string())?;
+    let mut engine = engine;
+    if let Some(endpoint) = args.otlp_endpoint.as_deref().filter(|e| !e.is_empty()) {
+        engine.enable_telemetry(orbit_runtime::telemetry::TelemetryConfig::new(endpoint));
+    }
     tracing::info!(db = %db_label, backend = store_backend, http_adapter = args.enable_http_adapter, auth = args.token.is_some(), "starting ORBIT runtime");
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {

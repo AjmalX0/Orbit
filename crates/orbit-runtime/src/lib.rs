@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod model;
 pub mod server;
 pub mod store;
+pub mod telemetry;
 
 pub use engine::{Engine, EngineConfig, EngineError};
 pub use store::Store;

@@ -188,6 +188,7 @@ pub struct Engine {
     builtin_jobs: Vec<TaskAssignment>,
     pub metrics: Metrics,
     pub changed: Arc<tokio::sync::Notify>,
+    telemetry: Option<crate::telemetry::Exporter>,
 }
 
 fn semver_key(v: &str) -> (Vec<u64>, String) {
@@ -217,6 +218,7 @@ impl Engine {
             builtin_jobs: vec![],
             metrics: Metrics::default(),
             changed: Arc::new(tokio::sync::Notify::new()),
+            telemetry: None,
         };
         for ir in engine.store.definitions().map_err(EngineError::storage)? {
             engine.cache_definition(ir);
@@ -532,6 +534,11 @@ impl Engine {
         self.store
             .append(&state, &history)
             .map_err(EngineError::storage)?;
+        // Export spans only once the events are durable.
+        if let Some(t) = &self.telemetry {
+            let ctx = self.trace_context(&state);
+            t.export(crate::telemetry::spans_for(&state, &ctx, &history));
+        }
         for h in &history {
             self.metrics.observe(&h.event);
             if let Event::StepDispatched {
@@ -1306,6 +1313,40 @@ impl Engine {
 
     pub fn store_stats(&self) -> Result<Vec<(String, u64)>> {
         self.store.count_by_status().map_err(EngineError::storage)
+    }
+
+    /// Export OpenTelemetry traces of executions (see [`crate::telemetry`]).
+    pub fn enable_telemetry(&mut self, config: crate::telemetry::TelemetryConfig) {
+        tracing::info!(endpoint = %config.endpoint, service = %config.service_name, "exporting OpenTelemetry traces");
+        self.telemetry = Some(crate::telemetry::Exporter::start(config));
+    }
+
+    /// Trace of an execution: its own, or (for a child workflow) the trace of
+    /// its top-level ancestor, nested under the parent step's span.
+    fn trace_context(&self, state: &ExecutionState) -> crate::telemetry::TraceContext {
+        use crate::telemetry::{trace_id, unit_span_id, TraceContext};
+        let Some(parent) = &state.parent else {
+            return TraceContext {
+                trace_id: trace_id(&state.id),
+                parent_span_id: None,
+            };
+        };
+        let mut root = parent.execution_id.clone();
+        for _ in 0..64 {
+            let next = match self.active.get(&root) {
+                Some(s) => s.parent.clone(),
+                None => self.execution(&root).ok().and_then(|s| s.parent),
+            };
+            match next {
+                Some(p) => root = p.execution_id,
+                None => break,
+            }
+        }
+        TraceContext {
+            trace_id: trace_id(&root),
+            // Child workflow steps are dispatched exactly once.
+            parent_span_id: Some(unit_span_id(&parent.execution_id, &parent.step, 1)),
+        }
     }
 
     /// The worker id that owns a session, if the session exists.
