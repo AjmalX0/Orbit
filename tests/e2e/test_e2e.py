@@ -774,6 +774,7 @@ workflow Countdown {
     input { n: Int }
     output { done: Bool }
     step tick { compute { left: input.n - 1 } }
+    step rest { sleep 200ms after tick }
     continue_as_new when tick.left > 0 with { n: tick.left }
     return { done: true }
 }

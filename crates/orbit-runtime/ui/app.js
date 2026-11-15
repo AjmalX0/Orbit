@@ -941,6 +941,9 @@
         case 'StepCancelled': Object.assign(x, { status: 'CANCELLED', finished_at_ms: e.timestamp_ms }); break;
         case 'TimerStarted': Object.assign(x, { status: 'WAITING', wake_at_ms: e.fire_at_ms, scheduled_at_ms: x.scheduled_at_ms || e.timestamp_ms }); break;
         case 'SignalAwaitStarted': Object.assign(x, { status: 'WAITING', wake_at_ms: e.deadline_ms, scheduled_at_ms: x.scheduled_at_ms || e.timestamp_ms }); break;
+        // A timer that fired and a signal that was taken finish their step.
+        case 'TimerFired': Object.assign(x, { status: 'SUCCEEDED', finished_at_ms: e.timestamp_ms, wake_at_ms: undefined }); break;
+        case 'SignalDelivered': Object.assign(x, { status: 'SUCCEEDED', finished_at_ms: e.timestamp_ms, wake_at_ms: undefined }); break;
         default: break;
       }
     }
@@ -1438,7 +1441,7 @@
       try { r = await api('/v1/schedules'); } catch (e) { if (gen === view.gen) replace(body, errorNotice(e)); return; }
       if (gen !== view.gen) return;
       const rows = r.schedules.map((sc) => h('tr', { 'data-schedule': sc.schedule_id },
-        h('td', { class: 'id' }, link(schedHref(sc.schedule_id), sc.schedule_id)),
+        h('td', { class: 'id nowrap' }, link(schedHref(sc.schedule_id), sc.schedule_id)),
         h('td', null, link(wfHref(sc.workflow, sc.version), sc.workflow), h('span', { class: 'faint' }, ' ' + (sc.version || 'latest'))),
         h('td', { class: 'mono small' }, scheduleTiming(sc)),
         h('td', null, badge(scheduleState(sc), SCHED_CLASS)),

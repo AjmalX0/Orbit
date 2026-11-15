@@ -128,7 +128,7 @@ async function text(page, sel) { return (await page.textContent(sel, { timeout: 
     await page.waitForSelector('[data-test=graph] g.node[data-continue=true][data-status=SKIPPED]', { timeout: T });
     assert.match(await page.textContent('[data-test=graph] g.node[data-continue=true]'), /continue as newwhen tick\.left > 0/);
     assert.strictEqual(await page.locator('[data-test=graph] path[data-edge=next-run]').count(), 1, 'one edge back to the first step');
-    assert.match(await text(page, '[data-test=history] h2'), /History of run 3 \(4 events\)/);
+    assert.match(await text(page, '[data-test=history] h2'), /History of run 3 \(6 events\)/);
 
     step('an earlier run, from the run selector: CONTINUED_AS_NEW, its input and the next one');
     await page.selectOption('[data-test=run-select]', '1');
@@ -140,6 +140,9 @@ async function text(page, sel) { return (await page.textContent(sel, { timeout: 
     assert.deepStrictEqual(JSON.parse(await text(page, '[data-test=next-input] pre')), { n: 2 });
     await page.waitForSelector('[data-test=graph] g.node[data-continue=true][data-status=CONTINUED_AS_NEW]', { timeout: T });
     await page.waitForSelector('[data-test=graph] g.node[data-step=tick][data-status=SUCCEEDED]', { timeout: T });
+    // A sleep's TimerFired finishes its step in the rebuilt run too.
+    await page.waitForSelector('[data-test=graph] g.node[data-step=rest][data-status=SUCCEEDED]', { timeout: T });
+    await page.waitForSelector('[data-test=steps] tr[data-unit=rest] [data-status=SUCCEEDED]', { timeout: T });
     const nodeColour = await page.$eval('[data-test=graph] g.node[data-continue=true] rect', (e) => getComputedStyle(e).stroke);
     const doneColour = await page.$eval('[data-test=graph] g.node[data-step=tick] rect', (e) => getComputedStyle(e).stroke);
     assert.strictEqual(contColour, nodeColour, 'the badge and the graph node share the continued-as-new colour');
