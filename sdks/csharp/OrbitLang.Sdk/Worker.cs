@@ -63,6 +63,10 @@ public sealed class Worker : IDisposable
         Server = Server.TrimEnd('/');
         Token = Resolve(options.Token, "ORBIT_WORKER_TOKEN") ?? Resolve(null, "ORBIT_TOKEN");
         CaCertFile = Resolve(options.CaCertFile, "ORBIT_CA_CERT");
+        ClientCertificatePath = Resolve(options.ClientCertificatePath, "ORBIT_CLIENT_CERT");
+        ClientKeyPath = Resolve(options.ClientKeyPath, "ORBIT_CLIENT_KEY");
+        if (ClientKeyPath is not null && ClientCertificatePath is null)
+            throw new InvalidOperationException("a client key was given (ClientKeyPath / ORBIT_CLIENT_KEY) without a client certificate");
         WorkerId = string.IsNullOrEmpty(options.WorkerId)
             ? $"csharp-{Environment.MachineName}-{Environment.ProcessId}"
             : options.WorkerId;
@@ -82,6 +86,12 @@ public sealed class Worker : IDisposable
             var roots = LoadRoots(CaCertFile);
             handler.SslOptions.RemoteCertificateValidationCallback = (_, cert, chain, errors) => Validate(roots, cert, chain, errors);
         }
+        if (ClientCertificatePath is not null)
+        {
+            ClientCertificate = LoadClientCertificate(ClientCertificatePath, ClientKeyPath);
+            handler.SslOptions.ClientCertificates = new X509CertificateCollection { ClientCertificate };
+        }
+        Handler = handler;
         _http = new HttpClient(handler) { Timeout = PollWait + TimeSpan.FromSeconds(15) };
     }
 
@@ -103,6 +113,15 @@ public sealed class Worker : IDisposable
     internal string? Token { get; }
 
     internal string? CaCertFile { get; }
+
+    internal string? ClientCertificatePath { get; }
+
+    internal string? ClientKeyPath { get; }
+
+    /// <summary>The client certificate presented for mutual TLS, if configured.</summary>
+    public X509Certificate2? ClientCertificate { get; }
+
+    internal SocketsHttpHandler Handler { get; }
 
     private static string? Resolve(string? value, string env)
     {
@@ -539,6 +558,20 @@ public sealed class Worker : IDisposable
         return roots;
     }
 
+    /// <summary>
+    /// Loads a PEM certificate and its private key (from <paramref name="keyPath"/>, or from the
+    /// certificate file itself when it is null).
+    /// </summary>
+    internal static X509Certificate2 LoadClientCertificate(string certPath, string? keyPath)
+    {
+        using var pem = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+        if (!pem.HasPrivateKey) throw new InvalidOperationException($"no private key found for client certificate {certPath}");
+        // A key loaded from PEM is ephemeral. Some TLS stacks (SChannel on Windows, and some
+        // OpenSSL configurations on Linux) reject an ephemeral key during the handshake, so
+        // re-import it through PKCS#12, which works on every platform.
+        return new X509Certificate2(pem.Export(X509ContentType.Pkcs12));
+    }
+
     /// <summary>Accepts certificates trusted by the system or issued by one of <paramref name="roots"/>.</summary>
     internal static bool Validate(X509Certificate2Collection roots, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors)
     {
@@ -560,6 +593,7 @@ public sealed class Worker : IDisposable
     public void Dispose()
     {
         _http.Dispose();
+        ClientCertificate?.Dispose();
         _registerLock.Dispose();
     }
 }
