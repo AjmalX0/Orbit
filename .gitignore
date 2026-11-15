@@ -8,3 +8,5 @@ __pycache__/
 node_modules/
 sdks/typescript/dist/
 .orbit/
+sdks/java/target/
+examples/workers/java/target/
